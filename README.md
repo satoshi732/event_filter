@@ -125,7 +125,7 @@ Notes:
 - RPC reads use `Multicall3` batching for `name`, `symbol`, `decimals`, and `balanceOf`.
 - Contract `Total USD` is computed locally from token balances plus token USD prices gathered during the round.
 - `pancakeswap_price` controls the rate limiter for PancakeSwap token price API requests.
-- HTTPS cert/key paths auto-discover from the project `certs/` directory when the stored paths are blank or also point inside `certs/`. `server.crt` / `server.key` are preferred when present; otherwise the newest complete pair is used.
+- HTTPS cert/key paths auto-discover from the project `certs/` directory when the stored paths are blank or also point inside `certs/`. When a valid pair is auto-discovered, HTTPS is enabled automatically. `server.crt` / `server.key` are preferred when present; otherwise the newest complete pair is used.
 - Legacy `config.json` is only treated as a one-time migration source if the DB has no settings yet.
 
 ## Running

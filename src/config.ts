@@ -292,6 +292,7 @@ function discoverTlsPairFromCertsDir(): { certPath: string; keyPath: string } | 
 function resolveTlsPaths(rawCertPath: string | null | undefined, rawKeyPath: string | null | undefined): {
   tlsCertPath: string;
   tlsKeyPath: string;
+  autoDiscovered: boolean;
 } {
   const tlsCertPath = String(rawCertPath || '').trim();
   const tlsKeyPath = String(rawKeyPath || '').trim();
@@ -305,11 +306,16 @@ function resolveTlsPaths(rawCertPath: string | null | undefined, rawKeyPath: str
       return {
         tlsCertPath: discovered.certPath,
         tlsKeyPath: discovered.keyPath,
+        autoDiscovered: true,
       };
     }
   }
 
-  return { tlsCertPath, tlsKeyPath };
+  return {
+    tlsCertPath,
+    tlsKeyPath,
+    autoDiscovered: false,
+  };
 }
 
 function buildInfuraRpcUrls(chain: string, infuraKeys: string[]): string[] {
@@ -458,9 +464,10 @@ function seedRuntimeConfigIfNeeded(): void {
     appEntries.push({ key: 'auto_analysis.exclude_audited_tokens', value: '1' });
   }
   if (getAppSetting('web_security.auth_enabled') == null) {
-    appEntries.push({ key: 'web_security.https_enabled', value: '0' });
-    appEntries.push({ key: 'web_security.tls_cert_path', value: '' });
-    appEntries.push({ key: 'web_security.tls_key_path', value: '' });
+    const discoveredTls = discoverTlsPairFromCertsDir();
+    appEntries.push({ key: 'web_security.https_enabled', value: discoveredTls ? '1' : '0' });
+    appEntries.push({ key: 'web_security.tls_cert_path', value: discoveredTls?.certPath ?? '' });
+    appEntries.push({ key: 'web_security.tls_key_path', value: discoveredTls?.keyPath ?? '' });
   }
   if (appEntries.length) {
     setManyAppSettings(appEntries);
@@ -758,7 +765,7 @@ export function getWebSecurityConfig(): {
   const raw = ensureRuntimeCache().appConfig.web_security ?? {};
   const resolved = resolveTlsPaths(raw.tls_cert_path, raw.tls_key_path);
   return {
-    httpsEnabled: Boolean(raw.https_enabled ?? false),
+    httpsEnabled: Boolean(raw.https_enabled ?? false) || resolved.autoDiscovered,
     tlsCertPath: resolved.tlsCertPath,
     tlsKeyPath: resolved.tlsKeyPath,
   };

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <%- await include('../partials/head', { title: title || 'Sign In' }) %>
+  </head>
+  <body class="login-page">
+    <main class="login-shell">
+      <section class="login-card">
+        <div class="login-brand">
+          <div class="login-mark" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <div>
+            <p class="kicker">Secure Access</p>
+            <h1 class="hero-title login-title">Solana Mev Labs</h1>
+          </div>
+        </div>
+
+        <div class="login-badges" aria-label="Security context">
+          <span class="chip small ok">TLS Protected</span>
+          <span class="chip small plain">Server Access</span>
+          <span class="chip small plain">Session Sign-In</span>
+        </div>
+
+        <form id="login-form" class="login-form">
+          <input type="hidden" name="next" value="<%= next || '/' %>">
+          <label class="stack-label">
+            <span>Username</span>
+            <input name="username" type="text" autocomplete="username" required>
+          </label>
+          <label class="stack-label">
+            <span>Password</span>
+            <input name="password" type="password" autocomplete="current-password" required>
+          </label>
+          <button class="btn primary login-submit" type="submit">Sign In</button>
+          <p id="login-error" class="login-error" hidden></p>
+        </form>
+
+        <div class="login-footer">
+          <p class="muted">Authorized access only. Activity is intended for internal monitoring and review workflows.</p>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const form = document.getElementById('login-form');
+      const errorNode = document.getElementById('login-error');
+      form?.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        errorNode.hidden = true;
+        errorNode.textContent = '';
+        const submitButton = form.querySelector('button[type="submit"]');
+        if (submitButton) {
+          submitButton.disabled = true;
+          submitButton.textContent = 'Signing In...';
+        }
+        try {
+          const payload = Object.fromEntries(new FormData(form).entries());
+          const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            throw new Error(data.error || 'Sign-in failed');
+          }
+          window.location.assign(data.next || '/');
+        } catch (error) {
+          errorNode.hidden = false;
+          errorNode.textContent = error instanceof Error ? error.message : String(error);
+        } finally {
+          if (submitButton) {
+            submitButton.disabled = false;
+            submitButton.textContent = 'Sign In';
+          }
+        }
+      });
+    </script>
+  </body>
+</html>

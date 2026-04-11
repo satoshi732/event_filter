@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <%- await include('../partials/head', { title: title || 'Token List' }) %>
+  </head>
+  <body data-page="list">
+    <div class="page-shell">
+      <header class="scan-bar">
+        <div class="scan-controls">
+          <div class="control-row inline">
+            <label for="chainSelect">Chain</label>
+            <select id="chainSelect"></select>
+          </div>
+          <button id="runButton" class="run-button" type="button">Run Scan</button>
+          <div id="statusBadge" class="status-badge idle">Waiting</div>
+        </div>
+        <div class="bar-side">
+          <%- await include('../partials/sync-controls', { showRunMeta: true, runMetaText: 'No scan yet.' }) %>
+        </div>
+      </header>
+
+      <main class="single-panel">
+        <section class="panel token-panel">
+          <div class="panel-head compact">
+            <div id="tokenStats" class="panel-stat">0 tokens</div>
+          </div>
+
+          <div class="table-shell">
+            <table>
+              <thead id="tokenTableHead">
+              </thead>
+              <tbody id="tokenTableBody">
+                <tr>
+                  <td colspan="9" class="empty-row">No results.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/js/main.js"></script>
+  </body>
+</html>

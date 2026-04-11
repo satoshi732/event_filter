@@ -1,0 +1,12 @@
+node_modules/
+dist/
+data/
+logs/
+output/
+reports/
+certs/
+keys.json
+config.json
+user.json
+.env
+package-lock.json

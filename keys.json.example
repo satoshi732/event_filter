@@ -1,0 +1,56 @@
+{
+  "chainbase_keys": [
+    "your_key_1",
+    "your_key_2",
+    "your_key_3"
+  ],
+  "infura_keys": [
+    "your_infura_key_1",
+    "your_infura_key_2"
+  ],
+  "rpc": {
+    "ethereum": [
+      "https://eth.llamarpc.com",
+      "https://rpc.ankr.com/eth",
+      "https://cloudflare-eth.com"
+    ],
+    "bsc": [
+      "https://bsc-dataseed.binance.org",
+      "https://bsc-dataseed1.defibit.io",
+      "https://rpc.ankr.com/bsc"
+    ],
+    "polygon": [
+      "https://polygon-rpc.com",
+      "https://rpc.ankr.com/polygon"
+    ],
+    "arbitrum": [
+      "https://arb1.arbitrum.io/rpc",
+      "https://rpc.ankr.com/arbitrum"
+    ],
+    "optimism": [
+      "https://mainnet.optimism.io",
+      "https://rpc.ankr.com/optimism"
+    ],
+    "base": [
+      "https://mainnet.base.org",
+      "https://rpc.ankr.com/base"
+    ],
+    "avalanche": [
+      "https://api.avax.network/ext/bc/C/rpc",
+      "https://rpc.ankr.com/avalanche"
+    ]
+  },
+  "multicall3": {
+    "ethereum": "0xca11bde05977b3631167028862be2a173976ca11",
+    "bsc": "0xca11bde05977b3631167028862be2a173976ca11"
+  },
+  "pattern_sync": {
+    "host": "198.144.187.212",
+    "port": 5432,
+    "database": "postgres",
+    "user": "postgres",
+    "password": "replace-me",
+    "remote_name": "default",
+    "auto_pull": true
+  }
+}

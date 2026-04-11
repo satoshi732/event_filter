@@ -1,0 +1,245 @@
+import { getDb } from './core.js';
+
+export interface AppSettingRow {
+  key: string;
+  value: string;
+  updatedAt: string;
+}
+
+export interface ChainSettingRow {
+  chain: string;
+  blocksPerScan: number;
+  chainbaseKeys: string[];
+  rpcUrls: string[];
+  multicall3Address: string;
+  updatedAt: string;
+}
+
+export interface AiAuditProviderRow {
+  provider: string;
+  enabled: boolean;
+  position: number;
+  updatedAt: string;
+}
+
+export interface AiAuditModelRow {
+  id: number;
+  provider: string;
+  model: string;
+  enabled: boolean;
+  isDefault: boolean;
+  position: number;
+  updatedAt: string;
+}
+
+function parseJsonArray(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((value) => String(value || '').trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function stringifyJsonArray(values: string[]): string {
+  return JSON.stringify(
+    [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))],
+  );
+}
+
+export function listAppSettings(): AppSettingRow[] {
+  const rows = getDb().prepare(`
+    SELECT key, value, updated_at
+    FROM app_settings
+    ORDER BY key ASC
+  `).all() as Array<{ key: string; value: string; updated_at: string }>;
+  return rows.map((row) => ({
+    key: row.key,
+    value: row.value,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export function getAppSetting(key: string): string | null {
+  const row = getDb().prepare(`
+    SELECT value
+    FROM app_settings
+    WHERE key = ?
+    LIMIT 1
+  `).get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setAppSetting(key: string, value: string): void {
+  getDb().prepare(`
+    INSERT INTO app_settings (key, value, updated_at)
+    VALUES (?, ?, datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET
+      value = excluded.value,
+      updated_at = datetime('now')
+  `).run(key, value);
+}
+
+export function setManyAppSettings(entries: Array<{ key: string; value: string }>): void {
+  const run = getDb().transaction((items: Array<{ key: string; value: string }>) => {
+    const stmt = getDb().prepare(`
+      INSERT INTO app_settings (key, value, updated_at)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = datetime('now')
+    `);
+    for (const item of items) {
+      stmt.run(item.key, item.value);
+    }
+  });
+  run(entries);
+}
+
+export function listChainSettings(): ChainSettingRow[] {
+  const rows = getDb().prepare(`
+    SELECT chain, blocks_per_scan, chainbase_keys, rpc_urls, multicall3_address, updated_at
+    FROM chain_settings
+    ORDER BY chain ASC
+  `).all() as Array<{
+    chain: string;
+    blocks_per_scan: number;
+    chainbase_keys: string;
+    rpc_urls: string;
+    multicall3_address: string;
+    updated_at: string;
+  }>;
+  return rows.map((row) => ({
+    chain: row.chain,
+    blocksPerScan: row.blocks_per_scan,
+    chainbaseKeys: parseJsonArray(row.chainbase_keys),
+    rpcUrls: parseJsonArray(row.rpc_urls),
+    multicall3Address: row.multicall3_address,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export function upsertChainSettings(rows: Array<{
+  chain: string;
+  blocksPerScan: number;
+  chainbaseKeys: string[];
+  rpcUrls: string[];
+  multicall3Address: string;
+}>): void {
+  const run = getDb().transaction((entries: typeof rows) => {
+    const stmt = getDb().prepare(`
+      INSERT INTO chain_settings (
+        chain, blocks_per_scan, chainbase_keys, rpc_urls, multicall3_address, updated_at
+      ) VALUES (?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(chain) DO UPDATE SET
+        blocks_per_scan = excluded.blocks_per_scan,
+        chainbase_keys = excluded.chainbase_keys,
+        rpc_urls = excluded.rpc_urls,
+        multicall3_address = excluded.multicall3_address,
+        updated_at = datetime('now')
+    `);
+    for (const row of entries) {
+      stmt.run(
+        row.chain.toLowerCase(),
+        row.blocksPerScan,
+        stringifyJsonArray(row.chainbaseKeys),
+        stringifyJsonArray(row.rpcUrls),
+        row.multicall3Address.trim().toLowerCase(),
+      );
+    }
+  });
+  run(rows);
+}
+
+export function listAiAuditProviders(): AiAuditProviderRow[] {
+  const rows = getDb().prepare(`
+    SELECT provider, enabled, position, updated_at
+    FROM ai_audit_providers
+    ORDER BY position ASC, provider ASC
+  `).all() as Array<{
+    provider: string;
+    enabled: number;
+    position: number;
+    updated_at: string;
+  }>;
+  return rows.map((row) => ({
+    provider: row.provider,
+    enabled: Boolean(row.enabled),
+    position: row.position,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export function replaceAiAuditProviders(rows: Array<{
+  provider: string;
+  enabled: boolean;
+  position: number;
+}>): void {
+  const db = getDb();
+  const run = db.transaction((entries: typeof rows) => {
+    db.prepare(`DELETE FROM ai_audit_providers`).run();
+    const stmt = db.prepare(`
+      INSERT INTO ai_audit_providers (provider, enabled, position, updated_at)
+      VALUES (?, ?, ?, datetime('now'))
+    `);
+    for (const row of entries) {
+      const provider = row.provider.trim().toLowerCase();
+      if (!provider) continue;
+      stmt.run(provider, row.enabled ? 1 : 0, row.position);
+    }
+  });
+  run(rows);
+}
+
+export function listAiAuditModels(): AiAuditModelRow[] {
+  const rows = getDb().prepare(`
+    SELECT id, provider, model, enabled, is_default, position, updated_at
+    FROM ai_audit_models
+    ORDER BY provider ASC, position ASC, id ASC
+  `).all() as Array<{
+    id: number;
+    provider: string;
+    model: string;
+    enabled: number;
+    is_default: number;
+    position: number;
+    updated_at: string;
+  }>;
+  return rows.map((row) => ({
+    id: row.id,
+    provider: row.provider,
+    model: row.model,
+    enabled: Boolean(row.enabled),
+    isDefault: Boolean(row.is_default),
+    position: row.position,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export function replaceAiAuditModels(rows: Array<{
+  provider: string;
+  model: string;
+  enabled: boolean;
+  isDefault: boolean;
+  position: number;
+}>): void {
+  const db = getDb();
+  const run = db.transaction((entries: typeof rows) => {
+    db.prepare(`DELETE FROM ai_audit_models`).run();
+    const stmt = db.prepare(`
+      INSERT INTO ai_audit_models (provider, model, enabled, is_default, position, updated_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now'))
+    `);
+    for (const row of entries) {
+      const provider = row.provider.trim().toLowerCase();
+      const model = row.model.trim();
+      if (!provider || !model) continue;
+      stmt.run(provider, model, row.enabled ? 1 : 0, row.isDefault ? 1 : 0, row.position);
+    }
+  });
+  run(rows);
+}

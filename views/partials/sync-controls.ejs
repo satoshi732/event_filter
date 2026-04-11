@@ -1,0 +1,9 @@
+<div class="sync-controls">
+  <button id="syncPullButton" class="tool-button" type="button">Pull</button>
+  <button id="syncPushButton" class="tool-button" type="button">Push</button>
+  <button id="syncVerifyButton" class="tool-button" type="button">Verify</button>
+</div>
+<div id="syncMeta" class="sync-meta">Sync idle.</div>
+<% if (showRunMeta) { %>
+  <div id="runMeta" class="run-meta"><%= runMetaText || 'No scan yet.' %></div>
+<% } %>

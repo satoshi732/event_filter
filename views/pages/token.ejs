@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <%- await include('../partials/head', { title: title || 'Token Detail' }) %>
+  </head>
+  <body data-page="detail">
+    <div class="page-shell">
+      <header class="detail-topbar">
+        <div class="detail-topbar-main">
+          <a class="back-link" id="backLink" href="/">Back</a>
+          <div id="detailRunMeta" class="detail-run-meta">Loading...</div>
+        </div>
+        <div class="detail-topbar-side">
+          <%- await include('../partials/sync-controls', { showRunMeta: false }) %>
+        </div>
+      </header>
+
+      <main class="detail-layout">
+        <section id="detailSummaryPanel" class="panel detail-summary-panel">
+          <div class="panel-head">
+            <div>
+              <h1 id="detailTitle">Token detail</h1>
+            </div>
+            <div class="detail-summary-head">
+              <div id="detailMeta" class="panel-stat"></div>
+              <button id="detailSummaryToggle" class="tool-button collapse-toggle" type="button" aria-expanded="true" aria-label="Collapse token info" title="Collapse token info"></button>
+            </div>
+          </div>
+
+          <div class="table-shell detail-summary-shell">
+            <table class="meta-table">
+              <tbody id="detailSummaryBody">
+                <tr>
+                  <td>Loading...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <div id="detailTables" class="detail-tables">
+          <section class="panel">
+            <div class="detail-empty">Loading...</div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <div id="flowModal" class="modal-shell hidden" aria-hidden="true">
+      <div class="modal-backdrop" data-close-flow-modal="true"></div>
+      <section class="modal-panel">
+        <div class="panel-head">
+          <div>
+            <h2 id="flowModalTitle">Contract detail</h2>
+          </div>
+          <div class="modal-actions">
+            <button id="flowModalReviewButton" class="tool-button" type="button">Add Review</button>
+            <button id="flowModalClose" class="modal-close" type="button">Close</button>
+          </div>
+        </div>
+        <div id="flowModalMeta" class="panel-stat"></div>
+        <section id="reviewCard" class="review-card hidden">
+          <div class="review-grid">
+            <label class="form-row">
+              <span>Pattern Target</span>
+              <select id="reviewTargetSelect"></select>
+            </label>
+            <label class="form-row">
+              <span>Label</span>
+              <input id="reviewLabelInput" type="text" autocomplete="off" spellcheck="false" placeholder="Review label">
+            </label>
+            <label class="form-row">
+              <span>Exploitable</span>
+              <select id="reviewExploitableSelect">
+                <option value="false">No</option>
+                <option value="true">Yes</option>
+              </select>
+            </label>
+          </div>
+          <label class="form-row">
+            <span>Review</span>
+            <textarea id="reviewTextInput" rows="4" placeholder="Write review notes"></textarea>
+          </label>
+          <div id="reviewFormMeta" class="sync-meta">Review will be saved to seen contracts and queued for pattern sync.</div>
+          <div class="form-actions">
+            <button id="reviewCancelButton" class="tool-button" type="button">Cancel</button>
+            <button id="reviewSubmitButton" class="run-button" type="button">Save Review</button>
+          </div>
+        </section>
+        <div class="table-shell modal-table-shell">
+          <table class="detail-table">
+            <thead id="flowModalHead">
+            </thead>
+            <tbody id="flowModalBody">
+              <tr>
+                <td colspan="8">No flow data.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <script type="module" src="/js/main.js"></script>
+  </body>
+</html>

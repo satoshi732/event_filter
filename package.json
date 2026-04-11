@@ -1,0 +1,32 @@
+{
+  "name": "solana-mev-labs",
+  "version": "1.0.0",
+  "description": "Solana Mev Labs on-chain analysis workbench",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsc && node dist/index.js",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "migrate:v2": "tsc && node dist/scripts/migrate-v2.js"
+  },
+  "dependencies": {
+    "@types/ejs": "^3.1.5",
+    "@types/pg": "^8.20.0",
+    "axios": "^1.7.0",
+    "better-sqlite3": "^11.0.0",
+    "ejs": "^5.0.1",
+    "node-cron": "^3.0.3",
+    "pg": "^8.20.0",
+    "pinia": "^3.0.4",
+    "vue": "^3.5.32",
+    "vue-router": "^5.0.4"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.0.0",
+    "@types/node-cron": "^3.0.11",
+    "typescript": "^5.0.0"
+  }
+}

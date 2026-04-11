@@ -1,0 +1,2299 @@
+(() => {
+  const vueApi = window.Vue;
+  const routerApi = window.VueRouter;
+  const piniaApi = window.Pinia;
+  const appRoot = document.getElementById('app');
+
+  if (!vueApi || !routerApi || !piniaApi) {
+    if (appRoot) {
+      appRoot.removeAttribute('v-cloak');
+      appRoot.innerHTML = `
+        <section class="card app-error-card">
+          <div class="card-head">
+            <h2>Frontend Load Failed</h2>
+            <span class="muted">Frontend runtime missing</span>
+          </div>
+          <p class="muted">
+            The dashboard could not load its local Vue, Router, or Pinia runtime. Check static asset delivery and refresh the page.
+          </p>
+        </section>
+      `;
+    }
+    return;
+  }
+
+  const { createApp, reactive, computed, onMounted, watch, nextTick, markRaw } = vueApi;
+  const { createRouter, createWebHistory } = routerApi;
+  const { createPinia, defineStore } = piniaApi;
+  const PREV_ROUTE_STORAGE_KEY = 'event-filter-prev-route';
+  const PREV_ROUTE_SCROLL_STORAGE_KEY = 'event-filter-prev-route-scroll';
+  const AUTH_ENABLED = document.body.dataset.authEnabled === '1';
+  const CURRENT_USER = document.body.dataset.currentUser || '';
+  const shared = window.EventFilterDashboardShared || {};
+  const {
+    toBigIntSafe,
+    compareString,
+    compareNumber,
+    compareBoolean,
+    compareBigInt,
+    compareDate,
+    formatUsd,
+    formatBig,
+    formatTokenAmount,
+    parseStoredUtcDate,
+    formatDateTime,
+    formatRelativeTime,
+    shortAddress,
+    writeClipboardText,
+    syncStateLabel,
+    syncStateTone,
+    autoAuditStatusTone,
+    autoAuditStatusLabel,
+    autoAuditSeveritySummary,
+    auditResultDisplay,
+    contractToneClass,
+    buildPatternSections,
+    prepareDashboardTokenRows,
+    prepareDashboardContractRows,
+    prepareTokenDetail,
+    prepareContractDetail,
+  } = shared;
+
+  function toRouteQueryObject(value) {
+    if (!value) return {};
+    if (typeof value === 'string') {
+      const params = new URLSearchParams(value.startsWith('?') ? value.slice(1) : value);
+      const result = {};
+      params.forEach((entry, key) => {
+        result[key] = entry;
+      });
+      return result;
+    }
+    return value;
+  }
+
+  function routeStorageKey(routeLike) {
+    const path = String(routeLike?.path || routeLike?.name || window.location.pathname || '/');
+    const queryObject = toRouteQueryObject(routeLike?.query || '');
+    const parts = Object.entries(queryObject)
+      .filter(([, value]) => value != null && value !== '')
+      .sort(([left], [right]) => compareString(left, right))
+      .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
+    return parts.length ? `${path}?${parts.join('&')}` : path;
+  }
+
+  function currentRelativeRoute() {
+    return routeStorageKey(router?.currentRoute?.value || { path: window.location.pathname, query: window.location.search });
+  }
+
+  function rememberCurrentRoute() {
+    try {
+      window.sessionStorage.setItem(PREV_ROUTE_STORAGE_KEY, currentRelativeRoute());
+    } catch {}
+  }
+
+  function rememberCurrentRouteScroll() {
+    try {
+      window.sessionStorage.setItem(
+        PREV_ROUTE_SCROLL_STORAGE_KEY,
+        String(window.scrollY || window.pageYOffset || 0),
+      );
+    } catch {}
+  }
+
+
+  async function apiFetch(url, options) {
+    const res = await fetch(url, options);
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401 && data?.auth_required) {
+      const next = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      window.location.assign(`/login?next=${encodeURIComponent(next)}`);
+      return await new Promise(() => {});
+    }
+    if (!res.ok) {
+      throw new Error(data.error || `Request failed: ${res.status}`);
+    }
+    return data;
+  }
+
+  const initialView = (document.body.dataset.initialView || 'dashboard').toLowerCase();
+  const query = new URLSearchParams(window.location.search);
+  const SORT_STORAGE_KEY = 'event-filter-dashboard.table-sorts.v1';
+  const SCROLL_STORAGE_KEY = 'event-filter-dashboard.scroll.v1';
+  const FILTER_STORAGE_KEY = 'event-filter-dashboard.filters.v1';
+  const GROUP_COLLAPSE_STORAGE_KEY = 'event-filter-dashboard.group-collapse.v1';
+  const DEFAULT_AI_PROVIDER_MODELS = {
+    claude: ['claude-sonnet', 'claude-opus'],
+    codex: ['gpt-5-codex', 'gpt-5-codex-mini'],
+  };
+  const router = createRouter({
+    history: createWebHistory(),
+    routes: [
+      { path: '/', name: 'dashboard' },
+      { path: '/token', name: 'token' },
+      { path: '/token-detail', name: 'token-detail' },
+      { path: '/contract', name: 'contract' },
+      { path: '/:pathMatch(.*)*', redirect: '/' },
+    ],
+  });
+  const pinia = createPinia();
+
+  function queryOrDefault(key, fallback, allowedValues) {
+    const value = query.get(key);
+    if (value == null || value === '') return fallback;
+    if (Array.isArray(allowedValues) && !allowedValues.includes(value)) return fallback;
+    return value;
+  }
+
+  function routeValueOrDefault(value, fallback, allowedValues) {
+    if (value == null || value === '') return fallback;
+    if (Array.isArray(allowedValues) && !allowedValues.includes(value)) return fallback;
+    return value;
+  }
+
+  function readJsonStorage(storage, key, fallback) {
+    try {
+      const raw = storage.getItem(key);
+      if (!raw) return fallback;
+      return JSON.parse(raw);
+    } catch {
+      return fallback;
+    }
+  }
+
+  function writeJsonStorage(storage, key, value) {
+    try {
+      storage.setItem(key, JSON.stringify(value));
+    } catch {
+      // ignore storage failures
+    }
+  }
+
+  function readStoredFilters() {
+    return readJsonStorage(window.localStorage, FILTER_STORAGE_KEY, {});
+  }
+
+  function persistStoredFilters(filters) {
+    writeJsonStorage(window.localStorage, FILTER_STORAGE_KEY, filters);
+  }
+
+  function readStoredCollapsedGroups() {
+    return readJsonStorage(window.localStorage, GROUP_COLLAPSE_STORAGE_KEY, {});
+  }
+
+  function persistStoredCollapsedGroups(groups) {
+    writeJsonStorage(window.localStorage, GROUP_COLLAPSE_STORAGE_KEY, groups);
+  }
+
+  function countSettingLines(value) {
+    if (Array.isArray(value)) return value.filter(Boolean).length;
+    return String(value || '')
+      .split(/\r?\n/)
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .length;
+  }
+
+  const useDashboardStore = defineStore('eventFilterDashboard', () => {
+    const storedFilters = readStoredFilters();
+    const storedCollapsedGroups = readStoredCollapsedGroups();
+    const state = reactive({
+      chains: [],
+      selectedChain: (query.get('chain') || '').toLowerCase(),
+      latestRuns: [],
+      running: false,
+      runningChain: null,
+      progress: null,
+      dashboardTab: queryOrDefault('tab', 'tokens', ['tokens', 'auto', 'settings']),
+      settingsSection: queryOrDefault('st', 'keys', ['keys', 'runtime', 'access', 'pattern-sync', 'chains', 'whitelist', 'ai']),
+      dashboard: {
+        run: null,
+        tokens: [],
+        contracts: [],
+      },
+      prepared: {
+        dashboardTokens: [],
+        dashboardContracts: [],
+        tokenDetail: {
+          contractsFlat: [],
+          groupCards: [],
+          exploitableCount: 0,
+          largestBalance: '0',
+        },
+        contractDetail: {
+          flowTokenOptions: [],
+        },
+      },
+      dashboardFilters: {
+        tokenQuery: String(storedFilters.tokenQuery ?? query.get('tq') ?? ''),
+        contractQuery: String(storedFilters.contractQuery ?? query.get('cq') ?? ''),
+        contractRisk: routeValueOrDefault(
+          String(storedFilters.contractRisk ?? query.get('cr') ?? ''),
+          'all',
+          ['all', 'exploitable', 'seen', 'unseen'],
+        ),
+        contractLinkType: routeValueOrDefault(
+          String(storedFilters.contractLinkType ?? query.get('cl') ?? ''),
+          'all',
+          ['all', 'plain', 'proxy', 'eip7702'],
+        ),
+      },
+      collapsedGroups: {
+        contractOverview: storedCollapsedGroups.contractOverview || {},
+        tokenRelatedContracts: storedCollapsedGroups.tokenRelatedContracts || {},
+      },
+      tableSorts: {
+        contractOverview: { key: 'total_usd', dir: 'desc' },
+        tokenDirectory: { key: 'contracts', dir: 'desc' },
+        chainConfig: { key: 'chain', dir: 'asc' },
+        tokenRelatedContracts: { key: 'balance', dir: 'desc' },
+        contractTokens: { key: 'balance', dir: 'desc' },
+        contractTokenFlows: { key: 'total_flow', dir: 'desc' },
+        reviewHistory: { key: 'updated', dir: 'desc' },
+      },
+      tokenDetail: null,
+      contractDetail: null,
+      settings: {
+        runtime_settings: {
+          chainbase_keys: '',
+          rpc_keys: '',
+          monitored_chains: [],
+          poll_interval_ms: 600000,
+          debug: false,
+          pattern_sync: {
+            host: '',
+            port: 5432,
+            database: '',
+            user: '',
+            password: '',
+            remote_name: 'default',
+            auto_pull: true,
+            ssl: false,
+          },
+          pancakeswap_price: {
+            max_req_per_second: 2,
+            max_req_per_minute: 90,
+          },
+          ai_audit_backend: {
+            base_url: 'https://127.0.0.1:5000',
+            api_key: '',
+            etherscan_api_key: '',
+            poll_interval_ms: 10000,
+            dedaub_wait_seconds: 15,
+            insecure_tls: true,
+          },
+          auto_analysis: {
+            queue_capacity: 10,
+            token_share_percent: 40,
+            contract_share_percent: 60,
+            contract_min_tvl_usd: 10000,
+            token_min_price_usd: 0.001,
+            require_token_sync: true,
+            require_contract_selectors: true,
+            skip_seen_contracts: true,
+            one_per_contract_pattern: true,
+            exclude_audited_contracts: true,
+            exclude_audited_tokens: true,
+          },
+          access: {
+            auth_enabled: false,
+            username: '',
+            password: '',
+            has_password: false,
+            https_enabled: false,
+            tls_cert_path: '',
+            tls_key_path: '',
+          },
+        },
+        chain_configs: [],
+        ai_providers: [],
+        ai_models: [],
+        whitelist_patterns: [],
+      },
+      aiConfig: {
+        providers: [],
+        models: [],
+        default_provider: 'claude',
+        default_model: DEFAULT_AI_PROVIDER_MODELS.claude[0],
+      },
+      syncStatus: null,
+      autoAnalysis: {
+        enabled: false,
+        stopping: false,
+        chain: null,
+        phase: 'idle',
+        queued: 0,
+        active: 0,
+        capacity: 10,
+        cycle: 0,
+        lastAction: 'Auto analysis is idle',
+        updatedAt: null,
+      },
+      route: {
+        view: initialView,
+        token: (query.get('token') || '').toLowerCase(),
+        contract: (query.get('contract') || '').toLowerCase(),
+      },
+      reviewForm: {
+        target_kind: 'contract',
+        label: '',
+        review_text: '',
+        exploitable: false,
+      },
+      contractReviewModal: {
+        open: false,
+        address: '',
+        target_kind: 'auto',
+        label: '',
+        review_text: '',
+        exploitable: false,
+        source: '',
+        saving: false,
+        error: '',
+      },
+      tokenReviewForm: {
+        review_text: '',
+        exploitable: false,
+      },
+      tokenReviewExpanded: false,
+      analysisForm: {
+        title: 'AI Auto Audit',
+        provider: 'claude',
+        model: DEFAULT_AI_PROVIDER_MODELS.claude[0],
+      },
+      selectedContractFlowToken: '',
+      copiedAddress: '',
+      authEnabled: AUTH_ENABLED,
+      currentUser: CURRENT_USER,
+      pageLoading: {
+        count: 0,
+        label: '',
+      },
+    });
+    return { state };
+  });
+
+  const app = createApp({
+    setup() {
+      const store = useDashboardStore();
+      const state = store.state;
+      const viewDataCache = {
+        dashboardContracts: new Map(),
+        dashboardTokens: new Map(),
+        tokenDetail: new Map(),
+        contractDetail: new Map(),
+        settings: null,
+      };
+
+      function assignDashboardContractsPayload(payload) {
+        state.dashboard.run = payload.run || null;
+        state.dashboard.contracts = payload.contracts ? markRaw(payload.contracts) : [];
+        state.prepared.dashboardContracts = payload.preparedContracts || prepareDashboardContractRows(payload.contracts || []);
+      }
+
+      function assignDashboardTokensPayload(payload) {
+        state.dashboard.run = payload.run || null;
+        state.dashboard.tokens = payload.tokens ? markRaw(payload.tokens) : [];
+        state.prepared.dashboardTokens = payload.preparedTokens || prepareDashboardTokenRows(payload.tokens || []);
+      }
+
+      function assignTokenDetailPayload(payload) {
+        state.tokenDetail = payload.token ? markRaw(payload.token) : null;
+        state.prepared.tokenDetail = payload.preparedTokenDetail || prepareTokenDetail(payload.token);
+      }
+
+      function assignContractDetailPayload(payload) {
+        state.contractDetail = payload.contract ? markRaw(payload.contract) : null;
+        state.prepared.contractDetail = payload.preparedContractDetail || prepareContractDetail(payload.contract);
+      }
+
+      let copiedAddressTimer = null;
+      let stateEventSource = null;
+      let stateStreamReadyPromise = null;
+      let resolveStateStreamReady = null;
+      let stateStreamReady = false;
+      let pendingExplicitRestoreKey = '';
+      let pendingExplicitRestorePosition = 0;
+      const storedSorts = readJsonStorage(window.localStorage, SORT_STORAGE_KEY, {});
+      Object.entries(storedSorts || {}).forEach(([tableId, sortState]) => {
+        if (!sortState || typeof sortState !== 'object') return;
+        if (!state.tableSorts[tableId]) return;
+        const key = typeof sortState.key === 'string' ? sortState.key : state.tableSorts[tableId].key;
+        const dir = sortState.dir === 'asc' ? 'asc' : 'desc';
+        state.tableSorts[tableId] = { key, dir };
+      });
+
+      function chainCacheKey(chain) {
+        return String(chain || '').toLowerCase();
+      }
+
+      function tokenCacheKey(chain, token) {
+        return `${chainCacheKey(chain)}:${String(token || '').toLowerCase()}`;
+      }
+
+      function contractCacheKey(chain, contract) {
+        return `${chainCacheKey(chain)}:${String(contract || '').toLowerCase()}`;
+      }
+
+      function invalidateChainCache(chain) {
+        const normalizedChain = chainCacheKey(chain);
+        viewDataCache.dashboardContracts.delete(normalizedChain);
+        viewDataCache.dashboardTokens.delete(normalizedChain);
+        for (const key of [...viewDataCache.tokenDetail.keys()]) {
+          if (key.startsWith(`${normalizedChain}:`)) viewDataCache.tokenDetail.delete(key);
+        }
+        for (const key of [...viewDataCache.contractDetail.keys()]) {
+          if (key.startsWith(`${normalizedChain}:`)) viewDataCache.contractDetail.delete(key);
+        }
+      }
+
+      function syncStateFromRoute() {
+        const route = router.currentRoute.value;
+        const routeQuery = route.query || {};
+        state.route.view = String(route.name || initialView).toLowerCase();
+        state.route.token = String(routeQuery.token || '').toLowerCase();
+        state.route.contract = String(routeQuery.contract || '').toLowerCase();
+        state.dashboardTab = routeValueOrDefault(
+          String(routeQuery.tab || ''),
+          'tokens',
+          ['tokens', 'auto', 'settings'],
+        );
+        state.settingsSection = routeValueOrDefault(
+          String(routeQuery.st || ''),
+          'keys',
+          ['keys', 'runtime', 'access', 'pattern-sync', 'chains', 'whitelist', 'ai'],
+        );
+        const nextChain = String(routeQuery.chain || '').toLowerCase();
+        if (nextChain) state.selectedChain = nextChain;
+      }
+
+      syncStateFromRoute();
+
+      const currentView = computed(() => {
+        if (state.route.view === 'token') return 'token';
+        if (state.route.view === 'token-detail') return 'token-detail';
+        if (state.route.view === 'contract') return 'contract';
+        return 'dashboard';
+      });
+
+      function getConfiguredAiProviders() {
+        const sourceProviders = (state.aiConfig.providers?.length ? state.aiConfig.providers : state.settings.ai_providers) || [];
+        const configured = sourceProviders
+          .filter((row) => row && row.enabled !== false && String(row.provider || '').trim())
+          .slice()
+          .sort((a, b) => compareNumber(a.position, b.position) || compareString(a.provider, b.provider))
+          .map((row) => String(row.provider).trim().toLowerCase());
+        return configured.length ? configured : Object.keys(DEFAULT_AI_PROVIDER_MODELS);
+      }
+
+      function getConfiguredAiModels(provider) {
+        const normalizedProvider = String(provider || '').trim().toLowerCase();
+        const sourceModels = (state.aiConfig.models?.length ? state.aiConfig.models : state.settings.ai_models) || [];
+        const configured = sourceModels
+          .filter((row) => row && row.enabled !== false && String(row.provider || '').trim().toLowerCase() === normalizedProvider)
+          .slice()
+          .sort((a, b) => {
+            if (Boolean(a.is_default) !== Boolean(b.is_default)) return a.is_default ? -1 : 1;
+            return compareNumber(a.position, b.position) || compareString(a.model, b.model);
+          })
+          .map((row) => String(row.model || '').trim())
+          .filter(Boolean);
+        return configured.length ? configured : (DEFAULT_AI_PROVIDER_MODELS[normalizedProvider] || []);
+      }
+
+      function normalizeAiProvider(value) {
+        const normalized = String(value || '').trim().toLowerCase();
+        const allowed = getConfiguredAiProviders();
+        return allowed.includes(normalized) ? normalized : (allowed[0] || state.aiConfig.default_provider || 'claude');
+      }
+
+      function normalizeAiModel(provider, value) {
+        const normalizedProvider = normalizeAiProvider(provider);
+        const allowed = getConfiguredAiModels(normalizedProvider);
+        const normalizedValue = String(value || '').trim();
+        return allowed.includes(normalizedValue) ? normalizedValue : (allowed[0] || '');
+      }
+
+      const aiProviderOptions = computed(() => getConfiguredAiProviders());
+
+      const aiModelOptions = computed(() => getConfiguredAiModels(state.analysisForm.provider));
+
+      const runMetaText = computed(() => {
+        const active = state.latestRuns.find((row) => row.chain === state.selectedChain);
+        if (!active) return 'No run yet.';
+        return `${active.chain.toUpperCase()} | blocks ${active.block_from} -> ${active.block_to} | ${formatDateTime(active.generated_at)}`;
+      });
+
+      const routeToken = computed(() => state.route.token);
+      const routeContract = computed(() => state.route.contract);
+      const autoAnalysisStatus = computed(() => state.autoAnalysis || {});
+      const autoAnalysisEnabled = computed(() => Boolean(state.autoAnalysis?.enabled));
+      const autoAnalysisButtonLabel = computed(() => (
+        autoAnalysisEnabled.value ? 'Stop Auto Mode' : 'Auto Search & Analyze'
+      ));
+      const autoAnalysisChipTone = computed(() => {
+        if (state.autoAnalysis?.stopping) return 'warn';
+        if (state.autoAnalysis?.enabled) return 'ok';
+        return 'plain';
+      });
+      const autoAnalysisMetaText = computed(() => {
+        const source = state.autoAnalysis;
+        if (!source?.enabled && !source?.stopping) return 'auto analysis off';
+        const chain = String(source.chain || '').toUpperCase() || '--';
+        const inflight = `${source.active || 0} active / ${source.queued || 0} queued`;
+        return `${chain} | ${source.phase || 'idle'} | ${inflight} | pool ${source.capacity || 10}`;
+      });
+      const autoAnalysisDetailText = computed(() => (
+        String(state.autoAnalysis?.lastAction || '').trim() || 'Auto analysis is idle'
+      ));
+      const progressPercent = computed(() => {
+        const value = Number(state.progress?.percent);
+        if (!Number.isFinite(value)) return 0;
+        return Math.max(0, Math.min(100, Math.round(value)));
+      });
+      const progressLabel = computed(() => state.progress?.label || 'Waiting for pipeline status');
+      const progressStageLabel = computed(() => {
+        const stage = String(state.progress?.stage || '').trim();
+        if (!stage) return 'idle';
+        return stage.replace(/-/g, ' ');
+      });
+      const progressDetailText = computed(() => {
+        const progress = state.progress;
+        if (!progress) return '';
+        if (typeof progress.current === 'number' && typeof progress.total === 'number' && progress.total > 0) {
+          return `${progress.current} / ${progress.total}`;
+        }
+        return progress.detail || '';
+      });
+      const progressStatusTone = computed(() => {
+        if (state.progress?.stage === 'failed') return 'bad';
+        if (state.running) return 'warn';
+        if (state.progress?.stage === 'complete') return 'ok';
+        return 'ok';
+      });
+
+      function getTableSort(tableId) {
+        return state.tableSorts[tableId] || { key: '', dir: 'asc' };
+      }
+
+      function persistTableSorts() {
+        writeJsonStorage(window.localStorage, SORT_STORAGE_KEY, state.tableSorts);
+      }
+
+      function persistCollapsedGroups() {
+        persistStoredCollapsedGroups(state.collapsedGroups);
+      }
+
+      function toggleTableSort(tableId, key) {
+        const current = getTableSort(tableId);
+        state.tableSorts[tableId] = {
+          key,
+          dir: current.key === key && current.dir === 'asc' ? 'desc' : 'asc',
+        };
+        persistTableSorts();
+      }
+
+      function sortIndicator(tableId, key) {
+        const current = getTableSort(tableId);
+        if (current.key !== key) return '';
+        return current.dir === 'asc' ? '▲' : '▼';
+      }
+
+      function isActiveSort(tableId, key) {
+        return getTableSort(tableId).key === key;
+      }
+
+      function sortRows(rows, tableId, compareFn) {
+        const { dir } = getTableSort(tableId);
+        const direction = dir === 'asc' ? 1 : -1;
+        return [...rows].sort((a, b) => {
+          const delta = compareFn(a, b);
+          if (delta !== 0) return delta * direction;
+          return 0;
+        });
+      }
+
+      function persistCurrentScroll() {
+        persistScrollForRoute(router.currentRoute.value);
+      }
+
+      function rememberCurrentRouteContext() {
+        rememberCurrentRoute();
+        rememberCurrentRouteScroll();
+        persistCurrentScroll();
+      }
+
+      function persistScrollForRoute(routeLike, position) {
+        const positions = readJsonStorage(window.sessionStorage, SCROLL_STORAGE_KEY, {});
+        positions[routeStorageKey(routeLike)] = Number.isFinite(Number(position))
+          ? Number(position)
+          : (window.scrollY || window.pageYOffset || 0);
+        writeJsonStorage(window.sessionStorage, SCROLL_STORAGE_KEY, positions);
+      }
+
+      async function restoreCurrentScroll(routeLike = router.currentRoute.value) {
+        await nextTick();
+        const positions = readJsonStorage(window.sessionStorage, SCROLL_STORAGE_KEY, {});
+        const target = Number(positions[routeStorageKey(routeLike)] || 0);
+        if (!Number.isFinite(target) || target <= 0) return;
+        restoreScrollPosition(target);
+      }
+
+      function restoreScrollPosition(target) {
+        const attempts = [0, 80, 180, 320];
+        attempts.forEach((delay) => {
+          window.setTimeout(() => {
+            window.requestAnimationFrame(() => {
+              window.scrollTo(0, target);
+            });
+          }, delay);
+        });
+      }
+
+      async function withPageLoading(label, task) {
+        state.pageLoading.count += 1;
+        state.pageLoading.label = label || 'Loading';
+        try {
+          return await task();
+        } finally {
+          state.pageLoading.count = Math.max(0, state.pageLoading.count - 1);
+          if (state.pageLoading.count === 0) {
+            state.pageLoading.label = '';
+          }
+        }
+      }
+
+      const filteredTokens = computed(() => {
+        const queryText = state.dashboardFilters.tokenQuery.trim().toLowerCase();
+        const rows = state.prepared.dashboardTokens.filter((token) => (
+          !queryText || token._searchText.includes(queryText)
+        ));
+        return sortRows(rows, 'tokenDirectory', (a, b) => {
+          const sort = getTableSort('tokenDirectory');
+          switch (sort.key) {
+            case 'token':
+              return compareString(a.token, b.token);
+            case 'name':
+              return compareString(a.token_name || a.token, b.token_name || b.token);
+            case 'symbol':
+              return compareString(a.token_symbol || '', b.token_symbol || '');
+            case 'sync':
+              return compareString(syncStateLabel(a.token_calls_sync), syncStateLabel(b.token_calls_sync));
+            case 'auto_audit_status':
+              return compareString(a.auto_audit_status || 'no', b.auto_audit_status || 'no');
+            case 'audit_result':
+              return compareString(auditResultDisplay(a), auditResultDisplay(b));
+            case 'manual_audit':
+              return compareBoolean(a.is_manual_audit, b.is_manual_audit);
+            case 'price':
+              return compareNumber(a.token_price_usd, b.token_price_usd);
+            case 'contracts':
+            default:
+              return compareNumber(a.related_contract_count || 0, b.related_contract_count || 0);
+          }
+        });
+      });
+
+      const filteredContracts = computed(() => {
+        const queryText = state.dashboardFilters.contractQuery.trim().toLowerCase();
+        const rows = state.prepared.dashboardContracts.filter((row) => {
+          const riskMatch = state.dashboardFilters.contractRisk === 'all'
+            || (state.dashboardFilters.contractRisk === 'exploitable' && row.is_exploitable)
+            || (state.dashboardFilters.contractRisk === 'seen' && Boolean(row.is_seen_pattern || row.seen_label || row.group_kind === 'seen'))
+            || (state.dashboardFilters.contractRisk === 'unseen' && !(row.is_seen_pattern || row.seen_label || row.group_kind === 'seen'));
+
+          const linkType = row.link_type || 'plain';
+          const linkMatch = state.dashboardFilters.contractLinkType === 'all'
+            || state.dashboardFilters.contractLinkType === linkType;
+
+          const queryMatch = !queryText || row._searchText.includes(queryText);
+
+          return riskMatch && linkMatch && queryMatch;
+        });
+
+        return sortRows(rows, 'contractOverview', (a, b) => {
+          const sort = getTableSort('contractOverview');
+          switch (sort.key) {
+            case 'contract':
+              return compareString(a.contract, b.contract);
+            case 'label':
+              return compareString(a.label || '', b.label || '');
+            case 'linkage':
+              return compareString(a.linkage || '', b.linkage || '');
+            case 'patterns':
+              return compareString((a.patterns || []).join(','), (b.patterns || []).join(','));
+            case 'deployed':
+              return compareDate(a.deployed_at, b.deployed_at);
+            case 'auto_audit_status':
+              return compareString(a.auto_audit_status || 'no', b.auto_audit_status || 'no');
+            case 'is_exploitable':
+              return compareBoolean(a.is_exploitable, b.is_exploitable);
+            case 'total_usd':
+            default:
+              return compareNumber(a.portfolio_usd, b.portfolio_usd);
+          }
+        });
+      });
+
+      const contractOverviewSections = computed(() => (
+        buildPatternSections(filteredContracts.value).map((section) => ({
+          ...section,
+          collapsed: section.isGrouped && Boolean(state.collapsedGroups.contractOverview?.[section.key]),
+        }))
+      ));
+
+      const tokenContracts = computed(() => {
+        return state.prepared.tokenDetail.contractsFlat || [];
+      });
+
+      const sortedTokenContracts = computed(() => (
+        sortRows(tokenContracts.value, 'tokenRelatedContracts', (a, b) => {
+          const sort = getTableSort('tokenRelatedContracts');
+          switch (sort.key) {
+            case 'contract':
+              return compareString(a.contract, b.contract);
+            case 'group':
+              return compareString(a.group_label || '', b.group_label || '');
+            case 'label':
+              return compareString(a.seen_label || '', b.seen_label || '');
+            case 'patterns':
+              return compareString((a.whitelist_patterns || []).join(','), (b.whitelist_patterns || []).join(','));
+            case 'in':
+              return compareBigInt(a.transfer_in_amount, b.transfer_in_amount);
+            case 'out':
+              return compareBigInt(a.transfer_out_amount, b.transfer_out_amount);
+            case 'flow':
+              return compareBigInt(a.total_token_flow, b.total_token_flow);
+            case 'auto_audit_status':
+              return compareString(a.auto_audit_status || 'no', b.auto_audit_status || 'no');
+            case 'audit_result':
+              return compareString(auditResultDisplay(a), auditResultDisplay(b));
+            case 'balance':
+            default:
+              return compareBigInt(a.current_balance, b.current_balance);
+          }
+        })
+      ));
+
+      const tokenContractSections = computed(() => (
+        buildPatternSections(sortedTokenContracts.value).map((section) => ({
+          ...section,
+          collapsed: section.isGrouped && Boolean(state.collapsedGroups.tokenRelatedContracts?.[section.key]),
+        }))
+      ));
+
+      function toggleGroupCollapse(tableId, sectionKey) {
+        if (!tableId || !sectionKey) return;
+        const bucket = state.collapsedGroups[tableId] || {};
+        state.collapsedGroups[tableId] = {
+          ...bucket,
+          [sectionKey]: !bucket[sectionKey],
+        };
+        persistCollapsedGroups();
+      }
+
+      function isGroupCollapsed(tableId, sectionKey) {
+        return Boolean(state.collapsedGroups?.[tableId]?.[sectionKey]);
+      }
+
+      const tokenGroupCards = computed(() => {
+        return state.prepared.tokenDetail.groupCards || [];
+      });
+
+      const tokenExploitableCount = computed(() => (
+        state.prepared.tokenDetail.exploitableCount || 0
+      ));
+
+      const tokenLargestBalance = computed(() => (
+        state.prepared.tokenDetail.largestBalance || '0'
+      ));
+
+      const contractPatternTargets = computed(() => (
+        state.contractDetail?.pattern_targets || []
+      ));
+
+      const contractReviews = computed(() => (
+        state.contractDetail?.reviews || []
+      ));
+
+      const contractAiAnalysis = computed(() => (
+        state.contractDetail?.auto_analysis || {
+          request_session: null,
+          title: 'AI Auto Audit',
+          provider: 'claude',
+          model: DEFAULT_AI_PROVIDER_MODELS.claude[0],
+          status: 'idle',
+          requested_at: null,
+          completed_at: null,
+          critical: null,
+          high: null,
+          medium: null,
+          report_path: null,
+          error: null,
+        }
+      ));
+
+      const tokenAiAnalysis = computed(() => (
+        state.tokenDetail?.auto_analysis || {
+          request_session: null,
+          title: 'AI Auto Audit',
+          provider: 'claude',
+          model: DEFAULT_AI_PROVIDER_MODELS.claude[0],
+          status: 'idle',
+          requested_at: null,
+          completed_at: null,
+          critical: null,
+          high: null,
+          medium: null,
+          report_path: null,
+          error: null,
+        }
+      ));
+
+      const sortedContractReviews = computed(() => (
+        sortRows(contractReviews.value, 'reviewHistory', (a, b) => {
+          const sort = getTableSort('reviewHistory');
+          switch (sort.key) {
+            case 'label':
+              return compareString(a.label || '', b.label || '');
+            case 'pattern':
+              return compareString(a.pattern_hash || '', b.pattern_hash || '');
+            case 'status':
+              return compareString(a.status || '', b.status || '');
+            case 'exploitable':
+              return compareBoolean(a.exploitable, b.exploitable);
+            case 'review':
+              return compareString(a.review_text || '', b.review_text || '');
+            case 'updated':
+            default:
+              return compareDate(a.updated_at, b.updated_at);
+          }
+        })
+      ));
+
+      const sortedContractTokens = computed(() => (
+        sortRows((state.contractDetail?.tokens || []), 'contractTokens', (a, b) => {
+          const sort = getTableSort('contractTokens');
+          switch (sort.key) {
+            case 'token':
+              return compareString(a.token?.token || '', b.token?.token || '');
+            case 'symbol':
+              return compareString(a.token?.token_symbol || '', b.token?.token_symbol || '');
+            case 'price':
+              return compareNumber(a.token?.token_price_usd, b.token?.token_price_usd);
+            case 'sync':
+              return compareString(syncStateLabel(a.token?.token_calls_sync), syncStateLabel(b.token?.token_calls_sync));
+            case 'in':
+              return compareBigInt(a.transfer_in_amount, b.transfer_in_amount);
+            case 'out':
+              return compareBigInt(a.transfer_out_amount, b.transfer_out_amount);
+            case 'flow':
+              return compareBigInt(a.total_token_flow, b.total_token_flow);
+            case 'balance':
+            default:
+              return compareBigInt(a.current_balance, b.current_balance);
+          }
+        })
+      ));
+
+      const contractFlowTokenOptions = computed(() => (
+        state.prepared.contractDetail.flowTokenOptions || []
+      ));
+
+      const selectedContractFlowTokenRow = computed(() => {
+        const rows = state.contractDetail?.tokens || [];
+        if (!rows.length) return null;
+        const selected = state.selectedContractFlowToken?.toLowerCase();
+        return rows.find((row) => row.token?.token?.toLowerCase() === selected) || rows[0] || null;
+      });
+
+      const sortedContractTokenFlows = computed(() => {
+        const rows = selectedContractFlowTokenRow.value?.flow_breakdown || [];
+        return sortRows(rows, 'contractTokenFlows', (a, b) => {
+          const sort = getTableSort('contractTokenFlows');
+          switch (sort.key) {
+            case 'counterparty':
+              return compareString(a.label || a.address || '', b.label || b.address || '');
+            case 'kind':
+              return compareBoolean(a.is_contract, b.is_contract);
+            case 'in_count':
+              return compareNumber(a.transfer_in_count, b.transfer_in_count);
+            case 'in_amount':
+              return compareBigInt(a.transfer_in_amount, b.transfer_in_amount);
+            case 'out_count':
+              return compareNumber(a.transfer_out_count, b.transfer_out_count);
+            case 'out_amount':
+              return compareBigInt(a.transfer_out_amount, b.transfer_out_amount);
+            case 'tx_count':
+              return compareNumber(a.tx_count, b.tx_count);
+            case 'total_flow':
+            default:
+              return compareBigInt(a.total_flow, b.total_flow);
+          }
+        });
+      });
+
+      const sortedChainConfigs = computed(() => (
+        sortRows((state.settings.chain_configs || []), 'chainConfig', (a, b) => {
+          const sort = getTableSort('chainConfig');
+          switch (sort.key) {
+            case 'chain_id':
+              return compareNumber(a.chain_id, b.chain_id);
+            case 'blocks_per_scan':
+              return compareNumber(a.blocks_per_scan, b.blocks_per_scan);
+            case 'rpc_url_count':
+              return compareNumber(countSettingLines(a.rpc_urls), countSettingLines(b.rpc_urls));
+            case 'multicall3':
+              return compareString(a.multicall3 || '', b.multicall3 || '');
+            case 'chain':
+            default:
+              return compareString(a.chain || '', b.chain || '');
+          }
+        })
+      ));
+
+      const contractSelectorPreview = computed(() => (
+        state.contractDetail?.selectors || []
+      ));
+
+      const contractStatusLabel = computed(() => {
+        if (!state.contractDetail) return 'unloaded';
+        if (state.contractDetail.is_exploitable) return 'exploitable';
+        if (contractReviews.value.length > 0) return 'reviewed';
+        return 'watching';
+      });
+
+      const contractStatusTone = computed(() => {
+        if (!state.contractDetail) return 'warn';
+        if (state.contractDetail.is_exploitable) return 'bad';
+        if (contractReviews.value.length > 0) return 'ok';
+        return 'warn';
+      });
+
+      const exploitableCount = computed(() => (
+        state.dashboard.contracts.filter((row) => row.is_exploitable).length
+      ));
+
+      const topPortfolioUsd = computed(() => {
+        const top = state.dashboard.contracts.reduce((max, row) => {
+          const usd = Number(row.portfolio_usd);
+          if (!Number.isFinite(usd)) return max;
+          return Math.max(max, usd);
+        }, 0);
+        return Number.isFinite(top) ? top : null;
+      });
+
+      const syncMetaText = computed(() => {
+        if (!state.syncStatus?.configured) return 'Sync not configured';
+        const queue = state.syncStatus.queue || {};
+        const pending = queue.pending || 0;
+        const prepared = queue.prepared || 0;
+        return `pending ${pending} | prepared ${prepared}`;
+      });
+      const syncStatusTone = computed(() => {
+        if (!state.syncStatus?.configured) return 'warn';
+        const prepared = Number(state.syncStatus?.queue?.prepared || 0);
+        const failed = Number(state.syncStatus?.queue?.failed || 0);
+        if (failed > 0) return 'bad';
+        if (prepared > 0) return 'warn';
+        return 'ok';
+      });
+      const syncHeaderText = computed(() => {
+        if (!state.syncStatus?.configured) return 'Pattern sync disabled';
+        const queue = state.syncStatus.queue || {};
+        const pending = queue.pending || 0;
+        const prepared = queue.prepared || 0;
+        const failed = queue.failed || 0;
+        const pushed = state.syncStatus.lastPushAt
+          ? `push ${formatDateTime(state.syncStatus.lastPushAt)}`
+          : 'push --';
+        const pulled = state.syncStatus.lastPullAt
+          ? `pull ${formatDateTime(state.syncStatus.lastPullAt)}`
+          : 'pull --';
+        return `auto sync | pending ${pending} | prepared ${prepared} | failed ${failed} | ${pushed} | ${pulled}`;
+      });
+
+      async function updateUrl(path, params = {}) {
+        const queryParams = {};
+        Object.entries(params).forEach(([key, value]) => {
+          if (value == null || value === '') return;
+          queryParams[key] = String(value);
+        });
+
+        const nextRouteKey = routeStorageKey({ path, query: queryParams });
+        const currentRouteKey = routeStorageKey(router.currentRoute.value);
+        if (nextRouteKey === currentRouteKey) return;
+
+        const currentScroll = window.scrollY || window.pageYOffset || 0;
+        persistScrollForRoute(router.currentRoute.value, currentScroll);
+        await router.replace({ path, query: queryParams }).catch(() => {});
+        persistScrollForRoute({ path, query: queryParams }, currentScroll);
+      }
+
+      function dashboardUrlParams() {
+        return {
+          chain: state.selectedChain,
+          tab: state.dashboardTab,
+          st: state.dashboardTab === 'settings' ? state.settingsSection : '',
+        };
+      }
+
+      function syncDashboardUrlState() {
+        if (currentView.value !== 'dashboard') return;
+        updateUrl('/', dashboardUrlParams());
+      }
+
+      function syncTokenUrlState() {
+        if (currentView.value !== 'token') return;
+        updateUrl('/token', {
+          chain: state.selectedChain,
+        });
+      }
+
+      async function applyStatePayload(data) {
+        const wasRunning = state.running;
+        const previousRunningChain = state.runningChain;
+        state.chains = data.chains || [];
+        const explicitRouteChain = String(router.currentRoute.value?.query?.chain || query.get('chain') || '').toLowerCase();
+        const latestRunChain = String(data.latest_runs?.[0]?.chain || '').toLowerCase();
+        if (!state.selectedChain) {
+          state.selectedChain = (
+            explicitRouteChain
+            || latestRunChain
+            || data.default_chain
+            || state.chains[0]
+            || ''
+          ).toLowerCase();
+        } else if (!explicitRouteChain && latestRunChain && state.selectedChain !== latestRunChain && !data.running) {
+          const hasCurrentLatestRun = (data.latest_runs || []).some(
+            (row) => String(row.chain || '').toLowerCase() === state.selectedChain,
+          );
+          if (!hasCurrentLatestRun) {
+            state.selectedChain = latestRunChain;
+          }
+        }
+        state.latestRuns = data.latest_runs || [];
+        state.running = Boolean(data.running);
+        state.runningChain = data.running_chain || null;
+        state.progress = data.progress || null;
+        state.syncStatus = data.sync_status || null;
+        state.autoAnalysis = data.auto_analysis || state.autoAnalysis;
+
+        if (wasRunning && !state.running) {
+          invalidateChainCache(previousRunningChain || state.selectedChain);
+          if (currentView.value === 'dashboard') {
+            if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
+              await loadSettings({ showLoading: false, force: true });
+            } else {
+              await loadDashboardContracts({ showLoading: false, force: true });
+            }
+          } else if (currentView.value === 'token') {
+            await loadDashboardTokens({ showLoading: false, force: true });
+          } else if (currentView.value === 'token-detail') {
+            await loadTokenDetail({ showLoading: false, force: true });
+          } else {
+            await loadContractDetail({ showLoading: false, force: true });
+          }
+        }
+      }
+
+      function startStateStream() {
+        if (stateEventSource) return stateStreamReadyPromise || Promise.resolve();
+        try {
+          stateStreamReadyPromise = new Promise((resolve) => {
+            resolveStateStreamReady = resolve;
+          });
+          stateEventSource = new EventSource('/api/state/stream');
+          stateEventSource.addEventListener('state', (event) => {
+            try {
+              const payload = JSON.parse(event.data);
+              void applyStatePayload(payload);
+              if (!stateStreamReady) {
+                stateStreamReady = true;
+                resolveStateStreamReady?.();
+                resolveStateStreamReady = null;
+              }
+            } catch (err) {
+              console.error(err);
+            }
+          });
+          stateEventSource.onerror = () => {
+            // EventSource reconnects automatically. Keep the stream open unless closed explicitly.
+          };
+        } catch (err) {
+          console.error(err);
+          stateStreamReadyPromise = Promise.resolve();
+        }
+        return stateStreamReadyPromise;
+      }
+
+      async function loadDashboard(options = {}) {
+        if (!state.selectedChain) return;
+        try {
+          const data = options.showLoading === false
+            ? await apiFetch(`/api/dashboard?chain=${encodeURIComponent(state.selectedChain)}`)
+            : await withPageLoading(
+              'Loading dashboard',
+              () => apiFetch(`/api/dashboard?chain=${encodeURIComponent(state.selectedChain)}`),
+            );
+          state.dashboard.run = data.run || null;
+          state.dashboard.tokens = data.tokens || [];
+          state.dashboard.contracts = data.contracts || [];
+          if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
+            await loadSettings({ showLoading: false });
+          }
+        } catch {
+          state.dashboard.run = null;
+          state.dashboard.tokens = [];
+          state.dashboard.contracts = [];
+        }
+      }
+
+      async function loadDashboardContracts(options = {}) {
+        if (!state.selectedChain) return;
+        const cacheKey = chainCacheKey(state.selectedChain);
+        if (options.force !== true) {
+          const cached = viewDataCache.dashboardContracts.get(cacheKey);
+          if (cached) {
+            assignDashboardContractsPayload(cached);
+            return;
+          }
+        }
+        try {
+          const data = options.showLoading === false
+            ? await apiFetch(`/api/contracts?chain=${encodeURIComponent(state.selectedChain)}`)
+            : await withPageLoading(
+              'Loading contracts',
+              () => apiFetch(`/api/contracts?chain=${encodeURIComponent(state.selectedChain)}`),
+            );
+          const payload = {
+            run: data.run || null,
+            contracts: data.contracts || [],
+            preparedContracts: prepareDashboardContractRows(data.contracts || []),
+          };
+          viewDataCache.dashboardContracts.set(cacheKey, payload);
+          assignDashboardContractsPayload(payload);
+        } catch {
+          assignDashboardContractsPayload({ run: null, contracts: [], preparedContracts: [] });
+        }
+      }
+
+      async function loadDashboardTokens(options = {}) {
+        if (!state.selectedChain) return;
+        const cacheKey = chainCacheKey(state.selectedChain);
+        if (options.force !== true) {
+          const cached = viewDataCache.dashboardTokens.get(cacheKey);
+          if (cached) {
+            assignDashboardTokensPayload(cached);
+            return;
+          }
+        }
+        try {
+          const data = options.showLoading === false
+            ? await apiFetch(`/api/tokens?chain=${encodeURIComponent(state.selectedChain)}`)
+            : await withPageLoading(
+              'Loading tokens',
+              () => apiFetch(`/api/tokens?chain=${encodeURIComponent(state.selectedChain)}`),
+            );
+          const payload = {
+            run: data.run || null,
+            tokens: data.tokens || [],
+            preparedTokens: prepareDashboardTokenRows(data.tokens || []),
+          };
+          viewDataCache.dashboardTokens.set(cacheKey, payload);
+          assignDashboardTokensPayload(payload);
+        } catch {
+          assignDashboardTokensPayload({ run: null, tokens: [], preparedTokens: [] });
+        }
+      }
+
+      async function loadTokenDetail(options = {}) {
+        if (!state.selectedChain || !state.route.token) return;
+        const cacheKey = tokenCacheKey(state.selectedChain, state.route.token);
+        if (options.force !== true) {
+          const cached = viewDataCache.tokenDetail.get(cacheKey);
+          if (cached) {
+            assignTokenDetailPayload(cached);
+            state.aiConfig.providers = cached.aiProviders || [];
+            state.aiConfig.models = cached.aiModels || [];
+            state.aiConfig.default_provider = cached.defaultProvider || state.aiConfig.default_provider;
+            state.aiConfig.default_model = cached.defaultModel || state.aiConfig.default_model;
+            state.analysisForm.title = state.tokenDetail?.auto_analysis?.title || 'AI Auto Audit';
+            state.analysisForm.provider = normalizeAiProvider(state.tokenDetail?.auto_analysis?.provider);
+            state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, state.tokenDetail?.auto_analysis?.model);
+            hydrateTokenReviewForm();
+            return;
+          }
+        }
+        try {
+          const data = options.showLoading === false
+            ? await apiFetch(`/api/token?chain=${encodeURIComponent(state.selectedChain)}&token=${encodeURIComponent(state.route.token)}`)
+            : await withPageLoading(
+              'Loading token details',
+              () => apiFetch(`/api/token?chain=${encodeURIComponent(state.selectedChain)}&token=${encodeURIComponent(state.route.token)}`),
+            );
+          const payload = {
+            token: data.token || null,
+            preparedTokenDetail: prepareTokenDetail(data.token || null),
+            aiProviders: data.ai_config?.ai_providers || [],
+            aiModels: data.ai_config?.ai_models || [],
+            defaultProvider: data.ai_config?.default_provider || state.aiConfig.default_provider,
+            defaultModel: data.ai_config?.default_model || state.aiConfig.default_model,
+          };
+          viewDataCache.tokenDetail.set(cacheKey, payload);
+          assignTokenDetailPayload(payload);
+          state.aiConfig.providers = payload.aiProviders;
+          state.aiConfig.models = payload.aiModels;
+          state.aiConfig.default_provider = payload.defaultProvider;
+          state.aiConfig.default_model = payload.defaultModel;
+          state.analysisForm.title = state.tokenDetail?.auto_analysis?.title || 'AI Auto Audit';
+          state.analysisForm.provider = normalizeAiProvider(state.tokenDetail?.auto_analysis?.provider);
+          state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, state.tokenDetail?.auto_analysis?.model);
+          hydrateTokenReviewForm();
+        } catch {
+          assignTokenDetailPayload({ token: null, preparedTokenDetail: prepareTokenDetail(null) });
+        }
+      }
+
+      async function loadContractDetail(options = {}) {
+        if (!state.selectedChain || !state.route.contract) return;
+        const cacheKey = contractCacheKey(state.selectedChain, state.route.contract);
+        if (options.force !== true) {
+          const cached = viewDataCache.contractDetail.get(cacheKey);
+          if (cached) {
+            assignContractDetailPayload(cached);
+            state.aiConfig.providers = cached.aiProviders || [];
+            state.aiConfig.models = cached.aiModels || [];
+            state.aiConfig.default_provider = cached.defaultProvider || state.aiConfig.default_provider;
+            state.aiConfig.default_model = cached.defaultModel || state.aiConfig.default_model;
+            const availableTokens = state.contractDetail?.tokens || [];
+            const selected = state.selectedContractFlowToken?.toLowerCase();
+            if (!availableTokens.length) {
+              state.selectedContractFlowToken = '';
+            } else if (!selected || !availableTokens.some((row) => row.token?.token?.toLowerCase() === selected)) {
+              state.selectedContractFlowToken = availableTokens[0]?.token?.token || '';
+            }
+            hydrateReviewForm();
+            return;
+          }
+        }
+        try {
+          const data = options.showLoading === false
+            ? await apiFetch(`/api/contract?chain=${encodeURIComponent(state.selectedChain)}&contract=${encodeURIComponent(state.route.contract)}`)
+            : await withPageLoading(
+              'Loading contract details',
+              () => apiFetch(`/api/contract?chain=${encodeURIComponent(state.selectedChain)}&contract=${encodeURIComponent(state.route.contract)}`),
+            );
+          const payload = {
+            contract: data.contract || null,
+            preparedContractDetail: prepareContractDetail(data.contract || null),
+            aiProviders: data.ai_config?.ai_providers || [],
+            aiModels: data.ai_config?.ai_models || [],
+            defaultProvider: data.ai_config?.default_provider || state.aiConfig.default_provider,
+            defaultModel: data.ai_config?.default_model || state.aiConfig.default_model,
+          };
+          viewDataCache.contractDetail.set(cacheKey, payload);
+          assignContractDetailPayload(payload);
+          state.aiConfig.providers = payload.aiProviders;
+          state.aiConfig.models = payload.aiModels;
+          state.aiConfig.default_provider = payload.defaultProvider;
+          state.aiConfig.default_model = payload.defaultModel;
+          const availableTokens = state.contractDetail?.tokens || [];
+          const selected = state.selectedContractFlowToken?.toLowerCase();
+          if (!availableTokens.length) {
+            state.selectedContractFlowToken = '';
+          } else if (!selected || !availableTokens.some((row) => row.token?.token?.toLowerCase() === selected)) {
+            state.selectedContractFlowToken = availableTokens[0]?.token?.token || '';
+          }
+          hydrateReviewForm();
+        } catch {
+          assignContractDetailPayload({ contract: null, preparedContractDetail: prepareContractDetail(null) });
+          state.selectedContractFlowToken = '';
+        }
+      }
+
+      async function loadSettings(options = {}) {
+        if (options.force !== true && viewDataCache.settings) {
+          const data = viewDataCache.settings;
+          state.settings.runtime_settings = {
+            ...state.settings.runtime_settings,
+            ...(data.runtime_settings || {}),
+            chainbase_keys: Array.isArray(data.runtime_settings?.chainbase_keys)
+              ? data.runtime_settings.chainbase_keys.join('\n')
+              : String(data.runtime_settings?.chainbase_keys || ''),
+            rpc_keys: Array.isArray(data.runtime_settings?.rpc_keys)
+              ? data.runtime_settings.rpc_keys.join('\n')
+              : String(data.runtime_settings?.rpc_keys || ''),
+          };
+          state.settings.chain_configs = data.chain_configs || [];
+          state.settings.ai_providers = data.ai_providers || [];
+          state.settings.ai_models = data.ai_models || [];
+          state.settings.whitelist_patterns = data.whitelist_patterns || [];
+          state.aiConfig.providers = data.ai_providers || [];
+          state.aiConfig.models = data.ai_models || [];
+          state.aiConfig.default_provider = data.ai_providers?.find?.((row) => row.isDefault)?.provider || state.aiConfig.default_provider;
+          state.analysisForm.provider = normalizeAiProvider(state.analysisForm.provider);
+          state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, state.analysisForm.model);
+          if (state.contractDetail) hydrateReviewForm();
+          return;
+        }
+        const data = options.showLoading === false
+          ? await apiFetch('/api/settings')
+          : await withPageLoading('Loading settings', () => apiFetch('/api/settings'));
+        viewDataCache.settings = data;
+        state.settings.runtime_settings = {
+          ...state.settings.runtime_settings,
+          ...(data.runtime_settings || {}),
+          chainbase_keys: Array.isArray(data.runtime_settings?.chainbase_keys)
+            ? data.runtime_settings.chainbase_keys.join('\n')
+            : String(data.runtime_settings?.chainbase_keys || ''),
+          rpc_keys: Array.isArray(data.runtime_settings?.rpc_keys)
+            ? data.runtime_settings.rpc_keys.join('\n')
+            : String(data.runtime_settings?.rpc_keys || ''),
+        };
+        state.settings.chain_configs = data.chain_configs || [];
+        state.settings.ai_providers = data.ai_providers || [];
+        state.settings.ai_models = data.ai_models || [];
+        state.settings.whitelist_patterns = data.whitelist_patterns || [];
+        state.aiConfig.providers = data.ai_providers || [];
+        state.aiConfig.models = data.ai_models || [];
+        state.aiConfig.default_provider = data.ai_providers?.find?.((row) => row.isDefault)?.provider || state.aiConfig.default_provider;
+        state.analysisForm.provider = normalizeAiProvider(state.analysisForm.provider);
+        state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, state.analysisForm.model);
+        if (state.contractDetail) hydrateReviewForm();
+      }
+
+      async function refreshCurrent(options = {}) {
+        const nextOptions = { force: true, ...options };
+        if (currentView.value === 'dashboard') {
+          if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
+            await loadSettings(nextOptions);
+            return;
+          }
+          await loadDashboardContracts(nextOptions);
+        } else if (currentView.value === 'token') {
+          await loadDashboardTokens(nextOptions);
+        } else if (currentView.value === 'token-detail') {
+          await loadTokenDetail(nextOptions);
+        } else {
+          await loadContractDetail(nextOptions);
+        }
+      }
+
+      async function loadViewDataForCurrentRoute(options = {}) {
+        if (currentView.value === 'dashboard') {
+          if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
+            await loadSettings(options);
+            return;
+          }
+          await loadDashboardContracts(options);
+          return;
+        }
+        if (currentView.value === 'token') {
+          await loadDashboardTokens(options);
+          return;
+        }
+        if (currentView.value === 'token-detail') {
+          await loadTokenDetail(options);
+          return;
+        }
+        await loadContractDetail(options);
+      }
+
+      function clearChainScopedData() {
+        state.dashboard.run = null;
+        state.dashboard.tokens = [];
+        state.dashboard.contracts = [];
+        state.prepared.dashboardTokens = [];
+        state.prepared.dashboardContracts = [];
+        state.tokenDetail = null;
+        state.contractDetail = null;
+        state.prepared.tokenDetail = prepareTokenDetail(null);
+        state.prepared.contractDetail = prepareContractDetail(null);
+        state.selectedContractFlowToken = '';
+      }
+
+      async function handleChainChanged() {
+        clearChainScopedData();
+        if (currentView.value === 'dashboard') {
+          await updateUrl('/', dashboardUrlParams());
+          if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
+            await loadSettings();
+            return;
+          }
+          await refreshCurrent();
+          return;
+        }
+        if (currentView.value === 'token') {
+          await updateUrl('/token', {
+            chain: state.selectedChain,
+          });
+          await loadDashboardTokens();
+          return;
+        }
+        if (currentView.value === 'token-detail') {
+          await updateUrl('/token-detail', { chain: state.selectedChain, token: state.route.token });
+          await refreshCurrent();
+          return;
+        }
+        await updateUrl('/contract', { chain: state.selectedChain, contract: state.route.contract });
+        await refreshCurrent();
+      }
+
+      async function runScan() {
+        if (!state.selectedChain || state.running) return;
+        state.running = true;
+        state.runningChain = state.selectedChain;
+        state.progress = {
+          chain: state.selectedChain,
+          stage: 'boot',
+          label: 'Starting pipeline round',
+          percent: 1,
+          updated_at: new Date().toISOString(),
+        };
+        try {
+          await apiFetch('/api/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chain: state.selectedChain }),
+          });
+          await refreshCurrent();
+        } catch (err) {
+          window.alert(err instanceof Error ? err.message : String(err));
+        } finally {
+          state.running = false;
+        }
+      }
+
+      async function toggleAutoAnalysis() {
+        if (!state.selectedChain && !autoAnalysisEnabled.value) return;
+        try {
+          const data = autoAnalysisEnabled.value
+            ? await apiFetch('/api/auto-analysis/stop', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({}),
+            })
+            : await apiFetch('/api/auto-analysis/start', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chain: state.selectedChain }),
+            });
+          state.autoAnalysis = data.status || state.autoAnalysis;
+        } catch (err) {
+          window.alert(err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      function navigateDashboard() {
+        rememberCurrentRouteContext();
+        router.push({ path: '/', query: dashboardUrlParams() }).catch(() => {});
+      }
+
+      function navigateToken() {
+        rememberCurrentRouteContext();
+        router.push({
+          path: '/token',
+          query: {
+            chain: state.selectedChain,
+          },
+        }).catch(() => {});
+      }
+
+      function navigateContract() {
+        rememberCurrentRouteContext();
+        if (state.route.contract) {
+          router.push({
+            path: '/contract',
+            query: { chain: state.selectedChain, contract: state.route.contract },
+          }).catch(() => {});
+        } else if (state.dashboard.contracts[0]?.contract) {
+          openContract(state.dashboard.contracts[0].contract);
+        }
+      }
+
+      function openDashboardMain() {
+        state.dashboardTab = 'tokens';
+        navigateDashboard();
+      }
+
+      function openAutoMode() {
+        state.dashboardTab = 'auto';
+        if (currentView.value === 'dashboard') {
+          syncDashboardUrlState();
+          return;
+        }
+        navigateDashboard();
+      }
+
+      function openSettings(section = 'keys') {
+        state.dashboardTab = 'settings';
+        state.settingsSection = section;
+        if (currentView.value === 'dashboard') {
+          syncDashboardUrlState();
+          return;
+        }
+        navigateDashboard();
+      }
+
+      function openToken(token) {
+        rememberCurrentRouteContext();
+        router.push({
+          path: '/token-detail',
+          query: { chain: state.selectedChain, token: String(token || '').toLowerCase() },
+        }).catch(() => {});
+      }
+
+      function openContract(contract) {
+        rememberCurrentRouteContext();
+        router.push({
+          path: '/contract',
+          query: { chain: state.selectedChain, contract: String(contract || '').toLowerCase() },
+        }).catch(() => {});
+      }
+
+      function goBackToPrevious(fallbackView = 'dashboard') {
+        persistCurrentScroll();
+        try {
+          const previous = window.sessionStorage.getItem(PREV_ROUTE_STORAGE_KEY);
+          const previousScroll = Number(window.sessionStorage.getItem(PREV_ROUTE_SCROLL_STORAGE_KEY) || 0);
+          if (previous && previous !== currentRelativeRoute()) {
+            pendingExplicitRestoreKey = previous;
+            pendingExplicitRestorePosition = Number.isFinite(previousScroll) ? previousScroll : 0;
+            router.push(previous).catch(() => {});
+            return;
+          }
+        } catch {}
+
+        if (fallbackView === 'token') {
+          router.push({
+            path: '/token',
+            query: { chain: state.selectedChain },
+          }).catch(() => {});
+          return;
+        }
+
+        router.push({
+          path: '/',
+          query: { chain: state.selectedChain },
+        }).catch(() => {});
+      }
+
+      function isCopiedAddress(value) {
+        return Boolean(value) && state.copiedAddress === String(value).toLowerCase();
+      }
+
+      async function copyAddress(value) {
+        if (!value) return;
+        const normalized = String(value).trim();
+        if (!normalized) return;
+
+        try {
+          await writeClipboardText(normalized);
+          state.copiedAddress = normalized.toLowerCase();
+          if (copiedAddressTimer) window.clearTimeout(copiedAddressTimer);
+          copiedAddressTimer = window.setTimeout(() => {
+            state.copiedAddress = '';
+            copiedAddressTimer = null;
+          }, 1000);
+        } catch (err) {
+          window.alert(err instanceof Error ? err.message : 'Copy failed');
+        }
+      }
+
+      function hydrateReviewForm() {
+        const detail = state.contractDetail;
+        const firstTarget = detail?.pattern_targets?.[0]?.kind;
+        state.reviewForm.target_kind = firstTarget || 'contract';
+        state.reviewForm.label = detail?.label || '';
+        state.reviewForm.review_text = detail?.review || '';
+        state.reviewForm.exploitable = Boolean(detail?.is_exploitable);
+        state.analysisForm.title = detail?.auto_analysis?.title || 'AI Auto Audit';
+        state.analysisForm.provider = normalizeAiProvider(detail?.auto_analysis?.provider);
+        state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, detail?.auto_analysis?.model);
+      }
+
+      function hydrateTokenReviewForm() {
+        const detail = state.tokenDetail;
+        state.tokenReviewForm.review_text = detail?.review || '';
+        state.tokenReviewForm.exploitable = Boolean(detail?.is_exploitable);
+        state.tokenReviewExpanded = false;
+      }
+
+      function toggleTokenReviewEditor(force) {
+        if (typeof force === 'boolean') {
+          state.tokenReviewExpanded = force;
+          return;
+        }
+        state.tokenReviewExpanded = !state.tokenReviewExpanded;
+      }
+
+      function selectReviewTarget(target) {
+        state.reviewForm.target_kind = target?.kind || 'contract';
+        if (!state.reviewForm.label.trim()) {
+          state.reviewForm.label = target?.seen_label || state.contractDetail?.label || '';
+        }
+      }
+
+      function openContractReviewModal(row, source = 'table') {
+        if (!row?.contract) return;
+        state.contractReviewModal.open = true;
+        state.contractReviewModal.address = String(row.contract || '').toLowerCase();
+        state.contractReviewModal.target_kind = 'auto';
+        state.contractReviewModal.label = String(row.label || row.seen_label || '').trim();
+        state.contractReviewModal.review_text = '';
+        state.contractReviewModal.exploitable = Boolean(row.is_exploitable);
+        state.contractReviewModal.source = source;
+        state.contractReviewModal.saving = false;
+        state.contractReviewModal.error = '';
+      }
+
+      function closeContractReviewModal() {
+        state.contractReviewModal.open = false;
+        state.contractReviewModal.saving = false;
+        state.contractReviewModal.error = '';
+      }
+
+      async function saveContractReviewModal() {
+        if (!state.contractReviewModal.address) return;
+        if (!state.contractReviewModal.label.trim()) {
+          state.contractReviewModal.error = 'Label is required.';
+          return;
+        }
+        state.contractReviewModal.saving = true;
+        state.contractReviewModal.error = '';
+        try {
+          await apiFetch('/api/review', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chain: state.selectedChain,
+              address: state.contractReviewModal.address,
+              target_kind: state.contractReviewModal.target_kind,
+              label: state.contractReviewModal.label.trim(),
+              review_text: state.contractReviewModal.review_text,
+              exploitable: state.contractReviewModal.exploitable,
+            }),
+          });
+          invalidateChainCache(state.selectedChain);
+          if (currentView.value === 'token-detail') {
+            await loadTokenDetail({ force: true });
+          } else {
+            await loadDashboardContracts({ showLoading: false, force: true });
+          }
+          if (state.contractDetail?.address === state.contractReviewModal.address) {
+            await loadContractDetail({ force: true });
+          }
+          closeContractReviewModal();
+        } catch (err) {
+          state.contractReviewModal.error = err instanceof Error ? err.message : String(err);
+        } finally {
+          state.contractReviewModal.saving = false;
+        }
+      }
+
+      function analysisStatusLabel(status) {
+        switch (String(status || 'idle')) {
+          case 'requested':
+            return 'queued';
+          case 'running':
+            return 'running';
+          case 'completed':
+            return 'completed';
+          case 'failed':
+            return 'failed';
+          default:
+            return 'idle';
+        }
+      }
+
+      function analysisStatusTone(status) {
+        switch (String(status || 'idle')) {
+          case 'completed':
+            return 'ok';
+          case 'failed':
+            return 'bad';
+          case 'requested':
+          case 'running':
+            return 'warn';
+          default:
+            return '';
+        }
+      }
+
+      function analysisStatusHint(source) {
+        const status = String(source?.status || 'idle');
+        if (status === 'requested') return 'Queued and waiting for the backend worker.';
+        if (status === 'running') return 'Audit is currently running.';
+        if (status === 'completed') return 'Audit finished successfully.';
+        if (status === 'failed') return 'Audit failed. You can retry with the same or a different model.';
+        return 'Ready to request a fresh audit.';
+      }
+
+      function canRequestContractAnalysis() {
+        const source = contractAiAnalysis.value;
+        return source.status === 'idle' || source.status === 'failed';
+      }
+
+      function canRequestTokenAnalysis() {
+        const source = tokenAiAnalysis.value;
+        return source.status === 'idle' || source.status === 'failed';
+      }
+
+      function analysisRequestButtonLabel() {
+        const source = contractAiAnalysis.value;
+        if (source.status === 'completed') return 'Already Analyzed';
+        if (source.status === 'requested') return 'Queued';
+        if (source.status === 'running') return 'Running';
+        if (source.status === 'failed') return 'Retry AI Analysis';
+        return 'Request AI Analysis';
+      }
+
+      function tokenAnalysisRequestButtonLabel() {
+        const source = tokenAiAnalysis.value;
+        if (source.status === 'completed') return 'Already Analyzed';
+        if (source.status === 'requested') return 'Queued';
+        if (source.status === 'running') return 'Running';
+        if (source.status === 'failed') return 'Retry AI Analysis';
+        return 'Request AI Analysis';
+      }
+
+      function canRequestOverviewAutoAudit(row) {
+        const status = autoAuditStatusLabel(row?.auto_audit_status);
+        return status === 'no' || status === 'failed';
+      }
+
+      function canRequestTokenAutoAudit(row) {
+        const status = autoAuditStatusLabel(row?.auto_audit_status);
+        return status === 'no' || status === 'failed';
+      }
+
+      async function requestOverviewAutoAudit(row) {
+        if (!row?.contract || !canRequestOverviewAutoAudit(row)) return;
+        try {
+          await apiFetch('/api/contract-analysis/request', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chain: state.selectedChain,
+              contract: row.contract,
+            }),
+          });
+          invalidateChainCache(state.selectedChain);
+          await loadDashboardContracts({ showLoading: false, force: true });
+          if (state.contractDetail?.address === row.contract) {
+            await loadContractDetail({ force: true });
+          }
+        } catch (err) {
+          window.alert(err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      async function requestTokenAutoAudit(row) {
+        if (!row?.token || !canRequestTokenAutoAudit(row)) return;
+        try {
+          await apiFetch('/api/token-analysis/request', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chain: state.selectedChain,
+              token: row.token,
+            }),
+          });
+          invalidateChainCache(state.selectedChain);
+          await loadDashboardTokens({ showLoading: false, force: true });
+          if (state.tokenDetail?.token === row.token) {
+            await loadTokenDetail({ force: true });
+          }
+        } catch (err) {
+          window.alert(err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      async function requestContractAnalysis() {
+        if (!state.contractDetail?.address || !canRequestContractAnalysis()) return;
+        try {
+          await apiFetch('/api/contract-analysis/request', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chain: state.selectedChain,
+              contract: state.contractDetail.address,
+              title: state.analysisForm.title,
+              provider: state.analysisForm.provider,
+              model: state.analysisForm.model,
+            }),
+          });
+          invalidateChainCache(state.selectedChain);
+          await loadContractDetail({ force: true });
+          window.alert('AI analysis requested');
+        } catch (err) {
+          window.alert(err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      async function requestTokenAnalysis() {
+        if (!state.tokenDetail?.token || !canRequestTokenAnalysis()) return;
+        try {
+          await apiFetch('/api/token-analysis/request', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chain: state.selectedChain,
+              token: state.tokenDetail.token,
+              title: state.analysisForm.title,
+              provider: state.analysisForm.provider,
+              model: state.analysisForm.model,
+            }),
+          });
+          invalidateChainCache(state.selectedChain);
+          await loadTokenDetail({ force: true });
+          window.alert('AI analysis requested');
+        } catch (err) {
+          window.alert(err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      function openAiReport() {
+        if (!state.contractDetail?.address || !contractAiAnalysis.value?.report_path) return;
+        const targetUrl = `/api/contract-analysis/report?chain=${encodeURIComponent(state.selectedChain || '')}&contract=${encodeURIComponent(state.contractDetail.address)}`;
+        window.open(targetUrl, '_blank', 'noopener');
+      }
+
+      function openTokenAiReport() {
+        if (!state.tokenDetail?.token || !tokenAiAnalysis.value?.report_path) return;
+        const targetUrl = `/api/token-analysis/report?chain=${encodeURIComponent(state.selectedChain || '')}&token=${encodeURIComponent(state.tokenDetail.token)}`;
+        window.open(targetUrl, '_blank', 'noopener');
+      }
+
+      function addAiProviderRow() {
+        const nextIndex = (state.settings.ai_providers || []).length;
+        state.settings.ai_providers.push({
+          provider: '',
+          enabled: true,
+          position: nextIndex,
+        });
+      }
+
+      function removeAiProviderRow(index) {
+        const row = state.settings.ai_providers[index];
+        if (!row) return;
+        const provider = String(row.provider || '').trim().toLowerCase();
+        state.settings.ai_providers.splice(index, 1);
+        if (provider) {
+          state.settings.ai_models = state.settings.ai_models.filter((model) => String(model.provider || '').trim().toLowerCase() !== provider);
+        }
+      }
+
+      function addAiModelRow() {
+        const provider = normalizeAiProvider(state.analysisForm.provider);
+        state.settings.ai_models.push({
+          id: Date.now(),
+          provider,
+          model: '',
+          enabled: true,
+          is_default: false,
+          position: (state.settings.ai_models || []).filter((row) => String(row.provider || '').trim().toLowerCase() === provider).length,
+        });
+      }
+
+      function removeAiModelRow(index) {
+        state.settings.ai_models.splice(index, 1);
+      }
+
+      function addWhitelistPatternRow() {
+        state.settings.whitelist_patterns.push({
+          id: Date.now(),
+          name: '',
+          hex_pattern: '',
+          pattern_type: 'selector',
+          score: 1,
+          description: '',
+        });
+      }
+
+      function removeWhitelistPatternRow(index) {
+        state.settings.whitelist_patterns.splice(index, 1);
+      }
+
+      async function saveSettings() {
+        const aiProviders = (state.settings.ai_providers || [])
+          .map((row, index) => ({
+            provider: String(row.provider || '').trim().toLowerCase(),
+            enabled: row.enabled !== false,
+            position: Number.isFinite(Number(row.position)) ? Number(row.position) : index,
+          }))
+          .filter((row) => row.provider);
+
+        const aiModels = (state.settings.ai_models || [])
+          .map((row, index) => ({
+            provider: String(row.provider || '').trim().toLowerCase(),
+            model: String(row.model || '').trim(),
+            enabled: row.enabled !== false,
+            is_default: Boolean(row.is_default),
+            position: Number.isFinite(Number(row.position)) ? Number(row.position) : index,
+          }))
+          .filter((row) => row.provider && row.model);
+
+        const whitelistPatterns = (state.settings.whitelist_patterns || [])
+          .map((row, index) => ({
+            name: String(row.name || '').trim(),
+            hex_pattern: String(row.hex_pattern || '').trim().toLowerCase().replace(/^0x/, ''),
+            pattern_type: String(row.pattern_type || 'selector').trim().toLowerCase() || 'selector',
+            score: Number.isFinite(Number(row.score)) ? Number(row.score) : (index + 1),
+            description: String(row.description || '').trim(),
+          }))
+          .filter((row) => row.name && row.hex_pattern);
+
+        try {
+          const data = await apiFetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              runtime_settings: state.settings.runtime_settings,
+              chain_configs: state.settings.chain_configs,
+              ai_providers: aiProviders,
+              ai_models: aiModels,
+              whitelist_patterns: whitelistPatterns,
+            }),
+          });
+          state.settings.runtime_settings = data.settings?.runtime_settings || state.settings.runtime_settings;
+          state.settings.runtime_settings = {
+            ...state.settings.runtime_settings,
+            ...(data.settings?.runtime_settings || {}),
+            chainbase_keys: Array.isArray(data.settings?.runtime_settings?.chainbase_keys)
+              ? data.settings.runtime_settings.chainbase_keys.join('\n')
+              : String(data.settings?.runtime_settings?.chainbase_keys || state.settings.runtime_settings.chainbase_keys || ''),
+            rpc_keys: Array.isArray(data.settings?.runtime_settings?.rpc_keys)
+              ? data.settings.runtime_settings.rpc_keys.join('\n')
+              : String(data.settings?.runtime_settings?.rpc_keys || state.settings.runtime_settings.rpc_keys || ''),
+          };
+          state.settings.chain_configs = data.settings?.chain_configs || state.settings.chain_configs;
+          state.settings.ai_providers = data.settings?.ai_providers || aiProviders;
+          state.settings.ai_models = data.settings?.ai_models || aiModels;
+          state.settings.whitelist_patterns = data.settings?.whitelist_patterns || whitelistPatterns;
+          viewDataCache.settings = data.settings || data;
+          state.analysisForm.provider = normalizeAiProvider(state.analysisForm.provider);
+          state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, state.analysisForm.model);
+          window.alert('Settings saved and hot-applied');
+        } catch (err) {
+          window.alert(err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      async function saveReview() {
+        if (!state.contractDetail?.address) return;
+        if (!state.reviewForm.label.trim()) {
+          window.alert('Label is required');
+          return;
+        }
+        try {
+          await apiFetch('/api/review', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chain: state.selectedChain,
+              address: state.contractDetail.address,
+              target_kind: state.reviewForm.target_kind,
+              label: state.reviewForm.label,
+              review_text: state.reviewForm.review_text,
+              exploitable: state.reviewForm.exploitable,
+            }),
+          });
+          state.reviewForm.review_text = '';
+          invalidateChainCache(state.selectedChain);
+          await loadContractDetail({ force: true });
+          window.alert('Review saved');
+        } catch (err) {
+          window.alert(err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      async function saveTokenReview() {
+        if (!state.tokenDetail?.token) return;
+        try {
+          await apiFetch('/api/token-review', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chain: state.selectedChain,
+              token: state.tokenDetail.token,
+              review_text: state.tokenReviewForm.review_text,
+              exploitable: state.tokenReviewForm.exploitable,
+            }),
+          });
+          invalidateChainCache(state.selectedChain);
+          await loadTokenDetail({ force: true });
+          state.tokenReviewExpanded = false;
+          window.alert('Token review saved');
+        } catch (err) {
+          window.alert(err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      async function logout() {
+        try {
+          await fetch('/api/logout', { method: 'POST' });
+        } finally {
+          window.location.assign('/login');
+        }
+      }
+
+      onMounted(async () => {
+        try {
+          await router.isReady();
+          syncStateFromRoute();
+          await Promise.race([
+            startStateStream(),
+            new Promise((resolve) => window.setTimeout(resolve, 1200)),
+          ]);
+          if (!state.chains.length) {
+            const data = await apiFetch('/api/state');
+            await applyStatePayload(data);
+          }
+          if (currentView.value === 'dashboard' && (state.dashboardTab === 'settings' || state.dashboardTab === 'auto')) {
+            await loadSettings({ showLoading: false });
+          }
+          await loadViewDataForCurrentRoute();
+          await restoreCurrentScroll();
+        } catch (err) {
+          window.alert(err instanceof Error ? err.message : String(err));
+        }
+
+        window.addEventListener('scroll', persistCurrentScroll, { passive: true });
+        window.addEventListener('beforeunload', persistCurrentScroll);
+      });
+
+      router.beforeEach((to, from, next) => {
+        persistScrollForRoute(from);
+        next();
+      });
+
+      watch(
+        () => router.currentRoute.value.fullPath,
+        async () => {
+          syncStateFromRoute();
+          await loadViewDataForCurrentRoute();
+          await restoreCurrentScroll();
+          if (pendingExplicitRestoreKey && pendingExplicitRestoreKey === currentRelativeRoute()) {
+            if (pendingExplicitRestorePosition > 0) {
+              restoreScrollPosition(pendingExplicitRestorePosition);
+            }
+            pendingExplicitRestoreKey = '';
+            pendingExplicitRestorePosition = 0;
+          }
+        },
+      );
+
+      watch(
+        () => [
+          currentView.value,
+          state.selectedChain,
+          state.dashboardTab,
+          state.settingsSection,
+        ],
+        () => {
+          syncDashboardUrlState();
+          syncTokenUrlState();
+        },
+      );
+
+      watch(
+        () => ({
+          tokenQuery: state.dashboardFilters.tokenQuery,
+          contractQuery: state.dashboardFilters.contractQuery,
+          contractRisk: state.dashboardFilters.contractRisk,
+          contractLinkType: state.dashboardFilters.contractLinkType,
+        }),
+        (filters) => {
+          persistStoredFilters(filters);
+        },
+        { deep: true },
+      );
+
+      watch(
+        () => state.analysisForm.provider,
+        (provider) => {
+          const normalizedProvider = normalizeAiProvider(provider);
+          if (state.analysisForm.provider !== normalizedProvider) {
+            state.analysisForm.provider = normalizedProvider;
+            return;
+          }
+          const normalizedModel = normalizeAiModel(normalizedProvider, state.analysisForm.model);
+          if (state.analysisForm.model !== normalizedModel) {
+            state.analysisForm.model = normalizedModel;
+          }
+        },
+        { immediate: true },
+      );
+
+      return {
+        chains: computed(() => state.chains),
+        selectedChain: computed({
+          get: () => state.selectedChain,
+          set: (value) => { state.selectedChain = (value || '').toLowerCase(); },
+        }),
+        latestRuns: state.latestRuns,
+        running: computed(() => state.running),
+        progress: computed(() => state.progress),
+        dashboardTab: computed({
+          get: () => state.dashboardTab,
+          set: (value) => { state.dashboardTab = value; },
+        }),
+        settingsSection: computed({
+          get: () => state.settingsSection,
+          set: (value) => { state.settingsSection = value; },
+        }),
+        dashboard: state.dashboard,
+        dashboardFilters: state.dashboardFilters,
+        selectedContractFlowToken: computed({
+          get: () => state.selectedContractFlowToken,
+          set: (value) => { state.selectedContractFlowToken = String(value || '').toLowerCase(); },
+        }),
+        tokenDetail: computed(() => state.tokenDetail),
+        contractDetail: computed(() => state.contractDetail),
+        settings: state.settings,
+        syncStatus: computed(() => state.syncStatus),
+        autoAnalysisStatus,
+        autoAnalysisEnabled,
+        autoAnalysisButtonLabel,
+        autoAnalysisChipTone,
+        autoAnalysisMetaText,
+        autoAnalysisDetailText,
+        authEnabled: computed(() => state.authEnabled),
+        currentUser: computed(() => state.currentUser),
+        reviewForm: state.reviewForm,
+        contractReviewModal: state.contractReviewModal,
+        tokenReviewForm: state.tokenReviewForm,
+        tokenReviewExpanded: computed({
+          get: () => state.tokenReviewExpanded,
+          set: (value) => { state.tokenReviewExpanded = Boolean(value); },
+        }),
+        analysisForm: state.analysisForm,
+        currentView,
+        routeToken,
+        routeContract,
+        runMetaText,
+        syncMetaText,
+        syncStatusTone,
+        syncHeaderText,
+        progressPercent,
+        progressLabel,
+        progressStageLabel,
+        progressDetailText,
+        progressStatusTone,
+        pageLoading: computed(() => state.pageLoading.count > 0),
+        pageLoadingLabel: computed(() => state.pageLoading.label || 'Loading'),
+        filteredTokens,
+        filteredContracts,
+        contractOverviewSections,
+        tokenContracts,
+        sortedTokenContracts,
+        tokenContractSections,
+        tokenGroupCards,
+        tokenExploitableCount,
+        tokenLargestBalance,
+        tokenAiAnalysis,
+        contractPatternTargets,
+        contractReviews,
+        contractAiAnalysis,
+        sortedContractReviews,
+        sortedContractTokens,
+        contractFlowTokenOptions,
+        selectedContractFlowTokenRow,
+        sortedContractTokenFlows,
+        sortedChainConfigs,
+        contractSelectorPreview,
+        contractStatusLabel,
+        contractStatusTone,
+        exploitableCount,
+        topPortfolioUsd,
+        formatUsd,
+        formatBig,
+        formatTokenAmount,
+        formatDateTime,
+        formatRelativeTime,
+        shortAddress,
+        syncStateLabel,
+        syncStateTone,
+        autoAuditStatusLabel,
+        autoAuditStatusTone,
+        autoAuditSeveritySummary,
+        auditResultDisplay,
+        refreshCurrent,
+        handleChainChanged,
+        runScan,
+        toggleAutoAnalysis,
+        navigateDashboard,
+        openDashboardMain,
+        openAutoMode,
+        openSettings,
+        navigateToken,
+        navigateContract,
+        goBackToPrevious,
+        openToken,
+        openContract,
+        toggleTableSort,
+        sortIndicator,
+        isActiveSort,
+        copyAddress,
+        isCopiedAddress,
+        contractToneClass,
+        toggleGroupCollapse,
+        selectReviewTarget,
+        openContractReviewModal,
+        closeContractReviewModal,
+        saveContractReviewModal,
+        analysisStatusLabel,
+        analysisStatusTone,
+        analysisStatusHint,
+        canRequestTokenAnalysis,
+        canRequestContractAnalysis,
+        canRequestOverviewAutoAudit,
+        canRequestTokenAutoAudit,
+        analysisRequestButtonLabel,
+        tokenAnalysisRequestButtonLabel,
+        requestOverviewAutoAudit,
+        requestTokenAutoAudit,
+        requestTokenAnalysis,
+        requestContractAnalysis,
+        openAiReport,
+        openTokenAiReport,
+        toggleTokenReviewEditor,
+        saveSettings,
+        addAiProviderRow,
+        removeAiProviderRow,
+        addAiModelRow,
+        removeAiModelRow,
+        addWhitelistPatternRow,
+        removeWhitelistPatternRow,
+        saveReview,
+        saveTokenReview,
+        logout,
+        aiProviderOptions,
+        aiModelOptions,
+      };
+    },
+  });
+
+  try {
+    app.use(pinia);
+    app.use(router);
+    appRoot?.removeAttribute('v-cloak');
+    app.mount('#app');
+  } catch (err) {
+    if (appRoot) {
+      appRoot.removeAttribute('v-cloak');
+      appRoot.innerHTML = `
+        <section class="card app-error-card">
+          <div class="card-head">
+            <h2>Frontend Mount Failed</h2>
+            <span class="muted">Dashboard bootstrap error</span>
+          </div>
+          <p class="muted">${String(err instanceof Error ? err.message : err)}</p>
+        </section>
+      `;
+    }
+    console.error(err);
+  }
+})();

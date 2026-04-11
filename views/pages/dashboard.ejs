@@ -1,0 +1,1827 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <%- await include('../partials/head', { title: title || 'Solana Mev Labs' }) %>
+  </head>
+  <body
+    data-initial-view="<%= initialView || 'dashboard' %>"
+    data-auth-enabled="<%= authEnabled ? '1' : '0' %>"
+    data-current-user="<%= currentUser || '' %>"
+  >
+    <div id="app" class="app-shell" v-cloak>
+      <header class="hero">
+        <div class="hero-top">
+          <div>
+            <p class="kicker">Event Filter Control</p>
+            <h1 class="hero-title">Solana Mev Labs</h1>
+          </div>
+          <div class="hero-actions">
+            <label class="inline-label">
+              <span>Chain</span>
+              <select v-model="selectedChain" @change="handleChainChanged">
+                <option v-for="chain in chains" :key="chain" :value="chain">{{ chain.toUpperCase() }}</option>
+              </select>
+            </label>
+            <button class="btn primary" type="button" :disabled="running || !selectedChain" @click="runScan">
+              {{ running ? 'Running...' : 'Run Round' }}
+            </button>
+            <button class="btn ghost" type="button" @click="refreshCurrent">Refresh</button>
+            <div v-if="authEnabled" class="session-chip">
+              <span class="mono">{{ currentUser || 'signed in' }}</span>
+              <button class="btn ghost btn-small" type="button" @click="logout">Sign Out</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="hero-meta">
+          <span class="mono">{{ runMetaText }}</span>
+        </div>
+
+        <section v-if="running && progress" class="hero-progress">
+          <div class="hero-progress-head">
+            <div>
+              <p class="hero-progress-stage">{{ progressStageLabel }}</p>
+              <strong>{{ progressLabel }}</strong>
+            </div>
+            <div class="hero-progress-meta">
+              <span class="chip small" :class="progressStatusTone">{{ progressPercent }}%</span>
+              <span v-if="progressDetailText" class="mono">{{ progressDetailText }}</span>
+            </div>
+          </div>
+          <div class="progress-track" aria-hidden="true">
+            <div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div>
+          </div>
+        </section>
+
+        <div class="hero-nav-row">
+          <div class="hero-nav">
+            <button class="tab" :class="{ active: currentView === 'dashboard' && dashboardTab === 'tokens' }" @click="openDashboardMain">Dashboard</button>
+            <button class="tab" :class="{ active: currentView === 'dashboard' && dashboardTab === 'auto' }" @click="openAutoMode">Auto Mode</button>
+            <button class="tab" :class="{ active: currentView === 'token' || currentView === 'token-detail' }" @click="navigateToken">Token</button>
+            <button class="tab" :class="{ active: currentView === 'dashboard' && dashboardTab === 'settings' }" @click="openSettings">Settings</button>
+          </div>
+          <div class="hero-status-badges">
+            <span class="status-badge" :class="syncStatus?.configured ? 'active' : 'inactive'">AUTO SYNC</span>
+            <span class="status-badge" :class="autoAnalysisEnabled ? 'active' : 'inactive'">AUTO AUDIT</span>
+          </div>
+        </div>
+      </header>
+
+      <main v-if="currentView === 'dashboard'" class="grid dashboard-grid">
+        <template v-if="pageLoading">
+          <section class="card card-full skeleton-card">
+            <div class="skeleton-block skeleton-heading"></div>
+            <div class="meta-grid skeleton-meta-grid">
+              <div v-for="n in 4" :key="`dashboard-meta-skeleton-${n}`" class="meta-item skeleton-meta-item">
+                <div class="skeleton-block skeleton-label"></div>
+                <div class="skeleton-block skeleton-value"></div>
+              </div>
+            </div>
+          </section>
+          <section class="card card-full skeleton-card">
+            <div class="card-head">
+              <div class="skeleton-block skeleton-heading"></div>
+              <div class="skeleton-block skeleton-inline"></div>
+            </div>
+            <div class="filter-toolbar dense">
+              <div class="skeleton-block skeleton-input grow"></div>
+              <div class="skeleton-block skeleton-input"></div>
+              <div class="skeleton-block skeleton-input"></div>
+            </div>
+            <div class="table-wrap skeleton-table-wrap">
+              <div class="skeleton-table">
+                <div v-for="n in 8" :key="`dashboard-row-skeleton-${n}`" class="skeleton-table-row">
+                  <div v-for="m in 6" :key="`dashboard-cell-skeleton-${n}-${m}`" class="skeleton-block skeleton-cell"></div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </template>
+
+        <template v-else-if="dashboardTab === 'tokens'">
+        <section class="card card-full">
+          <div class="meta-grid">
+            <div class="meta-item">
+              <span>Total Contracts</span>
+              <strong>{{ dashboard.contracts.length }}</strong>
+            </div>
+            <div class="meta-item">
+              <span>Exploitable Tagged</span>
+              <strong>{{ exploitableCount }}</strong>
+            </div>
+            <div class="meta-item">
+              <span>Top Total USD</span>
+              <strong>{{ formatUsd(topPortfolioUsd) }}</strong>
+            </div>
+            <div class="meta-item">
+              <span>Pattern Sync Queue</span>
+              <strong>{{ syncMetaText }}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="card card-full">
+          <div class="card-head">
+            <h2>Contract Overview</h2>
+            <span class="muted">{{ filteredContracts.length }} / {{ dashboard.contracts.length }} contracts</span>
+          </div>
+          <div class="filter-toolbar dense">
+            <label class="filter-field grow">
+              <span>Search</span>
+              <input v-model="dashboardFilters.contractQuery" type="text" placeholder="contract, linkage, pattern">
+            </label>
+            <label class="filter-field">
+              <span>Risk</span>
+              <select v-model="dashboardFilters.contractRisk">
+                <option value="all">All</option>
+                <option value="exploitable">Exploitable</option>
+                <option value="seen">Seen</option>
+                <option value="unseen">Unseen</option>
+              </select>
+            </label>
+            <label class="filter-field">
+              <span>Link</span>
+              <select v-model="dashboardFilters.contractLinkType">
+                <option value="all">All</option>
+                <option value="plain">Plain</option>
+                <option value="proxy">Proxy</option>
+                <option value="eip7702">EIP-7702</option>
+              </select>
+            </label>
+          </div>
+          <div class="table-wrap contract-overview-wrap">
+            <table class="contract-overview-grid">
+              <colgroup>
+                <col class="overview-col-contract">
+                <col class="overview-col-label">
+                <col class="overview-col-usd">
+                <col class="overview-col-linkage">
+                <col class="overview-col-patterns">
+                <col class="overview-col-deployed">
+                <col class="overview-col-flag">
+                <col class="overview-col-audit-result">
+                <col class="overview-col-action">
+              </colgroup>
+              <thead>
+                <tr>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractOverview', 'contract') }" @click="toggleTableSort('contractOverview', 'contract')">Contract <span>{{ sortIndicator('contractOverview', 'contract') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractOverview', 'label') }" @click="toggleTableSort('contractOverview', 'label')">Label <span>{{ sortIndicator('contractOverview', 'label') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractOverview', 'total_usd') }" @click="toggleTableSort('contractOverview', 'total_usd')">Total USD <span>{{ sortIndicator('contractOverview', 'total_usd') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractOverview', 'linkage') }" @click="toggleTableSort('contractOverview', 'linkage')">Linkage <span>{{ sortIndicator('contractOverview', 'linkage') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractOverview', 'patterns') }" @click="toggleTableSort('contractOverview', 'patterns')">Patterns <span>{{ sortIndicator('contractOverview', 'patterns') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractOverview', 'deployed') }" @click="toggleTableSort('contractOverview', 'deployed')">Deployed <span>{{ sortIndicator('contractOverview', 'deployed') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractOverview', 'auto_audit_status') }" @click="toggleTableSort('contractOverview', 'auto_audit_status')">Auto Audit <span>{{ sortIndicator('contractOverview', 'auto_audit_status') }}</span></button></th>
+                  <th>Audit Result</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="!filteredContracts.length">
+                  <td colspan="9" class="muted">No contract data</td>
+                </tr>
+                <template v-for="section in contractOverviewSections" :key="section.key">
+                  <tr v-if="section.isGrouped" class="pattern-section-row" :class="section.toneClass">
+                    <td colspan="9">
+                      <button class="pattern-section-head pattern-section-toggle" type="button" @click="toggleGroupCollapse('contractOverview', section.key)">
+                        <strong>{{ section.title }}</strong>
+                        <span class="pattern-section-meta">
+                          <span class="chip small">{{ section.rows.length }} contracts</span>
+                          <span class="collapse-icon" :class="{ collapsed: section.collapsed }" aria-hidden="true">
+                            <svg viewBox="0 0 16 16" class="icon-svg">
+                              <path d="M4.6 6.2 8 9.6l3.4-3.4 1 1L8 11.6 3.6 7.2z" fill="currentColor"></path>
+                            </svg>
+                          </span>
+                        </span>
+                      </button>
+                    </td>
+                  </tr>
+                  <tr v-for="row in section.rows" v-show="!section.collapsed" :key="row.contract" :class="[contractToneClass(row), section.isGrouped ? 'pattern-section-member' : '']">
+                  <td>
+                    <div class="address-inline">
+                      <button class="link-btn mono" @click="openContract(row.contract)">{{ row.contract }}</button>
+                      <button class="icon-copy-btn" type="button" @click="copyAddress(row.contract)" :aria-label="`Copy ${row.contract}`" :title="isCopiedAddress(row.contract) ? 'Copied' : 'Copy address'">
+                        <svg v-if="isCopiedAddress(row.contract)" viewBox="0 0 16 16" aria-hidden="true" class="icon-svg success">
+                          <path d="M6.4 11.2 3.2 8l1.1-1.1 2.1 2.1 5.3-5.3L12.8 4z" fill="currentColor"></path>
+                        </svg>
+                        <svg v-else viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                          <path d="M5 2.5A1.5 1.5 0 0 1 6.5 1h6A1.5 1.5 0 0 1 14 2.5v7A1.5 1.5 0 0 1 12.5 11h-1V9.5h1v-7h-6v1H5z" fill="currentColor"></path>
+                          <path d="M3.5 5A1.5 1.5 0 0 0 2 6.5v7A1.5 1.5 0 0 0 3.5 15h6A1.5 1.5 0 0 0 11 13.5v-7A1.5 1.5 0 0 0 9.5 5zm0 1.5h6v7h-6z" fill="currentColor"></path>
+                        </svg>
+                      </button>
+                    </div>
+                  </td>
+                  <td>{{ row.label || '--' }}</td>
+                  <td>{{ formatUsd(row.portfolio_usd) }}</td>
+                  <td class="mono">
+                    <div v-if="row.linkage" class="address-inline">
+                      <span>{{ row.linkage }}</span>
+                      <button class="icon-copy-btn" type="button" @click="copyAddress(row.linkage)" :aria-label="`Copy ${row.linkage}`" :title="isCopiedAddress(row.linkage) ? 'Copied' : 'Copy address'">
+                        <svg v-if="isCopiedAddress(row.linkage)" viewBox="0 0 16 16" aria-hidden="true" class="icon-svg success">
+                          <path d="M6.4 11.2 3.2 8l1.1-1.1 2.1 2.1 5.3-5.3L12.8 4z" fill="currentColor"></path>
+                        </svg>
+                        <svg v-else viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                          <path d="M5 2.5A1.5 1.5 0 0 1 6.5 1h6A1.5 1.5 0 0 1 14 2.5v7A1.5 1.5 0 0 1 12.5 11h-1V9.5h1v-7h-6v1H5z" fill="currentColor"></path>
+                          <path d="M3.5 5A1.5 1.5 0 0 0 2 6.5v7A1.5 1.5 0 0 0 3.5 15h6A1.5 1.5 0 0 0 11 13.5v-7A1.5 1.5 0 0 0 9.5 5zm0 1.5h6v7h-6z" fill="currentColor"></path>
+                        </svg>
+                      </button>
+                    </div>
+                    <span v-else>--</span>
+                  </td>
+                  <td>
+                    <div v-if="row.patterns?.length" class="pattern-chip-list">
+                      <span v-for="pattern in row.patterns" :key="`${row.contract}:${pattern}`" class="chip small pattern-chip">
+                        {{ pattern }}
+                      </span>
+                    </div>
+                    <span v-else class="muted">--</span>
+                  </td>
+                  <td :title="formatDateTime(row.deployed_at)">{{ formatRelativeTime(row.deployed_at) }}</td>
+                  <td>
+                    <span class="chip small" :class="autoAuditStatusTone(autoAuditStatusLabel(row.auto_audit_status))">
+                      {{ autoAuditStatusLabel(row.auto_audit_status) }}
+                    </span>
+                  </td>
+                  <td>
+                    <span v-if="autoAuditStatusLabel(row.auto_audit_status) === 'yes'" class="mono tiny-muted">
+                      {{ autoAuditSeveritySummary(row) || 'c:0 h:0 m:0' }}
+                    </span>
+                    <span v-else class="muted">--</span>
+                  </td>
+                  <td>
+                    <div class="icon-action-row">
+                      <button
+                        class="icon-action-btn"
+                        type="button"
+                        @click="openContractReviewModal(row, 'overview')"
+                        :aria-label="`Open review for ${row.contract}`"
+                        title="Add review"
+                      >
+                        <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                          <path d="M3 2.5A1.5 1.5 0 0 1 4.5 1h5.8a1.5 1.5 0 0 1 1.06.44l1.2 1.2A1.5 1.5 0 0 1 13 3.7v8.8A1.5 1.5 0 0 1 11.5 14h-7A1.5 1.5 0 0 1 3 12.5zm1.5 0v10h7V4.2l-.7-.7H4.5zm1.2 2.3h4.6v1H5.7zm0 2h4.6v1H5.7zm0 2h3v1h-3z" fill="currentColor"></path>
+                        </svg>
+                      </button>
+                      <button
+                        v-if="canRequestOverviewAutoAudit(row)"
+                        class="icon-action-btn"
+                        type="button"
+                        @click="requestOverviewAutoAudit(row)"
+                        :aria-label="`Request AI auto audit for ${row.contract}`"
+                        title="Request AI auto audit"
+                      >
+                        <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                          <path d="M8 1.2 9.4 5l3.8 1.4L9.4 7.8 8 11.6 6.6 7.8 2.8 6.4 6.6 5z" fill="currentColor"></path>
+                          <path d="M12 9.8 12.7 11.6 14.5 12.3 12.7 13 12 14.8 11.3 13 9.5 12.3 11.3 11.6z" fill="currentColor"></path>
+                        </svg>
+                      </button>
+                      <span v-else-if="autoAuditStatusLabel(row.auto_audit_status) === 'processing'" class="chip small warn">processing</span>
+                      <span v-else class="muted">--</span>
+                    </div>
+                  </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        </template>
+
+        <section class="card card-full" v-else-if="dashboardTab === 'auto' && !pageLoading">
+          <div class="card-head">
+            <h2>Auto Analysis Engine</h2>
+            <span class="muted">Run and tune unattended analysis from one place</span>
+          </div>
+
+          <div class="auto-mode-console">
+            <section class="auto-board-top">
+              <div class="auto-command-center">
+                <div class="auto-board-kicker-row">
+                  <p class="kicker">Unattended Audit Loop</p>
+                  <span class="chip small" :class="autoAnalysisChipTone">{{ autoAnalysisEnabled ? 'AUTO ON' : 'AUTO OFF' }}</span>
+                </div>
+                <h3>Night Shift Operations</h3>
+                <p class="muted auto-mode-status-text">{{ autoAnalysisDetailText }}</p>
+                <div class="auto-command-strip">
+                  <div class="auto-command-item">
+                    <span>Target Chain</span>
+                    <strong>{{ (autoAnalysisStatus.chain || selectedChain || '--').toUpperCase() }}</strong>
+                  </div>
+                  <div class="auto-command-item">
+                    <span>Phase</span>
+                    <strong>{{ autoAnalysisStatus.phase || 'idle' }}</strong>
+                  </div>
+                  <div class="auto-command-item">
+                    <span>Queued</span>
+                    <strong>{{ autoAnalysisStatus.queued || 0 }}</strong>
+                  </div>
+                </div>
+                <div class="button-row">
+                  <button
+                    class="btn"
+                    :class="autoAnalysisEnabled ? 'secondary' : 'primary'"
+                    type="button"
+                    :disabled="!selectedChain && !autoAnalysisEnabled"
+                    @click="toggleAutoAnalysis"
+                  >
+                    {{ autoAnalysisButtonLabel }}
+                  </button>
+                  <button class="btn subtle" type="button" @click="saveSettings">Save Auto Settings</button>
+                </div>
+              </div>
+
+              <div class="auto-telemetry-panel">
+                <div class="auto-telemetry-grid">
+                  <div class="auto-telemetry-card">
+                    <span>Pool Capacity</span>
+                    <strong>{{ autoAnalysisStatus.capacity || settings.runtime_settings.auto_analysis.queue_capacity || 10 }}</strong>
+                  </div>
+                  <div class="auto-telemetry-card">
+                    <span>Running Now</span>
+                    <strong>{{ autoAnalysisStatus.active || 0 }}</strong>
+                  </div>
+                  <div class="auto-telemetry-card">
+                    <span>Token Share</span>
+                    <strong>{{ settings.runtime_settings.auto_analysis.token_share_percent || 0 }}%</strong>
+                  </div>
+                  <div class="auto-telemetry-card">
+                    <span>Contract Share</span>
+                    <strong>{{ settings.runtime_settings.auto_analysis.contract_share_percent || 0 }}%</strong>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="auto-strategy-board">
+              <div class="auto-strategy-card">
+                <div class="card-head compact">
+                  <h3>Queue Strategy</h3>
+                  <span class="muted">How the pool is split and filled</span>
+                </div>
+                <div class="auto-mix-strip">
+                  <div class="auto-mix-bar">
+                    <div class="auto-mix-token" :style="{ width: `${Math.max(0, Math.min(100, settings.runtime_settings.auto_analysis.token_share_percent || 0))}%` }"></div>
+                    <div class="auto-mix-contract" :style="{ width: `${Math.max(0, Math.min(100, settings.runtime_settings.auto_analysis.contract_share_percent || 0))}%` }"></div>
+                  </div>
+                  <div class="auto-mix-legend">
+                    <span class="chip small token-tone">Token {{ settings.runtime_settings.auto_analysis.token_share_percent || 0 }}%</span>
+                    <span class="chip small contract-tone">Contract {{ settings.runtime_settings.auto_analysis.contract_share_percent || 0 }}%</span>
+                  </div>
+                </div>
+                <div class="auto-strategy-grid">
+                  <label class="stack-label">
+                    <span>Queue Capacity</span>
+                    <input v-model.number="settings.runtime_settings.auto_analysis.queue_capacity" type="number" min="1" max="50">
+                  </label>
+                  <label class="stack-label">
+                    <span>Token Share (%)</span>
+                    <input v-model.number="settings.runtime_settings.auto_analysis.token_share_percent" type="number" min="0" max="100">
+                  </label>
+                  <label class="stack-label">
+                    <span>Contract Share (%)</span>
+                    <input v-model.number="settings.runtime_settings.auto_analysis.contract_share_percent" type="number" min="0" max="100">
+                  </label>
+                </div>
+              </div>
+
+              <div class="auto-threshold-card">
+                <div class="card-head compact">
+                  <h3>Backend Timing</h3>
+                  <span class="muted">Tune how often the audit worker checks Dedaub and analysis status</span>
+                </div>
+                <div class="auto-threshold-grid">
+                  <div class="auto-threshold-box">
+                    <span>Audit Poll Interval</span>
+                    <label class="stack-label compact-stack">
+                      <input v-model.number="settings.runtime_settings.ai_audit_backend.poll_interval_ms" type="number" min="1000" step="1000">
+                    </label>
+                    <p class="muted inline-help">Used for both Dedaub decompile status and analysis status polling.</p>
+                  </div>
+                  <div class="auto-threshold-box">
+                    <span>Dedaub Wait</span>
+                    <label class="stack-label compact-stack">
+                      <input v-model.number="settings.runtime_settings.ai_audit_backend.dedaub_wait_seconds" type="number" min="1" step="1">
+                    </label>
+                    <p class="muted inline-help">Initial wait passed when the Dedaub decompile request is created.</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="auto-threshold-card">
+                <div class="card-head compact">
+                  <h3>Thresholds</h3>
+                  <span class="muted">The minimum bar before anything enters the queue</span>
+                </div>
+                <div class="auto-threshold-grid">
+                  <div class="auto-threshold-box">
+                    <span>Contract Min TVL</span>
+                    <label class="stack-label compact-stack">
+                      <input v-model.number="settings.runtime_settings.auto_analysis.contract_min_tvl_usd" type="number" min="0" step="1000">
+                    </label>
+                  </div>
+                  <div class="auto-threshold-box">
+                    <span>Token Min Price</span>
+                    <label class="stack-label compact-stack">
+                      <input v-model.number="settings.runtime_settings.auto_analysis.token_min_price_usd" type="number" min="0" step="0.0001">
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="auto-rules-board">
+              <div class="auto-rules-column">
+                <div class="card-head compact">
+                  <h3>Contract Rules</h3>
+                  <span class="muted">High signal contract selection</span>
+                </div>
+                <div class="auto-rule-list">
+                  <label class="auto-rule-item">
+                    <input v-model="settings.runtime_settings.auto_analysis.require_contract_selectors" type="checkbox">
+                    <div class="auto-rule-copy">
+                      <strong>Require contract selectors</strong>
+                      <p>Only queue contracts that already have selector fingerprints.</p>
+                    </div>
+                  </label>
+                  <label class="auto-rule-item">
+                    <input v-model="settings.runtime_settings.auto_analysis.skip_seen_contracts" type="checkbox">
+                    <div class="auto-rule-copy">
+                      <strong>Skip seen contract patterns</strong>
+                      <p>Ignore contracts already mapped to known seen patterns.</p>
+                    </div>
+                  </label>
+                  <label class="auto-rule-item">
+                    <input v-model="settings.runtime_settings.auto_analysis.one_per_contract_pattern" type="checkbox">
+                    <div class="auto-rule-copy">
+                      <strong>One contract per pattern group</strong>
+                      <p>Pick a single representative when multiple contracts share a pattern.</p>
+                    </div>
+                  </label>
+                  <label class="auto-rule-item">
+                    <input v-model="settings.runtime_settings.auto_analysis.exclude_audited_contracts" type="checkbox">
+                    <div class="auto-rule-copy">
+                      <strong>Skip already audited contracts</strong>
+                      <p>Leave previously auto or manually audited contracts out of the queue.</p>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              <div class="auto-rules-column">
+                <div class="card-head compact">
+                  <h3>Token Rules</h3>
+                  <span class="muted">Filter tokens before queueing</span>
+                </div>
+                <div class="auto-rule-list">
+                  <label class="auto-rule-item">
+                    <input v-model="settings.runtime_settings.auto_analysis.require_token_sync" type="checkbox">
+                    <div class="auto-rule-copy">
+                      <strong>Require token `sync()`</strong>
+                      <p>Only queue tokens where `sync()` support has been positively detected.</p>
+                    </div>
+                  </label>
+                  <label class="auto-rule-item">
+                    <input v-model="settings.runtime_settings.auto_analysis.exclude_audited_tokens" type="checkbox">
+                    <div class="auto-rule-copy">
+                      <strong>Skip already audited tokens</strong>
+                      <p>Keep the queue focused on fresh token candidates.</p>
+                    </div>
+                  </label>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="card card-full" v-else-if="!pageLoading">
+          <div class="card-head">
+            <h2>Runtime Settings</h2>
+            <span class="muted">Saved in DB and hot-applied</span>
+          </div>
+          <div class="settings-shell">
+            <aside class="settings-sidebar">
+              <button class="settings-nav-btn" :class="{ active: settingsSection === 'keys' }" type="button" @click="openSettings('keys')">
+                <strong>Keys</strong>
+                <span>{{ (settings.runtime_settings.chainbase_keys || '').split(/\r?\n/).filter(Boolean).length }} chainbase / {{ (settings.runtime_settings.rpc_keys || '').split(/\r?\n/).filter(Boolean).length }} rpc</span>
+              </button>
+              <button class="settings-nav-btn" :class="{ active: settingsSection === 'runtime' }" type="button" @click="openSettings('runtime')">
+                <strong>Runtime</strong>
+                <span>{{ (settings.runtime_settings.monitored_chains || []).length }} chains monitored</span>
+              </button>
+              <button class="settings-nav-btn" :class="{ active: settingsSection === 'access' }" type="button" @click="openSettings('access')">
+                <strong>Access</strong>
+                <span>{{ settings.runtime_settings.access.auth_enabled ? 'auth on' : 'auth off' }} / {{ settings.runtime_settings.access.https_enabled ? 'https' : 'http' }}</span>
+              </button>
+              <button class="settings-nav-btn" :class="{ active: settingsSection === 'pattern-sync' }" type="button" @click="openSettings('pattern-sync')">
+                <strong>Pattern Sync</strong>
+                <span>{{ settings.runtime_settings.pattern_sync.host || 'not configured' }}</span>
+              </button>
+              <button class="settings-nav-btn" :class="{ active: settingsSection === 'chains' }" type="button" @click="openSettings('chains')">
+                <strong>Chains</strong>
+                <span>{{ settings.chain_configs.length }} chain configs</span>
+              </button>
+              <button class="settings-nav-btn" :class="{ active: settingsSection === 'whitelist' }" type="button" @click="openSettings('whitelist')">
+                <strong>Whitelist</strong>
+                <span>{{ settings.whitelist_patterns.length }} patterns</span>
+              </button>
+              <button class="settings-nav-btn" :class="{ active: settingsSection === 'ai' }" type="button" @click="openSettings('ai')">
+                <strong>AI Audit</strong>
+                <span>{{ settings.ai_providers.length }} providers / {{ settings.ai_models.length }} models</span>
+              </button>
+              <button class="btn primary settings-save-btn" type="button" @click="saveSettings">Save Settings</button>
+            </aside>
+
+            <section class="settings-content">
+              <div v-if="settingsSection === 'keys'" class="settings-panel">
+                <div class="card-head compact">
+                  <h3>Shared Keys</h3>
+                  <span class="muted">Current DB values</span>
+                </div>
+                <label class="stack-label">
+                  <span>Chainbase Keys</span>
+                  <textarea v-model="settings.runtime_settings.chainbase_keys" class="code-box compact-area keys-area" placeholder="one key per line"></textarea>
+                </label>
+                <label class="stack-label">
+                  <span>RPC Keys</span>
+                  <textarea v-model="settings.runtime_settings.rpc_keys" class="code-box compact-area keys-area" placeholder="one key per line"></textarea>
+                </label>
+              </div>
+
+              <div v-else-if="settingsSection === 'runtime'" class="settings-panel">
+                <h3>Runtime</h3>
+                <label class="stack-label">
+                  <span>Monitored Chains</span>
+                  <div class="checkbox-grid">
+                    <label v-for="chain in chains" :key="`monitor-${chain}`" class="stack-label inline">
+                      <input
+                        :checked="settings.runtime_settings.monitored_chains.includes(chain)"
+                        type="checkbox"
+                        @change="settings.runtime_settings.monitored_chains = $event.target.checked ? [...new Set([...settings.runtime_settings.monitored_chains, chain])] : settings.runtime_settings.monitored_chains.filter((value) => value !== chain)"
+                      >
+                      <span>{{ chain }}</span>
+                    </label>
+                  </div>
+                </label>
+                <div class="settings-inline-grid">
+                  <label class="stack-label">
+                    <span>Poll Interval (ms)</span>
+                    <input v-model.number="settings.runtime_settings.poll_interval_ms" type="number" min="1000" step="1000">
+                  </label>
+                  <label class="stack-label inline">
+                    <input v-model="settings.runtime_settings.debug" type="checkbox">
+                    <span>Debug Logging</span>
+                  </label>
+                </div>
+                <h3>Price Limiter</h3>
+                <div class="settings-inline-grid">
+                  <label class="stack-label">
+                    <span>Req / Second</span>
+                    <input v-model.number="settings.runtime_settings.pancakeswap_price.max_req_per_second" type="number" min="1">
+                  </label>
+                  <label class="stack-label">
+                    <span>Req / Minute</span>
+                    <input v-model.number="settings.runtime_settings.pancakeswap_price.max_req_per_minute" type="number" min="1">
+                  </label>
+                </div>
+              </div>
+
+              <div v-else-if="settingsSection === 'access'" class="settings-panel">
+                <div class="card-head compact">
+                  <h3>Server Access</h3>
+                  <span class="muted">Credentials come from <span class="mono">{{ settings.runtime_settings.access.auth_source || 'user.json' }}</span>. HTTPS takes effect on next process start.</span>
+                </div>
+                <div class="settings-inline-grid">
+                  <div class="stack-label">
+                    <span>Sign-In</span>
+                    <span class="chip small" :class="settings.runtime_settings.access.auth_enabled ? 'ok' : 'plain'">
+                      {{ settings.runtime_settings.access.auth_enabled ? 'enabled' : 'disabled' }}
+                    </span>
+                  </div>
+                  <div class="stack-label">
+                    <span>Username</span>
+                    <span class="mono">{{ settings.runtime_settings.access.username || '--' }}</span>
+                  </div>
+                  <div class="stack-label">
+                    <span>Password State</span>
+                    <span class="chip small" :class="settings.runtime_settings.access.has_password ? 'ok' : 'plain'">
+                      {{ settings.runtime_settings.access.has_password ? 'stored in file' : 'missing' }}
+                    </span>
+                  </div>
+                </div>
+
+                <h3>HTTPS</h3>
+                <div class="settings-inline-grid">
+                  <label class="stack-label inline">
+                    <input v-model="settings.runtime_settings.access.https_enabled" type="checkbox">
+                    <span>Enable HTTPS</span>
+                  </label>
+                  <label class="stack-label">
+                    <span>TLS Cert Path</span>
+                    <input v-model="settings.runtime_settings.access.tls_cert_path" type="text" placeholder="/etc/ssl/certs/app.crt">
+                  </label>
+                  <label class="stack-label">
+                    <span>TLS Key Path</span>
+                    <input v-model="settings.runtime_settings.access.tls_key_path" type="text" placeholder="/etc/ssl/private/app.key">
+                  </label>
+                </div>
+              </div>
+
+              <div v-else-if="settingsSection === 'pattern-sync'" class="settings-panel">
+                <h3>Pattern Sync</h3>
+                <div class="settings-inline-grid">
+                  <label class="stack-label">
+                    <span>Host</span>
+                    <input v-model="settings.runtime_settings.pattern_sync.host" type="text">
+                  </label>
+                  <label class="stack-label">
+                    <span>Port</span>
+                    <input v-model.number="settings.runtime_settings.pattern_sync.port" type="number" min="1">
+                  </label>
+                  <label class="stack-label">
+                    <span>Database</span>
+                    <input v-model="settings.runtime_settings.pattern_sync.database" type="text">
+                  </label>
+                  <label class="stack-label">
+                    <span>User</span>
+                    <input v-model="settings.runtime_settings.pattern_sync.user" type="text">
+                  </label>
+                  <label class="stack-label">
+                    <span>Password</span>
+                    <input v-model="settings.runtime_settings.pattern_sync.password" type="password">
+                  </label>
+                  <label class="stack-label">
+                    <span>Remote Name</span>
+                    <input v-model="settings.runtime_settings.pattern_sync.remote_name" type="text">
+                  </label>
+                </div>
+                <div class="settings-inline-grid">
+                  <label class="stack-label inline">
+                    <input v-model="settings.runtime_settings.pattern_sync.auto_pull" type="checkbox">
+                    <span>Auto Pull</span>
+                  </label>
+                  <label class="stack-label inline">
+                    <input v-model="settings.runtime_settings.pattern_sync.ssl" type="checkbox">
+                    <span>SSL</span>
+                  </label>
+                </div>
+              </div>
+
+              <div v-else-if="settingsSection === 'chains'" class="settings-panel">
+                <h3>Chain Config</h3>
+                <div class="table-wrap compact">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'chain') }" @click="toggleTableSort('chainConfig', 'chain')">Chain <span>{{ sortIndicator('chainConfig', 'chain') }}</span></button></th>
+                        <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'chain_id') }" @click="toggleTableSort('chainConfig', 'chain_id')">Chain ID <span>{{ sortIndicator('chainConfig', 'chain_id') }}</span></button></th>
+                        <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'blocks_per_scan') }" @click="toggleTableSort('chainConfig', 'blocks_per_scan')">Blocks/Scan <span>{{ sortIndicator('chainConfig', 'blocks_per_scan') }}</span></button></th>
+                        <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'rpc_url_count') }" @click="toggleTableSort('chainConfig', 'rpc_url_count')">RPC URLs <span>{{ sortIndicator('chainConfig', 'rpc_url_count') }}</span></button></th>
+                        <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'multicall3') }" @click="toggleTableSort('chainConfig', 'multicall3')">Multicall <span>{{ sortIndicator('chainConfig', 'multicall3') }}</span></button></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="cfg in sortedChainConfigs" :key="cfg.chain">
+                        <td>{{ cfg.chain }}</td>
+                        <td>{{ cfg.chain_id }}</td>
+                        <td><input v-model.number="cfg.blocks_per_scan" type="number" min="1"></td>
+                        <td>{{ Array.isArray(cfg.rpc_urls) ? cfg.rpc_urls.length : 0 }}</td>
+                        <td class="mono"><input v-model="cfg.multicall3" type="text" class="mono"></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div v-else-if="settingsSection === 'whitelist'" class="settings-panel">
+                <h3>Whitelist Patterns</h3>
+                <div class="table-wrap compact settings-pattern-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Hex Pattern</th>
+                        <th>Type</th>
+                        <th>Score</th>
+                        <th>Description</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-if="!settings.whitelist_patterns.length">
+                        <td colspan="6" class="muted">No whitelist patterns</td>
+                      </tr>
+                      <tr v-for="(pattern, index) in settings.whitelist_patterns" :key="`whitelist-${pattern.id || index}`">
+                        <td><input v-model="pattern.name" type="text" placeholder="pattern name"></td>
+                        <td><input v-model="pattern.hex_pattern" type="text" class="mono" placeholder="ac9650d8"></td>
+                        <td>
+                          <select v-model="pattern.pattern_type">
+                            <option value="selector">selector</option>
+                            <option value="call">call</option>
+                          </select>
+                        </td>
+                        <td><input v-model.number="pattern.score" type="number" min="0"></td>
+                        <td><input v-model="pattern.description" type="text" placeholder="description"></td>
+                        <td><button class="btn ghost btn-small" type="button" @click="removeWhitelistPatternRow(index)">Delete</button></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="button-row">
+                  <button class="btn ghost" type="button" @click="addWhitelistPatternRow">Add Pattern</button>
+                </div>
+              </div>
+
+              <div v-else class="settings-panel">
+                <h3>AI Audit Backend</h3>
+                <div class="settings-inline-grid">
+                  <label class="stack-label">
+                    <span>Base URL</span>
+                    <input v-model="settings.runtime_settings.ai_audit_backend.base_url" type="text" placeholder="https://127.0.0.1:5000">
+                  </label>
+                  <label class="stack-label">
+                    <span>API Key</span>
+                    <input v-model="settings.runtime_settings.ai_audit_backend.api_key" type="password" placeholder="tkc_...">
+                  </label>
+                  <label class="stack-label">
+                    <span>Etherscan API Key</span>
+                    <input v-model="settings.runtime_settings.ai_audit_backend.etherscan_api_key" type="password" placeholder="optional">
+                  </label>
+                  <label class="stack-label">
+                    <span>Poll Interval (ms)</span>
+                    <input v-model.number="settings.runtime_settings.ai_audit_backend.poll_interval_ms" type="number" min="1000" step="1000">
+                  </label>
+                  <label class="stack-label">
+                    <span>Dedaub Wait (s)</span>
+                    <input v-model.number="settings.runtime_settings.ai_audit_backend.dedaub_wait_seconds" type="number" min="1">
+                  </label>
+                  <label class="stack-label inline">
+                    <input v-model="settings.runtime_settings.ai_audit_backend.insecure_tls" type="checkbox">
+                    <span>Allow Insecure TLS</span>
+                  </label>
+                </div>
+
+                <h3>AI Providers</h3>
+                <div class="table-wrap compact">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Provider</th>
+                        <th>Enabled</th>
+                        <th>Position</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-if="!settings.ai_providers.length">
+                        <td colspan="4" class="muted">No providers</td>
+                      </tr>
+                      <tr v-for="(provider, index) in settings.ai_providers" :key="`provider-${index}`">
+                        <td><input v-model="provider.provider" type="text" placeholder="provider name"></td>
+                        <td><input v-model="provider.enabled" type="checkbox"></td>
+                        <td><input v-model.number="provider.position" type="number" min="0"></td>
+                        <td><button class="btn ghost btn-small" type="button" @click="removeAiProviderRow(index)">Delete</button></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="button-row">
+                  <button class="btn ghost" type="button" @click="addAiProviderRow">Add Provider</button>
+                </div>
+
+                <h3>AI Models</h3>
+                <div class="table-wrap compact">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Provider</th>
+                        <th>Model</th>
+                        <th>Enabled</th>
+                        <th>Default</th>
+                        <th>Position</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-if="!settings.ai_models.length">
+                        <td colspan="6" class="muted">No models</td>
+                      </tr>
+                      <tr v-for="(model, index) in settings.ai_models" :key="`model-${model.id || index}`">
+                        <td>
+                          <input v-model="model.provider" type="text" list="ai-provider-names" placeholder="provider">
+                        </td>
+                        <td><input v-model="model.model" type="text" placeholder="model name"></td>
+                        <td><input v-model="model.enabled" type="checkbox"></td>
+                        <td><input v-model="model.is_default" type="checkbox"></td>
+                        <td><input v-model.number="model.position" type="number" min="0"></td>
+                        <td><button class="btn ghost btn-small" type="button" @click="removeAiModelRow(index)">Delete</button></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <datalist id="ai-provider-names">
+                    <option v-for="provider in settings.ai_providers" :key="`provider-opt-${provider.provider}`" :value="provider.provider"></option>
+                  </datalist>
+                </div>
+                <div class="button-row">
+                  <button class="btn ghost" type="button" @click="addAiModelRow">Add Model</button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+
+      <main v-else-if="currentView === 'token'" class="grid detail-grid">
+        <template v-if="pageLoading">
+          <section class="card card-wide skeleton-card">
+            <div class="card-head">
+              <div class="skeleton-block skeleton-heading"></div>
+              <div class="skeleton-block skeleton-inline"></div>
+            </div>
+            <div class="filter-toolbar contract-flow-toolbar">
+              <div class="skeleton-block skeleton-input grow"></div>
+            </div>
+            <div class="table-wrap skeleton-table-wrap">
+              <div class="skeleton-table">
+                <div v-for="n in 10" :key="`token-row-skeleton-${n}`" class="skeleton-table-row">
+                  <div v-for="m in 5" :key="`token-cell-skeleton-${n}-${m}`" class="skeleton-block skeleton-cell"></div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </template>
+
+        <section v-else class="card card-wide">
+          <div class="card-head">
+            <h2>Token Directory</h2>
+            <span class="muted">{{ filteredTokens.length }} / {{ dashboard.tokens.length }} tokens</span>
+          </div>
+          <div class="filter-toolbar contract-flow-toolbar">
+            <label class="filter-field grow">
+              <span>Search</span>
+              <input v-model="dashboardFilters.tokenQuery" type="text" placeholder="token address, name, symbol">
+            </label>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'token') }" @click="toggleTableSort('tokenDirectory', 'token')">Token <span>{{ sortIndicator('tokenDirectory', 'token') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'name') }" @click="toggleTableSort('tokenDirectory', 'name')">Name <span>{{ sortIndicator('tokenDirectory', 'name') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'symbol') }" @click="toggleTableSort('tokenDirectory', 'symbol')">Symbol <span>{{ sortIndicator('tokenDirectory', 'symbol') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'sync') }" @click="toggleTableSort('tokenDirectory', 'sync')">Sync <span>{{ sortIndicator('tokenDirectory', 'sync') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'auto_audit_status') }" @click="toggleTableSort('tokenDirectory', 'auto_audit_status')">Auto Audit <span>{{ sortIndicator('tokenDirectory', 'auto_audit_status') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'audit_result') }" @click="toggleTableSort('tokenDirectory', 'audit_result')">Audit Result <span>{{ sortIndicator('tokenDirectory', 'audit_result') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'manual_audit') }" @click="toggleTableSort('tokenDirectory', 'manual_audit')">Manual Audit <span>{{ sortIndicator('tokenDirectory', 'manual_audit') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'price') }" @click="toggleTableSort('tokenDirectory', 'price')">Price <span>{{ sortIndicator('tokenDirectory', 'price') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'contracts') }" @click="toggleTableSort('tokenDirectory', 'contracts')">Contracts <span>{{ sortIndicator('tokenDirectory', 'contracts') }}</span></button></th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="!filteredTokens.length">
+                  <td colspan="10" class="muted">No token data</td>
+                </tr>
+                <tr v-for="token in filteredTokens" :key="token.token">
+                  <td>
+                    <div class="address-inline">
+                      <button class="link-btn mono" @click="openToken(token.token)">{{ token.is_native ? 'native' : token.token }}</button>
+                      <button class="icon-copy-btn" type="button" @click="copyAddress(token.token)" :aria-label="`Copy ${token.token}`" :title="isCopiedAddress(token.token) ? 'Copied' : 'Copy address'">
+                        <svg v-if="isCopiedAddress(token.token)" viewBox="0 0 16 16" aria-hidden="true" class="icon-svg success">
+                          <path d="M6.4 11.2 3.2 8l1.1-1.1 2.1 2.1 5.3-5.3L12.8 4z" fill="currentColor"></path>
+                        </svg>
+                        <svg v-else viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                          <path d="M5 2.5A1.5 1.5 0 0 1 6.5 1h6A1.5 1.5 0 0 1 14 2.5v7A1.5 1.5 0 0 1 12.5 11h-1V9.5h1v-7h-6v1H5z" fill="currentColor"></path>
+                          <path d="M3.5 5A1.5 1.5 0 0 0 2 6.5v7A1.5 1.5 0 0 0 3.5 15h6A1.5 1.5 0 0 0 11 13.5v-7A1.5 1.5 0 0 0 9.5 5zm0 1.5h6v7h-6z" fill="currentColor"></path>
+                        </svg>
+                      </button>
+                    </div>
+                  </td>
+                  <td>{{ token.token_name || '--' }}</td>
+                  <td>{{ token.token_symbol || '--' }}</td>
+                  <td>
+                    <span class="chip small" :class="syncStateTone(token.token_calls_sync)">
+                      {{ syncStateLabel(token.token_calls_sync) }}
+                    </span>
+                  </td>
+                  <td>
+                    <span class="chip small" :class="autoAuditStatusTone(autoAuditStatusLabel(token.auto_audit_status))">
+                      {{ autoAuditStatusLabel(token.auto_audit_status) }}
+                    </span>
+                  </td>
+                  <td><span class="mono tiny-muted">{{ auditResultDisplay(token) }}</span></td>
+                  <td>
+                    <span class="chip small" :class="token.is_manual_audit ? 'ok' : 'warn'">
+                      {{ token.is_manual_audit ? 'yes' : 'no' }}
+                    </span>
+                  </td>
+                  <td>{{ formatUsd(token.token_price_usd) }}</td>
+                  <td>{{ token.related_contract_count }}</td>
+                  <td>
+                    <button
+                      v-if="canRequestTokenAutoAudit(token)"
+                      class="icon-action-btn"
+                      type="button"
+                      @click="requestTokenAutoAudit(token)"
+                      :aria-label="`Request AI auto audit for ${token.token}`"
+                      title="Request AI auto audit"
+                    >
+                      <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                        <path d="M8 1.2 9.4 5l3.8 1.4L9.4 7.8 8 11.6 6.6 7.8 2.8 6.4 6.6 5z" fill="currentColor"></path>
+                        <path d="M12 9.8 12.7 11.6 14.5 12.3 12.7 13 12 14.8 11.3 13 9.5 12.3 11.3 11.6z" fill="currentColor"></path>
+                      </svg>
+                    </button>
+                    <span v-else-if="autoAuditStatusLabel(token.auto_audit_status) === 'processing'" class="chip small warn">processing</span>
+                    <span v-else class="muted">--</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+      </main>
+
+      <main v-else-if="currentView === 'token-detail'" class="grid detail-grid">
+        <template v-if="pageLoading">
+          <section class="card card-wide detail-hero-card skeleton-card">
+            <div class="detail-hero skeleton-hero">
+              <div class="skeleton-hero-main">
+                <div class="skeleton-block skeleton-kicker"></div>
+                <div class="skeleton-block skeleton-title"></div>
+                <div class="skeleton-block skeleton-address"></div>
+                <div class="tag-row">
+                  <div v-for="n in 4" :key="`token-detail-chip-skeleton-${n}`" class="skeleton-block skeleton-chip"></div>
+                </div>
+              </div>
+              <div class="detail-stats skeleton-detail-stats">
+                <div v-for="n in 4" :key="`token-detail-stat-skeleton-${n}`" class="detail-stat">
+                  <div class="skeleton-block skeleton-label"></div>
+                  <div class="skeleton-block skeleton-value"></div>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section class="token-detail-row">
+            <div class="card token-detail-card skeleton-card">
+              <div class="card-head">
+                <div class="skeleton-block skeleton-heading"></div>
+              </div>
+              <div class="stats-list">
+                <div v-for="n in 5" :key="`token-detail-info-skeleton-${n}`" class="stat-item">
+                  <div class="skeleton-block skeleton-label"></div>
+                  <div class="skeleton-block skeleton-value"></div>
+                </div>
+              </div>
+            </div>
+            <div class="card token-auto-analysis-card skeleton-card">
+              <div class="card-head compact">
+                <div class="skeleton-block skeleton-heading"></div>
+                <div class="skeleton-block skeleton-chip"></div>
+              </div>
+              <div class="auto-analysis-form-grid">
+                <div v-for="n in 3" :key="`token-audit-skeleton-${n}`" class="stack-label">
+                  <div class="skeleton-block skeleton-label"></div>
+                  <div class="skeleton-block skeleton-input"></div>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section class="card card-wide skeleton-card">
+            <div class="card-head">
+              <div class="skeleton-block skeleton-heading"></div>
+              <div class="skeleton-block skeleton-inline"></div>
+            </div>
+            <div class="table-wrap skeleton-table-wrap">
+              <div class="skeleton-table">
+                <div v-for="n in 7" :key="`token-detail-table-skeleton-${n}`" class="skeleton-table-row">
+                  <div v-for="m in 6" :key="`token-detail-table-cell-${n}-${m}`" class="skeleton-block skeleton-cell"></div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </template>
+
+        <template v-else>
+        <section class="card card-wide detail-hero-card">
+          <div class="detail-hero" v-if="tokenDetail">
+            <div>
+              <p class="detail-kicker">Token Profile</p>
+              <h2 class="detail-title">{{ tokenDetail.token_symbol || tokenDetail.token_name || shortAddress(routeToken) }}</h2>
+              <div class="address-inline detail-address-row">
+                <p class="detail-address mono">{{ routeToken || '--' }}</p>
+                <button class="icon-copy-btn" type="button" @click="copyAddress(routeToken)" :aria-label="`Copy ${routeToken}`" :title="isCopiedAddress(routeToken) ? 'Copied' : 'Copy address'">
+                  <svg v-if="isCopiedAddress(routeToken)" viewBox="0 0 16 16" aria-hidden="true" class="icon-svg success">
+                    <path d="M6.4 11.2 3.2 8l1.1-1.1 2.1 2.1 5.3-5.3L12.8 4z" fill="currentColor"></path>
+                  </svg>
+                  <svg v-else viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                    <path d="M5 2.5A1.5 1.5 0 0 1 6.5 1h6A1.5 1.5 0 0 1 14 2.5v7A1.5 1.5 0 0 1 12.5 11h-1V9.5h1v-7h-6v1H5z" fill="currentColor"></path>
+                    <path d="M3.5 5A1.5 1.5 0 0 0 2 6.5v7A1.5 1.5 0 0 0 3.5 15h6A1.5 1.5 0 0 0 11 13.5v-7A1.5 1.5 0 0 0 9.5 5zm0 1.5h6v7h-6z" fill="currentColor"></path>
+                  </svg>
+                </button>
+              </div>
+              <div class="tag-row">
+                <button class="icon-action-btn" type="button" @click="goBackToPrevious('token')" aria-label="Go back" title="Go back">
+                  <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                    <path d="M6.7 3.2 2.4 7.5l4.3 4.3 1-1-2.6-2.6h8v-1.4h-8l2.6-2.6z" fill="currentColor"></path>
+                  </svg>
+                </button>
+                <span class="chip small" :class="tokenDetail.is_native ? 'warn' : 'ok'">{{ tokenDetail.is_native ? 'native' : 'erc20' }}</span>
+                <span class="chip small" :class="syncStateTone(tokenDetail.token_calls_sync)">sync() {{ syncStateLabel(tokenDetail.token_calls_sync) }}</span>
+                <span class="chip small" :class="tokenDetail.is_auto_audit ? 'ok' : 'warn'">{{ tokenDetail.is_auto_audit ? 'auto audit' : 'auto pending' }}</span>
+                <span class="chip small" :class="tokenDetail.is_manual_audit ? 'ok' : 'warn'">{{ tokenDetail.is_manual_audit ? 'manual audit' : 'manual pending' }}</span>
+                <span class="chip small warn">price {{ formatUsd(tokenDetail.token_price_usd) }}</span>
+              </div>
+            </div>
+            <div class="detail-stats">
+              <div class="detail-stat">
+                <span>Contracts</span>
+                <strong>{{ tokenDetail.related_contract_count }}</strong>
+              </div>
+              <div class="detail-stat">
+                <span>Groups</span>
+                <strong>{{ tokenGroupCards.length }}</strong>
+              </div>
+              <div class="detail-stat">
+                <span>Exploitable</span>
+                <strong>{{ tokenExploitableCount }}</strong>
+              </div>
+              <div class="detail-stat">
+                <span>Total TX</span>
+                <strong>{{ tokenDetail.total_transfer_count }}</strong>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="token-detail-row" v-if="tokenDetail">
+          <div class="card token-detail-card">
+            <div class="card-head">
+              <h2>Token Details</h2>
+              <span class="muted">Token facts</span>
+            </div>
+            <div class="stats-list">
+              <div class="stat-item">
+                <span>Name</span>
+                <strong>{{ tokenDetail.token_name || '--' }}</strong>
+              </div>
+              <div class="stat-item">
+                <span>Sync</span>
+                <strong>{{ syncStateLabel(tokenDetail.token_calls_sync) }}</strong>
+              </div>
+              <div class="stat-item">
+                <span>Created</span>
+                <strong>{{ formatDateTime(tokenDetail.token_created_at) }}</strong>
+              </div>
+              <div class="stat-item">
+                <span>Top Balance</span>
+                <strong class="mono">{{ formatTokenAmount(tokenLargestBalance, tokenDetail.decimals) }}</strong>
+              </div>
+              <div class="stat-item">
+                <span>Total Transfer</span>
+                <strong class="mono">{{ formatTokenAmount(tokenDetail.total_transfer_amount, tokenDetail.decimals) }}</strong>
+              </div>
+            </div>
+          </div>
+          <div class="card token-auto-analysis-card">
+            <div class="card-head compact">
+              <h3>AI Auto Audit</h3>
+              <span class="chip small" :class="analysisStatusTone(tokenAiAnalysis.status)">
+                {{ analysisStatusLabel(tokenAiAnalysis.status) }}
+              </span>
+            </div>
+            <div class="auto-analysis-form-grid">
+              <label class="stack-label">
+                <span>Provider</span>
+                <select v-model="analysisForm.provider" :disabled="!canRequestTokenAnalysis()">
+                  <option v-for="provider in aiProviderOptions" :key="`token-provider-${provider}`" :value="provider">{{ provider }}</option>
+                </select>
+              </label>
+              <label class="stack-label">
+                <span>Model</span>
+                <select v-model="analysisForm.model" :disabled="!canRequestTokenAnalysis()">
+                  <option v-for="model in aiModelOptions" :key="`token-model-${model}`" :value="model">{{ model }}</option>
+                </select>
+              </label>
+              <label class="stack-label">
+                <span>Severity</span>
+                <div class="audit-readonly-field audit-severity-line">
+                  <strong>C {{ tokenAiAnalysis.critical ?? '--' }}</strong>
+                  <strong>H {{ tokenAiAnalysis.high ?? '--' }}</strong>
+                  <strong>M {{ tokenAiAnalysis.medium ?? '--' }}</strong>
+                </div>
+              </label>
+            </div>
+            <div class="audit-meta-stack audit-meta-stack-inline">
+              <div class="audit-meta-row compact inline-metric">
+                <span>Timing</span>
+                <div class="audit-timing-line">
+                  <strong>Req {{ formatDateTime(tokenAiAnalysis.requested_at) }}</strong>
+                  <strong>Done {{ formatDateTime(tokenAiAnalysis.completed_at) }}</strong>
+                </div>
+              </div>
+              <div class="audit-meta-row compact wide inline-metric">
+                <span>Report</span>
+                <strong class="mono report-path">{{ tokenAiAnalysis.report_path || '--' }}</strong>
+              </div>
+            </div>
+            <p class="muted audit-status-hint">{{ analysisStatusHint(tokenAiAnalysis) }}</p>
+            <p v-if="tokenAiAnalysis.error" class="muted">{{ tokenAiAnalysis.error }}</p>
+            <div class="button-row">
+              <button
+                class="btn primary"
+                type="button"
+                :disabled="!canRequestTokenAnalysis()"
+                @click="requestTokenAnalysis()"
+              >
+                {{ tokenAnalysisRequestButtonLabel() }}
+              </button>
+              <button
+                class="btn ghost"
+                type="button"
+                :disabled="!tokenAiAnalysis.report_path"
+                @click="openTokenAiReport"
+              >
+                View Report
+              </button>
+              <button
+                class="btn subtle"
+                type="button"
+                @click="toggleTokenReviewEditor()"
+              >
+                {{ tokenReviewExpanded ? 'Hide Review' : (tokenDetail.is_manual_audit ? 'Edit Review' : 'Review') }}
+              </button>
+            </div>
+            <div v-if="tokenReviewExpanded" class="token-review-inline-panel">
+              <label class="stack-label">
+                <span>Review</span>
+                <textarea v-model="tokenReviewForm.review_text" rows="6" class="code-box"></textarea>
+              </label>
+              <div class="token-review-actions">
+                <label class="stack-label inline">
+                  <input v-model="tokenReviewForm.exploitable" type="checkbox">
+                  <span>Mark as exploitable</span>
+                </label>
+                <div class="button-row">
+                  <button class="btn primary" type="button" @click="saveTokenReview">Save Review</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card card-wide">
+          <div class="card-head">
+            <h2>Related Contracts</h2>
+            <span class="muted">{{ tokenContracts.length }} rows</span>
+          </div>
+          <div class="table-wrap">
+            <table class="table-token-related-contracts">
+              <colgroup>
+                <col class="col-contract-address">
+                <col class="col-label-wide">
+                <col class="col-patterns">
+                <col class="col-amount">
+                <col class="col-amount">
+                <col class="col-amount">
+                <col class="col-amount">
+                <col class="col-short">
+                <col class="col-short">
+                <col class="col-flag">
+              </colgroup>
+              <thead>
+                <tr>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'contract') }" @click="toggleTableSort('tokenRelatedContracts', 'contract')">Contract <span>{{ sortIndicator('tokenRelatedContracts', 'contract') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'label') }" @click="toggleTableSort('tokenRelatedContracts', 'label')">Label <span>{{ sortIndicator('tokenRelatedContracts', 'label') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'patterns') }" @click="toggleTableSort('tokenRelatedContracts', 'patterns')">Patterns <span>{{ sortIndicator('tokenRelatedContracts', 'patterns') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'balance') }" @click="toggleTableSort('tokenRelatedContracts', 'balance')">Balance <span>{{ sortIndicator('tokenRelatedContracts', 'balance') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'in') }" @click="toggleTableSort('tokenRelatedContracts', 'in')">In <span>{{ sortIndicator('tokenRelatedContracts', 'in') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'out') }" @click="toggleTableSort('tokenRelatedContracts', 'out')">Out <span>{{ sortIndicator('tokenRelatedContracts', 'out') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'flow') }" @click="toggleTableSort('tokenRelatedContracts', 'flow')">Total Flow <span>{{ sortIndicator('tokenRelatedContracts', 'flow') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'auto_audit_status') }" @click="toggleTableSort('tokenRelatedContracts', 'auto_audit_status')">Auto Audit <span>{{ sortIndicator('tokenRelatedContracts', 'auto_audit_status') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'audit_result') }" @click="toggleTableSort('tokenRelatedContracts', 'audit_result')">Audit Result <span>{{ sortIndicator('tokenRelatedContracts', 'audit_result') }}</span></button></th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="!tokenContracts.length">
+                  <td colspan="10" class="muted">No contracts in this token</td>
+                </tr>
+                <template v-for="section in tokenContractSections" :key="section.key">
+                  <tr v-if="section.isGrouped" class="pattern-section-row" :class="section.toneClass">
+                    <td colspan="10">
+                      <button class="pattern-section-head pattern-section-toggle" type="button" @click="toggleGroupCollapse('tokenRelatedContracts', section.key)">
+                        <strong>{{ section.title }}</strong>
+                        <span class="pattern-section-meta">
+                          <span class="chip small" :class="section.kind === 'seen' ? 'ok' : (section.kind === 'similar' ? 'warn' : (section.kind === 'reviewed' ? 'warn' : ''))">
+                            {{ section.kind }}
+                          </span>
+                          <span class="chip small">{{ section.rows.length }} contracts</span>
+                          <span class="collapse-icon" :class="{ collapsed: section.collapsed }" aria-hidden="true">
+                            <svg viewBox="0 0 16 16" class="icon-svg">
+                              <path d="M4.6 6.2 8 9.6l3.4-3.4 1 1L8 11.6 3.6 7.2z" fill="currentColor"></path>
+                            </svg>
+                          </span>
+                        </span>
+                      </button>
+                    </td>
+                  </tr>
+                  <tr v-for="row in section.rows" v-show="!section.collapsed" :key="row.contract" :class="[contractToneClass(row), section.isGrouped ? 'pattern-section-member' : '']">
+                  <td>
+                    <div class="address-inline">
+                      <button class="link-btn mono" @click="openContract(row.contract)">{{ row.contract }}</button>
+                      <button class="icon-copy-btn" type="button" @click="copyAddress(row.contract)" :aria-label="`Copy ${row.contract}`" :title="isCopiedAddress(row.contract) ? 'Copied' : 'Copy address'">
+                        <svg v-if="isCopiedAddress(row.contract)" viewBox="0 0 16 16" aria-hidden="true" class="icon-svg success">
+                          <path d="M6.4 11.2 3.2 8l1.1-1.1 2.1 2.1 5.3-5.3L12.8 4z" fill="currentColor"></path>
+                        </svg>
+                        <svg v-else viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                          <path d="M5 2.5A1.5 1.5 0 0 1 6.5 1h6A1.5 1.5 0 0 1 14 2.5v7A1.5 1.5 0 0 1 12.5 11h-1V9.5h1v-7h-6v1H5z" fill="currentColor"></path>
+                          <path d="M3.5 5A1.5 1.5 0 0 0 2 6.5v7A1.5 1.5 0 0 0 3.5 15h6A1.5 1.5 0 0 0 11 13.5v-7A1.5 1.5 0 0 0 9.5 5zm0 1.5h6v7h-6z" fill="currentColor"></path>
+                        </svg>
+                      </button>
+                    </div>
+                  </td>
+                  <td>{{ row.seen_label || '--' }}</td>
+                  <td>
+                    <div v-if="row.whitelist_patterns?.length" class="pattern-chip-list">
+                      <span v-for="pattern in row.whitelist_patterns" :key="`${row.contract}:${pattern}`" class="chip small pattern-chip">
+                        {{ pattern }}
+                      </span>
+                    </div>
+                    <span v-else class="muted">--</span>
+                  </td>
+                  <td class="mono">{{ formatTokenAmount(row.current_balance, tokenDetail.decimals) }}</td>
+                  <td class="mono">{{ formatTokenAmount(row.transfer_in_amount, tokenDetail.decimals) }}</td>
+                  <td class="mono">{{ formatTokenAmount(row.transfer_out_amount, tokenDetail.decimals) }}</td>
+                  <td class="mono">{{ formatTokenAmount(row.total_token_flow, tokenDetail.decimals) }}</td>
+                  <td>
+                    <span class="chip small" :class="autoAuditStatusTone(autoAuditStatusLabel(row.auto_audit_status))">
+                      {{ autoAuditStatusLabel(row.auto_audit_status) }}
+                    </span>
+                  </td>
+                  <td>
+                    <span v-if="autoAuditStatusLabel(row.auto_audit_status) === 'yes'" class="mono tiny-muted">
+                      {{ autoAuditSeveritySummary(row) || 'c:0 h:0 m:0' }}
+                    </span>
+                    <span v-else class="muted">--</span>
+                  </td>
+                  <td>
+                    <div class="icon-action-row">
+                      <button
+                        class="icon-action-btn"
+                        type="button"
+                        @click="openContractReviewModal(row, 'token-related')"
+                        :aria-label="`Open review for ${row.contract}`"
+                        title="Add review"
+                      >
+                        <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                          <path d="M3 2.5A1.5 1.5 0 0 1 4.5 1h5.8a1.5 1.5 0 0 1 1.06.44l1.2 1.2A1.5 1.5 0 0 1 13 3.7v8.8A1.5 1.5 0 0 1 11.5 14h-7A1.5 1.5 0 0 1 3 12.5zm1.5 0v10h7V4.2l-.7-.7H4.5zm1.2 2.3h4.6v1H5.7zm0 2h4.6v1H5.7zm0 2h3v1h-3z" fill="currentColor"></path>
+                        </svg>
+                      </button>
+                      <button
+                        v-if="canRequestOverviewAutoAudit(row)"
+                        class="icon-action-btn"
+                        type="button"
+                        @click="requestOverviewAutoAudit(row)"
+                        :aria-label="`Request AI auto audit for ${row.contract}`"
+                        title="Request AI auto audit"
+                      >
+                        <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                          <path d="M8 1.2 9.4 5l3.8 1.4L9.4 7.8 8 11.6 6.6 7.8 2.8 6.4 6.6 5z" fill="currentColor"></path>
+                          <path d="M12 9.8 12.7 11.6 14.5 12.3 12.7 13 12 14.8 11.3 13 9.5 12.3 11.3 11.6z" fill="currentColor"></path>
+                        </svg>
+                      </button>
+                      <span v-else-if="autoAuditStatusLabel(row.auto_audit_status) === 'processing'" class="chip small warn">processing</span>
+                      <span v-else class="muted">--</span>
+                    </div>
+                  </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        </template>
+      </main>
+
+      <main v-else class="grid detail-grid">
+        <template v-if="pageLoading">
+          <section class="card card-wide detail-hero-card skeleton-card">
+            <div class="detail-hero skeleton-hero">
+              <div class="skeleton-hero-main">
+                <div class="skeleton-block skeleton-kicker"></div>
+                <div class="skeleton-block skeleton-title"></div>
+                <div class="skeleton-block skeleton-address"></div>
+                <div class="tag-row">
+                  <div v-for="n in 4" :key="`contract-detail-chip-skeleton-${n}`" class="skeleton-block skeleton-chip"></div>
+                </div>
+              </div>
+              <div class="detail-stats skeleton-detail-stats">
+                <div v-for="n in 4" :key="`contract-detail-stat-skeleton-${n}`" class="detail-stat">
+                  <div class="skeleton-block skeleton-label"></div>
+                  <div class="skeleton-block skeleton-value"></div>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section class="review-execution-row">
+            <div class="card execution-main-card skeleton-card">
+              <div class="card-head">
+                <div class="skeleton-block skeleton-heading"></div>
+                <div class="skeleton-block skeleton-inline"></div>
+              </div>
+              <div class="detail-split">
+                <div class="panel-block">
+                  <div class="skeleton-block skeleton-heading small-heading"></div>
+                  <div class="target-list">
+                    <div v-for="n in 3" :key="`contract-target-skeleton-${n}`" class="target-card skeleton-target-card">
+                      <div class="skeleton-block skeleton-inline"></div>
+                      <div class="skeleton-block skeleton-address"></div>
+                      <div class="skeleton-block skeleton-inline"></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="panel-block">
+                  <div class="skeleton-block skeleton-heading small-heading"></div>
+                  <div class="mini-meta-grid">
+                    <div v-for="n in 2" :key="`contract-meta-skeleton-${n}`" class="mini-meta">
+                      <div class="skeleton-block skeleton-label"></div>
+                      <div class="skeleton-block skeleton-value"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="card review-side-card skeleton-card">
+              <div class="card-head">
+                <div class="skeleton-block skeleton-heading"></div>
+              </div>
+              <div v-for="n in 4" :key="`review-skeleton-${n}`" class="stack-label">
+                <div class="skeleton-block skeleton-label"></div>
+                <div class="skeleton-block skeleton-input"></div>
+              </div>
+            </div>
+          </section>
+          <section class="card card-wide skeleton-card">
+            <div class="card-head">
+              <div class="skeleton-block skeleton-heading"></div>
+              <div class="skeleton-block skeleton-inline"></div>
+            </div>
+            <div class="table-wrap skeleton-table-wrap">
+              <div class="skeleton-table">
+                <div v-for="n in 6" :key="`contract-table-skeleton-${n}`" class="skeleton-table-row">
+                  <div v-for="m in 6" :key="`contract-table-cell-${n}-${m}`" class="skeleton-block skeleton-cell"></div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </template>
+
+        <template v-else>
+        <section class="card card-wide detail-hero-card">
+          <div class="detail-hero" v-if="contractDetail">
+            <div>
+              <p class="detail-kicker">Contract Profile</p>
+              <h2 class="detail-title">{{ contractDetail.label || shortAddress(routeContract) }}</h2>
+              <div class="address-inline detail-address-row">
+                <p class="detail-address mono">{{ routeContract || '--' }}</p>
+                <button class="icon-copy-btn" type="button" @click="copyAddress(routeContract)" :aria-label="`Copy ${routeContract}`" :title="isCopiedAddress(routeContract) ? 'Copied' : 'Copy address'">
+                  <svg v-if="isCopiedAddress(routeContract)" viewBox="0 0 16 16" aria-hidden="true" class="icon-svg success">
+                    <path d="M6.4 11.2 3.2 8l1.1-1.1 2.1 2.1 5.3-5.3L12.8 4z" fill="currentColor"></path>
+                  </svg>
+                  <svg v-else viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                    <path d="M5 2.5A1.5 1.5 0 0 1 6.5 1h6A1.5 1.5 0 0 1 14 2.5v7A1.5 1.5 0 0 1 12.5 11h-1V9.5h1v-7h-6v1H5z" fill="currentColor"></path>
+                    <path d="M3.5 5A1.5 1.5 0 0 0 2 6.5v7A1.5 1.5 0 0 0 3.5 15h6A1.5 1.5 0 0 0 11 13.5v-7A1.5 1.5 0 0 0 9.5 5zm0 1.5h6v7h-6z" fill="currentColor"></path>
+                  </svg>
+                </button>
+              </div>
+              <div class="tag-row">
+                <button class="icon-action-btn detail-back-btn" type="button" @click="goBackToPrevious('dashboard')" aria-label="Go back" title="Go back">
+                  <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                    <path d="M6.7 3.2 2.4 7.5l4.3 4.3 1-1-2.6-2.6h8v-1.4h-8l2.6-2.6z" fill="currentColor"></path>
+                  </svg>
+                </button>
+                <span class="chip small" :class="contractStatusTone">{{ contractStatusLabel }}</span>
+                <span class="chip small" v-if="contractDetail.link_type" :class="contractDetail.link_type === 'proxy' ? 'warn' : 'ok'">{{ contractDetail.link_type }}</span>
+                <span class="chip small warn">total usd {{ formatUsd(contractDetail.portfolio_usd) }}</span>
+                <span class="chip small" :class="contractDetail.is_manual_audit ? 'ok' : 'warn'">{{ contractDetail.is_manual_audit ? 'manual audit' : 'manual pending' }}</span>
+              </div>
+            </div>
+            <div class="detail-stats">
+              <div class="detail-stat">
+                <span>Tokens</span>
+                <strong>{{ contractDetail.activity?.token_count || 0 }}</strong>
+              </div>
+              <div class="detail-stat">
+                <span>Patterns</span>
+                <strong>{{ contractPatternTargets.length }}</strong>
+              </div>
+              <div class="detail-stat">
+                <span>Reviews</span>
+                <strong>{{ contractReviews.length }}</strong>
+              </div>
+              <div class="detail-stat">
+                <span>Code Size</span>
+                <strong>{{ contractDetail.code_size }}</strong>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="review-execution-row" v-if="contractDetail">
+          <div class="card execution-main-card">
+            <div class="card-head">
+              <h2>Execution Profile</h2>
+              <span class="muted">Patterns and selectors</span>
+            </div>
+            <div class="detail-split">
+              <div class="panel-block">
+                <h3>Pattern Targets</h3>
+                <div class="target-list">
+                  <div
+                    v-for="target in contractPatternTargets"
+                    :key="`${target.kind}:${target.address}:${target.pattern_hash}`"
+                    class="target-card"
+                    @click="selectReviewTarget(target)"
+                  >
+                    <div class="target-top">
+                      <span class="chip small" :class="target.kind === 'contract' ? 'ok' : 'warn'">{{ target.kind }}</span>
+                      <span class="address-inline">
+                        <span class="mono">{{ shortAddress(target.address) }}</span>
+                        <button class="icon-copy-btn" type="button" @click.stop="copyAddress(target.address)" :aria-label="`Copy ${target.address}`" :title="isCopiedAddress(target.address) ? 'Copied' : 'Copy address'">
+                          <svg v-if="isCopiedAddress(target.address)" viewBox="0 0 16 16" aria-hidden="true" class="icon-svg success">
+                            <path d="M6.4 11.2 3.2 8l1.1-1.1 2.1 2.1 5.3-5.3L12.8 4z" fill="currentColor"></path>
+                          </svg>
+                          <svg v-else viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                            <path d="M5 2.5A1.5 1.5 0 0 1 6.5 1h6A1.5 1.5 0 0 1 14 2.5v7A1.5 1.5 0 0 1 12.5 11h-1V9.5h1v-7h-6v1H5z" fill="currentColor"></path>
+                            <path d="M3.5 5A1.5 1.5 0 0 0 2 6.5v7A1.5 1.5 0 0 0 3.5 15h6A1.5 1.5 0 0 0 11 13.5v-7A1.5 1.5 0 0 0 9.5 5zm0 1.5h6v7h-6z" fill="currentColor"></path>
+                          </svg>
+                        </button>
+                      </span>
+                    </div>
+                    <p class="target-hash mono">{{ shortAddress(target.pattern_hash, 10, 8) }}</p>
+                    <div class="target-meta">
+                      <span>{{ target.seen_label || 'unlabeled' }}</span>
+                      <span>{{ target.code_size }} bytes</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="panel-block">
+                <h3>Pattern Meta</h3>
+                <div class="mini-meta-grid">
+                  <div class="mini-meta">
+                    <span>Linkage</span>
+                    <strong v-if="contractDetail.linkage" class="mono address-inline">
+                      <span>{{ contractDetail.linkage }}</span>
+                      <button class="icon-copy-btn" type="button" @click="copyAddress(contractDetail.linkage)" :aria-label="`Copy ${contractDetail.linkage}`" :title="isCopiedAddress(contractDetail.linkage) ? 'Copied' : 'Copy address'">
+                        <svg v-if="isCopiedAddress(contractDetail.linkage)" viewBox="0 0 16 16" aria-hidden="true" class="icon-svg success">
+                          <path d="M6.4 11.2 3.2 8l1.1-1.1 2.1 2.1 5.3-5.3L12.8 4z" fill="currentColor"></path>
+                        </svg>
+                        <svg v-else viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                          <path d="M5 2.5A1.5 1.5 0 0 1 6.5 1h6A1.5 1.5 0 0 1 14 2.5v7A1.5 1.5 0 0 1 12.5 11h-1V9.5h1v-7h-6v1H5z" fill="currentColor"></path>
+                          <path d="M3.5 5A1.5 1.5 0 0 0 2 6.5v7A1.5 1.5 0 0 0 3.5 15h6A1.5 1.5 0 0 0 11 13.5v-7A1.5 1.5 0 0 0 9.5 5zm0 1.5h6v7h-6z" fill="currentColor"></path>
+                        </svg>
+                      </button>
+                    </strong>
+                    <strong v-else class="mono">--</strong>
+                  </div>
+                  <div class="mini-meta">
+                    <span>Whitelist</span>
+                    <strong>{{ (contractDetail.whitelist_patterns || []).join(', ') || '--' }}</strong>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="auto-analysis-grid">
+              <div class="panel-block auto-analysis-card">
+                <div class="card-head compact">
+                  <h3>AI Auto Audit</h3>
+                <span class="chip small" :class="analysisStatusTone(contractAiAnalysis.status)">
+                  {{ analysisStatusLabel(contractAiAnalysis.status) }}
+                </span>
+                </div>
+                <div class="auto-analysis-form-grid">
+                  <label class="stack-label">
+                    <span>Provider</span>
+                    <select v-model="analysisForm.provider" :disabled="!canRequestContractAnalysis()">
+                      <option v-for="provider in aiProviderOptions" :key="provider" :value="provider">{{ provider }}</option>
+                    </select>
+                  </label>
+                  <label class="stack-label">
+                    <span>Model</span>
+                    <select v-model="analysisForm.model" :disabled="!canRequestContractAnalysis()">
+                      <option v-for="model in aiModelOptions" :key="model" :value="model">{{ model }}</option>
+                    </select>
+                  </label>
+                  <label class="stack-label">
+                    <span>Severity</span>
+                    <div class="audit-readonly-field audit-severity-line">
+                      <strong>C {{ contractAiAnalysis.critical ?? '--' }}</strong>
+                      <strong>H {{ contractAiAnalysis.high ?? '--' }}</strong>
+                      <strong>M {{ contractAiAnalysis.medium ?? '--' }}</strong>
+                    </div>
+                  </label>
+                </div>
+                <div class="audit-meta-stack audit-meta-stack-inline">
+                  <div class="audit-meta-row compact inline-metric">
+                    <span>Timing</span>
+                    <div class="audit-timing-line">
+                      <strong>Req {{ formatDateTime(contractAiAnalysis.requested_at) }}</strong>
+                      <strong>Done {{ formatDateTime(contractAiAnalysis.completed_at) }}</strong>
+                    </div>
+                  </div>
+                  <div class="audit-meta-row compact wide inline-metric">
+                    <span>Report</span>
+                    <strong class="mono report-path">{{ contractAiAnalysis.report_path || '--' }}</strong>
+                  </div>
+                </div>
+                <p class="muted audit-status-hint">{{ analysisStatusHint(contractAiAnalysis) }}</p>
+                <p v-if="contractAiAnalysis.error" class="muted">{{ contractAiAnalysis.error }}</p>
+                <div class="button-row">
+                  <button
+                    class="btn primary"
+                    type="button"
+                    :disabled="!canRequestContractAnalysis()"
+                    @click="requestContractAnalysis()"
+                  >
+                    {{ analysisRequestButtonLabel() }}
+                  </button>
+                  <button
+                    class="btn ghost"
+                    type="button"
+                    :disabled="!contractAiAnalysis.report_path"
+                    @click="openAiReport"
+                  >
+                    View Report
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="card review-side-card">
+            <div class="card-head">
+              <h2>Review</h2>
+              <span class="muted">Prepare pattern sync</span>
+            </div>
+            <label class="stack-label">
+              <span>Target Kind</span>
+              <select v-model="reviewForm.target_kind">
+                <option v-for="target in contractPatternTargets" :key="target.kind" :value="target.kind">{{ target.kind }}</option>
+              </select>
+            </label>
+            <label class="stack-label">
+              <span>Label</span>
+              <input v-model="reviewForm.label" type="text" placeholder="label">
+            </label>
+            <label class="stack-label">
+              <span>Review Text</span>
+              <textarea v-model="reviewForm.review_text" rows="6" class="code-box"></textarea>
+            </label>
+            <label class="stack-label inline">
+              <input v-model="reviewForm.exploitable" type="checkbox">
+              <span>Exploitable</span>
+            </label>
+            <button class="btn primary" type="button" @click="saveReview">Save Review</button>
+          </div>
+        </section>
+
+        <section class="card card-wide">
+          <div class="card-head">
+            <h2>Token Participation</h2>
+            <span class="muted">{{ contractDetail?.tokens?.length || 0 }} tokens</span>
+          </div>
+          <div class="table-wrap">
+            <table class="table-contract-tokens">
+              <colgroup>
+                <col class="col-token-address">
+                <col class="col-short">
+                <col class="col-usd">
+                <col class="col-flag">
+                <col class="col-amount">
+                <col class="col-amount">
+                <col class="col-amount">
+                <col class="col-amount">
+              </colgroup>
+              <thead>
+                <tr>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokens', 'token') }" @click="toggleTableSort('contractTokens', 'token')">Token <span>{{ sortIndicator('contractTokens', 'token') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokens', 'symbol') }" @click="toggleTableSort('contractTokens', 'symbol')">Symbol <span>{{ sortIndicator('contractTokens', 'symbol') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokens', 'price') }" @click="toggleTableSort('contractTokens', 'price')">Price <span>{{ sortIndicator('contractTokens', 'price') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokens', 'sync') }" @click="toggleTableSort('contractTokens', 'sync')">isSync() <span>{{ sortIndicator('contractTokens', 'sync') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokens', 'balance') }" @click="toggleTableSort('contractTokens', 'balance')">Balance <span>{{ sortIndicator('contractTokens', 'balance') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokens', 'in') }" @click="toggleTableSort('contractTokens', 'in')">In Amount <span>{{ sortIndicator('contractTokens', 'in') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokens', 'out') }" @click="toggleTableSort('contractTokens', 'out')">Out Amount <span>{{ sortIndicator('contractTokens', 'out') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokens', 'flow') }" @click="toggleTableSort('contractTokens', 'flow')">Total Flow <span>{{ sortIndicator('contractTokens', 'flow') }}</span></button></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="!(contractDetail?.tokens?.length)">
+                  <td colspan="8" class="muted">No token rows</td>
+                </tr>
+                <tr v-for="row in sortedContractTokens" :key="row.token.token">
+                  <td>
+                    <div class="address-inline">
+                      <button class="link-btn mono" @click="openToken(row.token.token)">{{ row.token.token }}</button>
+                      <button class="icon-copy-btn" type="button" @click="copyAddress(row.token.token)" :aria-label="`Copy ${row.token.token}`" :title="isCopiedAddress(row.token.token) ? 'Copied' : 'Copy address'">
+                        <svg v-if="isCopiedAddress(row.token.token)" viewBox="0 0 16 16" aria-hidden="true" class="icon-svg success">
+                          <path d="M6.4 11.2 3.2 8l1.1-1.1 2.1 2.1 5.3-5.3L12.8 4z" fill="currentColor"></path>
+                        </svg>
+                        <svg v-else viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                          <path d="M5 2.5A1.5 1.5 0 0 1 6.5 1h6A1.5 1.5 0 0 1 14 2.5v7A1.5 1.5 0 0 1 12.5 11h-1V9.5h1v-7h-6v1H5z" fill="currentColor"></path>
+                          <path d="M3.5 5A1.5 1.5 0 0 0 2 6.5v7A1.5 1.5 0 0 0 3.5 15h6A1.5 1.5 0 0 0 11 13.5v-7A1.5 1.5 0 0 0 9.5 5zm0 1.5h6v7h-6z" fill="currentColor"></path>
+                        </svg>
+                      </button>
+                    </div>
+                  </td>
+                  <td>{{ row.token.token_symbol || '--' }}</td>
+                  <td>{{ formatUsd(row.token.token_price_usd) }}</td>
+                  <td><span class="chip small" :class="syncStateTone(row.token.token_calls_sync)">{{ syncStateLabel(row.token.token_calls_sync) }}</span></td>
+                  <td class="mono">{{ formatTokenAmount(row.current_balance, row.token.decimals) }}</td>
+                  <td class="mono">{{ formatTokenAmount(row.transfer_in_amount, row.token.decimals) }}</td>
+                  <td class="mono">{{ formatTokenAmount(row.transfer_out_amount, row.token.decimals) }}</td>
+                  <td class="mono">{{ formatTokenAmount(row.total_token_flow, row.token.decimals) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card card-wide" v-if="contractDetail">
+          <div class="card-head">
+            <h2>Token Asset Flow</h2>
+            <span class="muted">{{ sortedContractTokenFlows.length }} counterparties</span>
+          </div>
+          <div class="filter-toolbar">
+            <label class="filter-field">
+              <span>Token</span>
+              <select v-model="selectedContractFlowToken">
+                <option v-for="row in contractFlowTokenOptions" :key="row.token.token" :value="row.token.token">
+                  {{ row.token.token_symbol || row.token.token_name || row.token.token }}
+                </option>
+              </select>
+            </label>
+            <div v-if="selectedContractFlowTokenRow" class="mini-meta">
+              <span>Current Balance</span>
+              <strong class="mono">{{ formatTokenAmount(selectedContractFlowTokenRow.current_balance, selectedContractFlowTokenRow.token.decimals) }}</strong>
+            </div>
+            <div v-if="selectedContractFlowTokenRow" class="mini-meta">
+              <span>Total Flow</span>
+              <strong class="mono">{{ formatTokenAmount(selectedContractFlowTokenRow.total_token_flow, selectedContractFlowTokenRow.token.decimals) }}</strong>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="table-contract-flows">
+              <colgroup>
+                <col class="col-contract-address">
+                <col class="col-flag">
+                <col class="col-short">
+                <col class="col-amount">
+                <col class="col-short">
+                <col class="col-amount">
+                <col class="col-short">
+                <col class="col-amount">
+              </colgroup>
+              <thead>
+                <tr>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokenFlows', 'counterparty') }" @click="toggleTableSort('contractTokenFlows', 'counterparty')">Counterparty <span>{{ sortIndicator('contractTokenFlows', 'counterparty') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokenFlows', 'kind') }" @click="toggleTableSort('contractTokenFlows', 'kind')">Kind <span>{{ sortIndicator('contractTokenFlows', 'kind') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokenFlows', 'in_count') }" @click="toggleTableSort('contractTokenFlows', 'in_count')">In Count <span>{{ sortIndicator('contractTokenFlows', 'in_count') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokenFlows', 'in_amount') }" @click="toggleTableSort('contractTokenFlows', 'in_amount')">In Amount <span>{{ sortIndicator('contractTokenFlows', 'in_amount') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokenFlows', 'out_count') }" @click="toggleTableSort('contractTokenFlows', 'out_count')">Out Count <span>{{ sortIndicator('contractTokenFlows', 'out_count') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokenFlows', 'out_amount') }" @click="toggleTableSort('contractTokenFlows', 'out_amount')">Out Amount <span>{{ sortIndicator('contractTokenFlows', 'out_amount') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokenFlows', 'tx_count') }" @click="toggleTableSort('contractTokenFlows', 'tx_count')">TX Count <span>{{ sortIndicator('contractTokenFlows', 'tx_count') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('contractTokenFlows', 'total_flow') }" @click="toggleTableSort('contractTokenFlows', 'total_flow')">Total Flow <span>{{ sortIndicator('contractTokenFlows', 'total_flow') }}</span></button></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="!selectedContractFlowTokenRow">
+                  <td colspan="8" class="muted">No token selected</td>
+                </tr>
+                <tr v-else-if="!sortedContractTokenFlows.length">
+                  <td colspan="8" class="muted">No counterparty flow for this token</td>
+                </tr>
+                <tr v-for="row in sortedContractTokenFlows" :key="`${row.address || row.label}:${row.tx_count}`">
+                  <td class="mono">
+                    <div v-if="row.address" class="address-inline">
+                      <button class="link-btn mono" @click="openContract(row.address)">{{ row.address }}</button>
+                      <button class="icon-copy-btn" type="button" @click="copyAddress(row.address)" :aria-label="`Copy ${row.address}`" :title="isCopiedAddress(row.address) ? 'Copied' : 'Copy address'">
+                        <svg v-if="isCopiedAddress(row.address)" viewBox="0 0 16 16" aria-hidden="true" class="icon-svg success">
+                          <path d="M6.4 11.2 3.2 8l1.1-1.1 2.1 2.1 5.3-5.3L12.8 4z" fill="currentColor"></path>
+                        </svg>
+                        <svg v-else viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                          <path d="M5 2.5A1.5 1.5 0 0 1 6.5 1h6A1.5 1.5 0 0 1 14 2.5v7A1.5 1.5 0 0 1 12.5 11h-1V9.5h1v-7h-6v1H5z" fill="currentColor"></path>
+                          <path d="M3.5 5A1.5 1.5 0 0 0 2 6.5v7A1.5 1.5 0 0 0 3.5 15h6A1.5 1.5 0 0 0 11 13.5v-7A1.5 1.5 0 0 0 9.5 5zm0 1.5h6v7h-6z" fill="currentColor"></path>
+                        </svg>
+                      </button>
+                    </div>
+                    <span v-else>{{ row.label }}</span>
+                  </td>
+                  <td>
+                    <span class="chip small" :class="row.is_contract ? 'ok' : 'warn'">{{ row.is_contract ? 'contract' : 'eoa pool' }}</span>
+                  </td>
+                  <td>{{ row.transfer_in_count }}</td>
+                  <td class="mono">{{ formatTokenAmount(row.transfer_in_amount, selectedContractFlowTokenRow.token.decimals) }}</td>
+                  <td>{{ row.transfer_out_count }}</td>
+                  <td class="mono">{{ formatTokenAmount(row.transfer_out_amount, selectedContractFlowTokenRow.token.decimals) }}</td>
+                  <td>{{ row.tx_count }}</td>
+                  <td class="mono">{{ formatTokenAmount(row.total_flow, selectedContractFlowTokenRow.token.decimals) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card card-wide" v-if="contractDetail">
+          <div class="card-head">
+            <h2>Review History</h2>
+            <span class="muted">{{ contractReviews.length }} entries</span>
+          </div>
+          <div class="table-wrap">
+            <table class="table-review-history">
+              <colgroup>
+                <col class="col-label-wide">
+                <col class="col-pattern">
+                <col class="col-flag">
+                <col class="col-flag">
+                <col class="col-time">
+                <col class="col-review-text">
+              </colgroup>
+              <thead>
+                <tr>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('reviewHistory', 'label') }" @click="toggleTableSort('reviewHistory', 'label')">Label <span>{{ sortIndicator('reviewHistory', 'label') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('reviewHistory', 'pattern') }" @click="toggleTableSort('reviewHistory', 'pattern')">Pattern <span>{{ sortIndicator('reviewHistory', 'pattern') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('reviewHistory', 'status') }" @click="toggleTableSort('reviewHistory', 'status')">Status <span>{{ sortIndicator('reviewHistory', 'status') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('reviewHistory', 'exploitable') }" @click="toggleTableSort('reviewHistory', 'exploitable')">Exploitable <span>{{ sortIndicator('reviewHistory', 'exploitable') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('reviewHistory', 'updated') }" @click="toggleTableSort('reviewHistory', 'updated')">Updated <span>{{ sortIndicator('reviewHistory', 'updated') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('reviewHistory', 'review') }" @click="toggleTableSort('reviewHistory', 'review')">Review <span>{{ sortIndicator('reviewHistory', 'review') }}</span></button></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="!contractReviews.length">
+                  <td colspan="6" class="muted">No review entries yet</td>
+                </tr>
+                <tr v-for="review in sortedContractReviews" :key="`${review.id}:${review.pattern_hash}:${review.updated_at}`">
+                  <td>{{ review.label || '--' }}</td>
+                  <td class="mono">{{ shortAddress(review.pattern_hash, 10, 8) }}</td>
+                  <td>{{ review.status }}</td>
+                  <td>
+                    <span class="chip small" :class="review.exploitable ? 'bad' : 'ok'">
+                      {{ review.exploitable ? 'yes' : 'no' }}
+                    </span>
+                  </td>
+                  <td>{{ formatDateTime(review.updated_at) }}</td>
+                  <td>{{ review.review_text || '--' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        </template>
+      </main>
+
+      <div v-if="contractReviewModal.open" class="modal-backdrop" @click.self="closeContractReviewModal">
+      <div class="modal-card review-modal-card">
+        <div class="card-head">
+          <h2>Contract Review</h2>
+          <button class="icon-action-btn" type="button" @click="closeContractReviewModal" aria-label="Close review modal" title="Close">
+            <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+              <path d="m4.2 4.2 7.6 7.6-1 1-7.6-7.6z" fill="currentColor"></path>
+              <path d="m11.8 4.2-7.6 7.6-1-1 7.6-7.6z" fill="currentColor"></path>
+            </svg>
+          </button>
+        </div>
+        <div class="review-modal-body">
+          <label class="stack-label">
+            <span>Contract</span>
+            <input :value="contractReviewModal.address" type="text" readonly class="code-box">
+          </label>
+          <label class="stack-label">
+            <span>Label</span>
+            <input v-model="contractReviewModal.label" type="text" placeholder="label">
+          </label>
+          <label class="stack-label">
+            <span>Review Text</span>
+            <textarea v-model="contractReviewModal.review_text" rows="7" class="code-box"></textarea>
+          </label>
+          <label class="stack-label inline">
+            <input v-model="contractReviewModal.exploitable" type="checkbox">
+            <span>Exploitable</span>
+          </label>
+          <p class="muted">Saving this review also marks the contract as manually audited.</p>
+          <p v-if="contractReviewModal.error" class="inline-error">{{ contractReviewModal.error }}</p>
+          <div class="button-row">
+            <button class="btn ghost" type="button" @click="closeContractReviewModal">Cancel</button>
+            <button class="btn primary" type="button" :disabled="contractReviewModal.saving" @click="saveContractReviewModal">
+              {{ contractReviewModal.saving ? 'Saving...' : 'Save Review' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    </div>
+
+    <script src="/vendor/vue.global.prod.js"></script>
+    <script src="/vendor/vue-router.global.prod.js"></script>
+    <script src="/vendor/pinia.iife.prod.js"></script>
+    <script src="/js/dashboard-shared.js"></script>
+    <script src="/js/dashboard.js" defer></script>
+  </body>
+</html>

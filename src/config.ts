@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
@@ -232,6 +232,84 @@ function parseStringList(value: string | null | undefined, fallback: string[] = 
 
 function stringifyStringList(values: string[]): string {
   return JSON.stringify(uniqueStrings(values));
+}
+
+function isRelativeProjectCertPath(rawPath: string): boolean {
+  const normalized = rawPath.trim().replaceAll('\\', '/').replace(/^\.\/+/, '');
+  return normalized === 'certs' || normalized.startsWith('certs/');
+}
+
+function discoverTlsPairFromCertsDir(): { certPath: string; keyPath: string } | null {
+  const certsDir = path.join(ROOT, 'certs');
+  if (!existsSync(certsDir)) return null;
+
+  const entries = readdirSync(certsDir, { withFileTypes: true }).filter((entry) => entry.isFile());
+  const certBases = new Set(
+    entries
+      .map((entry) => entry.name)
+      .filter((name) => name.endsWith('.crt'))
+      .map((name) => name.slice(0, -4)),
+  );
+  const keyBases = new Set(
+    entries
+      .map((entry) => entry.name)
+      .filter((name) => name.endsWith('.key'))
+      .map((name) => name.slice(0, -4)),
+  );
+
+  const ranked = [...certBases]
+    .filter((base) => keyBases.has(base))
+    .map((base) => {
+      const certAbsPath = path.join(certsDir, `${base}.crt`);
+      const keyAbsPath = path.join(certsDir, `${base}.key`);
+      const mtimeMs = Math.max(statSync(certAbsPath).mtimeMs, statSync(keyAbsPath).mtimeMs);
+      const normalizedBase = base.trim().toLowerCase();
+      const looksLikeIpv4 = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(normalizedBase);
+      const priority =
+        normalizedBase === 'server'
+          ? 3
+          : normalizedBase === 'localhost'
+            ? 2
+            : looksLikeIpv4
+              ? 1
+              : 0;
+      return { base, mtimeMs, priority };
+    })
+    .sort((left, right) => (
+      right.priority - left.priority
+      || right.mtimeMs - left.mtimeMs
+      || left.base.localeCompare(right.base)
+    ));
+
+  const selected = ranked[0];
+  if (!selected) return null;
+  return {
+    certPath: `certs/${selected.base}.crt`,
+    keyPath: `certs/${selected.base}.key`,
+  };
+}
+
+function resolveTlsPaths(rawCertPath: string | null | undefined, rawKeyPath: string | null | undefined): {
+  tlsCertPath: string;
+  tlsKeyPath: string;
+} {
+  const tlsCertPath = String(rawCertPath || '').trim();
+  const tlsKeyPath = String(rawKeyPath || '').trim();
+  const canAutoDiscover = !tlsCertPath
+    || !tlsKeyPath
+    || (isRelativeProjectCertPath(tlsCertPath) && isRelativeProjectCertPath(tlsKeyPath));
+
+  if (canAutoDiscover) {
+    const discovered = discoverTlsPairFromCertsDir();
+    if (discovered) {
+      return {
+        tlsCertPath: discovered.certPath,
+        tlsKeyPath: discovered.keyPath,
+      };
+    }
+  }
+
+  return { tlsCertPath, tlsKeyPath };
 }
 
 function buildInfuraRpcUrls(chain: string, infuraKeys: string[]): string[] {
@@ -678,9 +756,10 @@ export function getWebSecurityConfig(): {
   tlsKeyPath: string;
 } {
   const raw = ensureRuntimeCache().appConfig.web_security ?? {};
+  const resolved = resolveTlsPaths(raw.tls_cert_path, raw.tls_key_path);
   return {
     httpsEnabled: Boolean(raw.https_enabled ?? false),
-    tlsCertPath: String(raw.tls_cert_path || '').trim(),
-    tlsKeyPath: String(raw.tls_key_path || '').trim(),
+    tlsCertPath: resolved.tlsCertPath,
+    tlsKeyPath: resolved.tlsKeyPath,
   };
 }

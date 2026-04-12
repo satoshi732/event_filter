@@ -1942,8 +1942,8 @@
         <div class="modal-card review-modal-card">
           <div class="review-modal-topbar">
             <label class="stack-label review-modal-address-field">
-              <span>Contract</span>
-              <input :value="contractReviewModal.address" type="text" readonly class="code-box review-modal-code">
+              <span>{{ contractReviewModal.target_kind === 'implementation' ? 'Implementation' : (contractReviewModal.target_kind === 'delegate' ? 'Delegate' : 'Contract') }}</span>
+              <input :value="contractReviewSelectedTargetAddress" type="text" readonly class="code-box review-modal-code">
             </label>
             <button class="icon-action-btn review-modal-close" type="button" @click="closeContractReviewModal" aria-label="Close review modal" title="Close">
               <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
@@ -1954,6 +1954,18 @@
           </div>
           <div class="review-modal-body">
             <section class="review-modal-form-grid">
+              <label class="stack-label review-modal-field">
+                <span>Target Kind</span>
+                <select v-model="contractReviewModal.target_kind" @change="syncContractReviewModalForSelectedTarget">
+                  <option
+                    v-for="target in contractReviewTargetOptions"
+                    :key="`${target.kind}:${target.address}`"
+                    :value="target.kind"
+                  >
+                    {{ target.kind }} | {{ target.address }}
+                  </option>
+                </select>
+              </label>
               <label class="stack-label review-modal-field">
                 <span>Label</span>
                 <input v-model="contractReviewModal.label" type="text" placeholder="review label">

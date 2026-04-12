@@ -374,9 +374,11 @@
         open: false,
         address: '',
         target_kind: 'auto',
+        target_options: [],
         label: '',
         review_text: '',
         exploitable: false,
+        row: null,
         source: '',
         saving: false,
         error: '',
@@ -543,8 +545,7 @@
 
       function invalidateChainCache(chain) {
         const normalizedChain = chainCacheKey(chain);
-        viewDataCache.dashboardContracts.delete(normalizedChain);
-        viewDataCache.dashboardTokens.delete(normalizedChain);
+        invalidateChainCollectionCache(normalizedChain);
         for (const key of [...viewDataCache.tokenDetail.keys()]) {
           if (key.startsWith(`${normalizedChain}:`)) viewDataCache.tokenDetail.delete(key);
         }
@@ -1020,6 +1021,20 @@
 
       const contractPatternTargets = computed(() => (
         state.contractDetail?.pattern_targets || []
+      ));
+
+      const contractReviewTargetOptions = computed(() => (
+        state.contractReviewModal.target_options || []
+      ));
+
+      const contractReviewSelectedTarget = computed(() => (
+        contractReviewTargetOptions.value.find((target) => target.kind === state.contractReviewModal.target_kind)
+          || contractReviewTargetOptions.value[0]
+          || null
+      ));
+
+      const contractReviewSelectedTargetAddress = computed(() => (
+        contractReviewSelectedTarget.value?.address || state.contractReviewModal.address || ''
       ));
 
       const contractReviews = computed(() => (
@@ -2073,21 +2088,90 @@
         }
       }
 
+      function buildContractReviewTargets(row) {
+        const options = [];
+        const seen = new Set();
+
+        function pushTarget(kind, address, patternHash = '') {
+          const normalizedKind = String(kind || '').trim().toLowerCase();
+          const normalizedAddress = String(address || '').trim().toLowerCase();
+          if (!normalizedKind || !normalizedAddress) return;
+          const key = `${normalizedKind}:${normalizedAddress}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          options.push({
+            kind: normalizedKind,
+            address: normalizedAddress,
+            pattern_hash: patternHash ? String(patternHash) : '',
+          });
+        }
+
+        if (Array.isArray(row?.pattern_targets) && row.pattern_targets.length) {
+          row.pattern_targets.forEach((target) => {
+            pushTarget(target.kind, target.address, target.pattern_hash);
+          });
+        } else {
+          pushTarget('contract', row?.contract || row?.address);
+          if (row?.proxy_impl || (row?.link_type === 'proxy' && row?.linkage)) {
+            pushTarget('implementation', row?.proxy_impl || row?.linkage);
+          }
+          if (row?.eip7702_delegate || (row?.link_type === 'eip7702' && row?.linkage)) {
+            pushTarget('delegate', row?.eip7702_delegate || row?.linkage);
+          }
+        }
+
+        if (!options.length) {
+          pushTarget('contract', row?.contract || row?.address);
+        }
+
+        return options;
+      }
+
+      function syncContractReviewModalForSelectedTarget() {
+        const row = state.contractReviewModal.row;
+        const selectedTarget = buildContractReviewTargets(row).find(
+          (target) => target.kind === state.contractReviewModal.target_kind,
+        ) || contractReviewTargetOptions.value[0] || null;
+        const existingReview = (row?.reviews || []).find((review) => {
+          if (selectedTarget?.pattern_hash && review.pattern_hash === selectedTarget.pattern_hash) return true;
+          if (selectedTarget?.address && review.pattern_address === selectedTarget.address) return true;
+          return selectedTarget?.kind && review.pattern_kind === selectedTarget.kind;
+        });
+
+        state.contractReviewModal.label = String(
+          existingReview?.label
+          || row?.label
+          || row?.seen_label
+          || state.contractDetail?.label
+          || '',
+        ).trim();
+        state.contractReviewModal.review_text = String(existingReview?.review_text || '').trim();
+        state.contractReviewModal.exploitable = existingReview
+          ? Boolean(existingReview.exploitable)
+          : Boolean(row?.is_exploitable);
+      }
+
       function openContractReviewModal(row, source = 'table') {
         if (!row?.contract) return;
+        const targetOptions = buildContractReviewTargets(row);
         state.contractReviewModal.open = true;
         state.contractReviewModal.address = String(row.contract || '').toLowerCase();
-        state.contractReviewModal.target_kind = 'auto';
-        state.contractReviewModal.label = String(row.label || row.seen_label || '').trim();
+        state.contractReviewModal.target_options = targetOptions;
+        state.contractReviewModal.target_kind = targetOptions[0]?.kind || 'contract';
+        state.contractReviewModal.label = '';
         state.contractReviewModal.review_text = '';
         state.contractReviewModal.exploitable = Boolean(row.is_exploitable);
+        state.contractReviewModal.row = row;
         state.contractReviewModal.source = source;
         state.contractReviewModal.saving = false;
         state.contractReviewModal.error = '';
+        syncContractReviewModalForSelectedTarget();
       }
 
       function closeContractReviewModal() {
         state.contractReviewModal.open = false;
+        state.contractReviewModal.row = null;
+        state.contractReviewModal.target_options = [];
         state.contractReviewModal.saving = false;
         state.contractReviewModal.error = '';
       }
@@ -2868,6 +2952,8 @@
         tokenLargestBalance,
         tokenAiAnalysis,
         contractPatternTargets,
+        contractReviewTargetOptions,
+        contractReviewSelectedTargetAddress,
         contractReviews,
         contractAiAnalysis,
         sortedContractReviews,
@@ -2917,6 +3003,7 @@
         contractToneClass,
         toggleGroupCollapse,
         selectReviewTarget,
+        syncContractReviewModalForSelectedTarget,
         openContractReviewModal,
         closeContractReviewModal,
         saveContractReviewModal,

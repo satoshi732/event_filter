@@ -1803,46 +1803,6 @@
               </tbody>
             </table>
           </div>
-          <div class="table-pagination" v-if="getTablePaginationMeta('contractTokens', sortedContractTokens.length).totalRows > 0">
-            <div class="table-pagination-meta">
-              <span class="mono tiny-muted">Page {{ getTablePaginationMeta('contractTokens', sortedContractTokens.length).page }} / {{ getTablePaginationMeta('contractTokens', sortedContractTokens.length).totalPages }}</span>
-              <span class="muted">{{ getTablePaginationMeta('contractTokens', sortedContractTokens.length).start }}-{{ getTablePaginationMeta('contractTokens', sortedContractTokens.length).end }} / {{ getTablePaginationMeta('contractTokens', sortedContractTokens.length).totalRows }}</span>
-            </div>
-            <div class="table-pagination-controls">
-              <div class="page-size-group" role="group" aria-label="Token participation page size">
-                <button
-                  v-for="size in pageSizeOptions"
-                  :key="`contractTokens-size-${size}`"
-                  class="page-size-btn"
-                  :class="{ active: getTablePageSize('contractTokens') === size }"
-                  type="button"
-                  @click="setTablePageSize('contractTokens', size)"
-                >
-                  {{ size }}
-                </button>
-              </div>
-              <div class="page-nav-group">
-                <button class="btn ghost btn-small" type="button" :disabled="getTablePaginationMeta('contractTokens', sortedContractTokens.length).page <= 1" @click="goToTablePage('contractTokens', 1)">First</button>
-                <button class="btn ghost btn-small" type="button" :disabled="!canMoveTablePage('contractTokens', -1)" @click="moveTablePage('contractTokens', -1)">Prev</button>
-                <div class="page-number-group">
-                  <template v-for="(pageItem, pageIndex) in getTablePageButtons('contractTokens', sortedContractTokens.length)" :key="`contractTokens-page-${pageIndex}-${pageItem}`">
-                    <span v-if="pageItem === 'ellipsis'" class="page-ellipsis">…</span>
-                    <button
-                      v-else
-                      class="page-number-btn"
-                      :class="{ active: getTablePaginationMeta('contractTokens', sortedContractTokens.length).page === pageItem }"
-                      type="button"
-                      @click="goToTablePage('contractTokens', pageItem)"
-                    >
-                      {{ pageItem }}
-                    </button>
-                  </template>
-                </div>
-                <button class="btn ghost btn-small" type="button" :disabled="!canMoveTablePage('contractTokens', 1)" @click="moveTablePage('contractTokens', 1)">Next</button>
-                <button class="btn ghost btn-small" type="button" :disabled="getTablePaginationMeta('contractTokens', sortedContractTokens.length).page >= getTablePaginationMeta('contractTokens', sortedContractTokens.length).totalPages" @click="goToTablePage('contractTokens', getTablePaginationMeta('contractTokens', sortedContractTokens.length).totalPages)">Last</button>
-              </div>
-            </div>
-          </div>
         </section>
 
         <section class="card card-wide" v-if="contractDetail">
@@ -1928,46 +1888,6 @@
               </tbody>
             </table>
           </div>
-          <div class="table-pagination" v-if="getTablePaginationMeta('contractTokenFlows', sortedContractTokenFlows.length).totalRows > 0">
-            <div class="table-pagination-meta">
-              <span class="mono tiny-muted">Page {{ getTablePaginationMeta('contractTokenFlows', sortedContractTokenFlows.length).page }} / {{ getTablePaginationMeta('contractTokenFlows', sortedContractTokenFlows.length).totalPages }}</span>
-              <span class="muted">{{ getTablePaginationMeta('contractTokenFlows', sortedContractTokenFlows.length).start }}-{{ getTablePaginationMeta('contractTokenFlows', sortedContractTokenFlows.length).end }} / {{ getTablePaginationMeta('contractTokenFlows', sortedContractTokenFlows.length).totalRows }}</span>
-            </div>
-            <div class="table-pagination-controls">
-              <div class="page-size-group" role="group" aria-label="Token asset flow page size">
-                <button
-                  v-for="size in pageSizeOptions"
-                  :key="`contractTokenFlows-size-${size}`"
-                  class="page-size-btn"
-                  :class="{ active: getTablePageSize('contractTokenFlows') === size }"
-                  type="button"
-                  @click="setTablePageSize('contractTokenFlows', size)"
-                >
-                  {{ size }}
-                </button>
-              </div>
-              <div class="page-nav-group">
-                <button class="btn ghost btn-small" type="button" :disabled="getTablePaginationMeta('contractTokenFlows', sortedContractTokenFlows.length).page <= 1" @click="goToTablePage('contractTokenFlows', 1)">First</button>
-                <button class="btn ghost btn-small" type="button" :disabled="!canMoveTablePage('contractTokenFlows', -1)" @click="moveTablePage('contractTokenFlows', -1)">Prev</button>
-                <div class="page-number-group">
-                  <template v-for="(pageItem, pageIndex) in getTablePageButtons('contractTokenFlows', sortedContractTokenFlows.length)" :key="`contractTokenFlows-page-${pageIndex}-${pageItem}`">
-                    <span v-if="pageItem === 'ellipsis'" class="page-ellipsis">…</span>
-                    <button
-                      v-else
-                      class="page-number-btn"
-                      :class="{ active: getTablePaginationMeta('contractTokenFlows', sortedContractTokenFlows.length).page === pageItem }"
-                      type="button"
-                      @click="goToTablePage('contractTokenFlows', pageItem)"
-                    >
-                      {{ pageItem }}
-                    </button>
-                  </template>
-                </div>
-                <button class="btn ghost btn-small" type="button" :disabled="!canMoveTablePage('contractTokenFlows', 1)" @click="moveTablePage('contractTokenFlows', 1)">Next</button>
-                <button class="btn ghost btn-small" type="button" :disabled="getTablePaginationMeta('contractTokenFlows', sortedContractTokenFlows.length).page >= getTablePaginationMeta('contractTokenFlows', sortedContractTokenFlows.length).totalPages" @click="goToTablePage('contractTokenFlows', getTablePaginationMeta('contractTokenFlows', sortedContractTokenFlows.length).totalPages)">Last</button>
-              </div>
-            </div>
-          </div>
         </section>
 
         <section class="card card-wide" v-if="contractDetail">
@@ -2013,46 +1933,6 @@
                 </tr>
               </tbody>
             </table>
-          </div>
-          <div class="table-pagination" v-if="getTablePaginationMeta('reviewHistory', sortedContractReviews.length).totalRows > 0">
-            <div class="table-pagination-meta">
-              <span class="mono tiny-muted">Page {{ getTablePaginationMeta('reviewHistory', sortedContractReviews.length).page }} / {{ getTablePaginationMeta('reviewHistory', sortedContractReviews.length).totalPages }}</span>
-              <span class="muted">{{ getTablePaginationMeta('reviewHistory', sortedContractReviews.length).start }}-{{ getTablePaginationMeta('reviewHistory', sortedContractReviews.length).end }} / {{ getTablePaginationMeta('reviewHistory', sortedContractReviews.length).totalRows }}</span>
-            </div>
-            <div class="table-pagination-controls">
-              <div class="page-size-group" role="group" aria-label="Review history page size">
-                <button
-                  v-for="size in pageSizeOptions"
-                  :key="`reviewHistory-size-${size}`"
-                  class="page-size-btn"
-                  :class="{ active: getTablePageSize('reviewHistory') === size }"
-                  type="button"
-                  @click="setTablePageSize('reviewHistory', size)"
-                >
-                  {{ size }}
-                </button>
-              </div>
-              <div class="page-nav-group">
-                <button class="btn ghost btn-small" type="button" :disabled="getTablePaginationMeta('reviewHistory', sortedContractReviews.length).page <= 1" @click="goToTablePage('reviewHistory', 1)">First</button>
-                <button class="btn ghost btn-small" type="button" :disabled="!canMoveTablePage('reviewHistory', -1)" @click="moveTablePage('reviewHistory', -1)">Prev</button>
-                <div class="page-number-group">
-                  <template v-for="(pageItem, pageIndex) in getTablePageButtons('reviewHistory', sortedContractReviews.length)" :key="`reviewHistory-page-${pageIndex}-${pageItem}`">
-                    <span v-if="pageItem === 'ellipsis'" class="page-ellipsis">…</span>
-                    <button
-                      v-else
-                      class="page-number-btn"
-                      :class="{ active: getTablePaginationMeta('reviewHistory', sortedContractReviews.length).page === pageItem }"
-                      type="button"
-                      @click="goToTablePage('reviewHistory', pageItem)"
-                    >
-                      {{ pageItem }}
-                    </button>
-                  </template>
-                </div>
-                <button class="btn ghost btn-small" type="button" :disabled="!canMoveTablePage('reviewHistory', 1)" @click="moveTablePage('reviewHistory', 1)">Next</button>
-                <button class="btn ghost btn-small" type="button" :disabled="getTablePaginationMeta('reviewHistory', sortedContractReviews.length).page >= getTablePaginationMeta('reviewHistory', sortedContractReviews.length).totalPages" @click="goToTablePage('reviewHistory', getTablePaginationMeta('reviewHistory', sortedContractReviews.length).totalPages)">Last</button>
-              </div>
-            </div>
           </div>
         </section>
         </template>

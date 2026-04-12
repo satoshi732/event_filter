@@ -127,9 +127,6 @@
     contractOverview: 40,
     tokenDirectory: 40,
     tokenRelatedContracts: 30,
-    contractTokens: 24,
-    contractTokenFlows: 24,
-    reviewHistory: 20,
   };
   const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
   const DEFAULT_AI_PROVIDER_MODELS = {
@@ -269,17 +266,11 @@
         contractOverview: 1,
         tokenDirectory: 1,
         tokenRelatedContracts: 1,
-        contractTokens: 1,
-        contractTokenFlows: 1,
-        reviewHistory: 1,
       },
       tablePageSizes: {
         contractOverview: Number(storedPageSizes.contractOverview) || TABLE_PAGE_SIZE.contractOverview,
         tokenDirectory: Number(storedPageSizes.tokenDirectory) || TABLE_PAGE_SIZE.tokenDirectory,
         tokenRelatedContracts: Number(storedPageSizes.tokenRelatedContracts) || TABLE_PAGE_SIZE.tokenRelatedContracts,
-        contractTokens: Number(storedPageSizes.contractTokens) || TABLE_PAGE_SIZE.contractTokens,
-        contractTokenFlows: Number(storedPageSizes.contractTokenFlows) || TABLE_PAGE_SIZE.contractTokenFlows,
-        reviewHistory: Number(storedPageSizes.reviewHistory) || TABLE_PAGE_SIZE.reviewHistory,
       },
       tableSorts: {
         contractOverview: { key: 'total_usd', dir: 'desc' },
@@ -773,12 +764,6 @@
             return Number(state.listMeta.tokenDirectory?.totalRows || 0);
           case 'tokenRelatedContracts':
             return sortedTokenContracts.value.length;
-          case 'contractTokens':
-            return sortedContractTokens.value.length;
-          case 'contractTokenFlows':
-            return sortedContractTokenFlows.value.length;
-          case 'reviewHistory':
-            return sortedContractReviews.value.length;
           default:
             return 0;
         }
@@ -1097,7 +1082,7 @@
       ));
 
       const paginatedContractReviews = computed(() => (
-        paginateRows(sortedContractReviews.value, 'reviewHistory')
+        sortedContractReviews.value
       ));
 
       const sortedContractTokens = computed(() => (
@@ -1126,7 +1111,7 @@
       ));
 
       const paginatedContractTokens = computed(() => (
-        paginateRows(sortedContractTokens.value, 'contractTokens')
+        sortedContractTokens.value
       ));
 
       const contractFlowTokenOptions = computed(() => (
@@ -1167,7 +1152,7 @@
       });
 
       const paginatedContractTokenFlows = computed(() => (
-        paginateRows(sortedContractTokenFlows.value, 'contractTokenFlows')
+        sortedContractTokenFlows.value
       ));
 
       const sortedChainConfigs = computed(() => (
@@ -2196,7 +2181,7 @@
       function analysisStatusLabel(status) {
         switch (String(status || 'idle')) {
           case 'requested':
-            return 'queued';
+            return 'pending';
           case 'running':
             return 'running';
           case 'completed':
@@ -2224,7 +2209,7 @@
 
       function analysisStatusHint(source) {
         const status = String(source?.status || 'idle');
-        if (status === 'requested') return 'Queued and waiting for the backend worker.';
+        if (status === 'requested') return 'Pending and waiting for the backend worker.';
         if (status === 'running') return 'Audit is currently running.';
         if (status === 'completed') return 'Audit finished successfully.';
         if (status === 'failed') return 'Audit failed. You can retry with the same or a different model.';
@@ -2244,7 +2229,7 @@
       function analysisRequestButtonLabel() {
         const source = contractAiAnalysis.value;
         if (source.status === 'completed') return 'Re-run AI Analysis';
-        if (source.status === 'requested') return 'Queued';
+        if (source.status === 'requested') return 'Pending';
         if (source.status === 'running') return 'Running';
         if (source.status === 'failed') return 'Retry AI Analysis';
         return 'Request AI Analysis';
@@ -2253,10 +2238,126 @@
       function tokenAnalysisRequestButtonLabel() {
         const source = tokenAiAnalysis.value;
         if (source.status === 'completed') return 'Re-run AI Analysis';
-        if (source.status === 'requested') return 'Queued';
+        if (source.status === 'requested') return 'Pending';
         if (source.status === 'running') return 'Running';
         if (source.status === 'failed') return 'Retry AI Analysis';
         return 'Request AI Analysis';
+      }
+
+      function buildPendingAutoAnalysis(analysis, fallback = {}) {
+        return {
+          request_session: analysis?.requestSession || fallback.request_session || null,
+          title: analysis?.title || fallback.title || 'AI Auto Audit',
+          provider: analysis?.provider || fallback.provider || state.analysisForm.provider,
+          model: analysis?.model || fallback.model || state.analysisForm.model,
+          status: 'requested',
+          requested_at: analysis?.requestedAt || new Date().toISOString(),
+          completed_at: null,
+          critical: null,
+          high: null,
+          medium: null,
+          report_path: null,
+          error: null,
+        };
+      }
+
+      function markContractPendingAudit(contractAddress, analysis) {
+        const normalized = String(contractAddress || '').toLowerCase();
+        if (!normalized) return;
+
+        if (Array.isArray(state.dashboard.contracts)) {
+          state.dashboard.contracts = state.dashboard.contracts.map((row) => (
+            String(row?.contract || '').toLowerCase() === normalized
+              ? {
+                ...row,
+                auto_audit_status: 'processing',
+                auto_audit_critical: null,
+                auto_audit_high: null,
+                auto_audit_medium: null,
+              }
+              : row
+          ));
+        }
+
+        if (Array.isArray(state.prepared.dashboardContracts)) {
+          state.prepared.dashboardContracts = state.prepared.dashboardContracts.map((row) => (
+            String(row?.contract || '').toLowerCase() === normalized
+              ? {
+                ...row,
+                auto_audit_status: 'processing',
+                auto_audit_critical: null,
+                auto_audit_high: null,
+                auto_audit_medium: null,
+              }
+              : row
+          ));
+        }
+
+        if (state.tokenDetail?.groups?.length) {
+          const nextGroups = state.tokenDetail.groups.map((group) => ({
+            ...group,
+            contracts: (group.contracts || []).map((row) => (
+              String(row?.contract || '').toLowerCase() === normalized
+                ? {
+                  ...row,
+                  auto_audit_status: 'processing',
+                  auto_audit_critical: null,
+                  auto_audit_high: null,
+                  auto_audit_medium: null,
+                }
+                : row
+            )),
+          }));
+          state.tokenDetail = { ...state.tokenDetail, groups: nextGroups };
+          state.prepared.tokenDetail = prepareTokenDetail(state.tokenDetail);
+        }
+
+        if (String(state.contractDetail?.address || '').toLowerCase() === normalized) {
+          state.contractDetail = {
+            ...state.contractDetail,
+            auto_analysis: buildPendingAutoAnalysis(analysis, state.contractDetail?.auto_analysis),
+          };
+        }
+      }
+
+      function markTokenPendingAudit(tokenAddress, analysis) {
+        const normalized = String(tokenAddress || '').toLowerCase();
+        if (!normalized) return;
+
+        if (Array.isArray(state.dashboard.tokens)) {
+          state.dashboard.tokens = state.dashboard.tokens.map((row) => (
+            String(row?.token || '').toLowerCase() === normalized
+              ? {
+                ...row,
+                auto_audit_status: 'processing',
+                auto_audit_critical: null,
+                auto_audit_high: null,
+                auto_audit_medium: null,
+              }
+              : row
+          ));
+        }
+
+        if (Array.isArray(state.prepared.dashboardTokens)) {
+          state.prepared.dashboardTokens = state.prepared.dashboardTokens.map((row) => (
+            String(row?.token || '').toLowerCase() === normalized
+              ? {
+                ...row,
+                auto_audit_status: 'processing',
+                auto_audit_critical: null,
+                auto_audit_high: null,
+                auto_audit_medium: null,
+              }
+              : row
+          ));
+        }
+
+        if (String(state.tokenDetail?.token || '').toLowerCase() === normalized) {
+          state.tokenDetail = {
+            ...state.tokenDetail,
+            auto_analysis: buildPendingAutoAnalysis(analysis, state.tokenDetail?.auto_analysis),
+          };
+        }
       }
 
       function canRequestOverviewAutoAudit(row) {
@@ -2272,7 +2373,7 @@
       async function requestOverviewAutoAudit(row) {
         if (!row?.contract || !canRequestOverviewAutoAudit(row)) return;
         try {
-          await apiFetch('/api/contract-analysis/request', {
+          const data = await apiFetch('/api/contract-analysis/request', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -2280,6 +2381,7 @@
               contract: row.contract,
             }),
           });
+          markContractPendingAudit(row.contract, data.analysis);
           invalidateChainCache(state.selectedChain);
           await loadDashboardContracts({ showLoading: false, force: true });
           if (state.contractDetail?.address === row.contract) {
@@ -2293,7 +2395,7 @@
       async function requestTokenAutoAudit(row) {
         if (!row?.token || !canRequestTokenAutoAudit(row)) return;
         try {
-          await apiFetch('/api/token-analysis/request', {
+          const data = await apiFetch('/api/token-analysis/request', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -2301,6 +2403,7 @@
               token: row.token,
             }),
           });
+          markTokenPendingAudit(row.token, data.analysis);
           invalidateChainCache(state.selectedChain);
           await loadDashboardTokens({ showLoading: false, force: true });
           if (state.tokenDetail?.token === row.token) {
@@ -2314,7 +2417,7 @@
       async function requestContractAnalysis() {
         if (!state.contractDetail?.address || !canRequestContractAnalysis()) return;
         try {
-          await apiFetch('/api/contract-analysis/request', {
+          const data = await apiFetch('/api/contract-analysis/request', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -2325,6 +2428,7 @@
               model: state.analysisForm.model,
             }),
           });
+          markContractPendingAudit(state.contractDetail.address, data.analysis);
           invalidateChainCache(state.selectedChain);
           await loadContractDetail({ force: true });
           window.alert('AI analysis requested');
@@ -2336,7 +2440,7 @@
       async function requestTokenAnalysis() {
         if (!state.tokenDetail?.token || !canRequestTokenAnalysis()) return;
         try {
-          await apiFetch('/api/token-analysis/request', {
+          const data = await apiFetch('/api/token-analysis/request', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -2347,6 +2451,7 @@
               model: state.analysisForm.model,
             }),
           });
+          markTokenPendingAudit(state.tokenDetail.token, data.analysis);
           invalidateChainCache(state.selectedChain);
           await loadTokenDetail({ force: true });
           window.alert('AI analysis requested');
@@ -2658,16 +2763,12 @@
       watch(
         () => routeContract.value,
         () => {
-          resetTablePage('contractTokens');
-          resetTablePage('contractTokenFlows');
-          resetTablePage('reviewHistory');
         },
       );
 
       watch(
         () => state.selectedContractFlowToken,
         () => {
-          resetTablePage('contractTokenFlows');
         },
       );
 

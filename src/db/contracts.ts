@@ -390,7 +390,7 @@ function requestAiAudit(input: {
   const provider = normalizeAiAuditProvider(input.provider);
   const model = normalizeAiAuditModel(provider, input.model);
   const latest = getLatestAiAudits(input.targetType, chainName, [address]).get(address);
-  if (latest && (latest.auditedAt === null || latest.isSuccess === true)) {
+  if (latest && latest.auditedAt === null) {
     return latest;
   }
 

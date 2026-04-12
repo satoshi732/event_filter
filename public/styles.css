@@ -4,6 +4,9 @@
   --panel: #0f1a26;
   --line: #1f3347;
   --line-strong: #2e5f7f;
+  --scrollbar-track: rgba(8, 18, 27, 0.9);
+  --scrollbar-thumb: rgba(54, 92, 120, 0.88);
+  --scrollbar-thumb-hover: rgba(86, 147, 188, 0.92);
   --text: #e8f6ff;
   --muted: #84a3b8;
   --brand: #19d3c5;
@@ -17,6 +20,31 @@
 
 * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, var(--scrollbar-thumb), rgba(39, 69, 92, 0.96));
+  border-radius: 999px;
+  border: 1px solid rgba(8, 18, 27, 0.72);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, var(--scrollbar-thumb-hover), rgba(65, 110, 145, 0.98));
+}
+
+*::-webkit-scrollbar-corner {
+  background: var(--scrollbar-track);
 }
 
 [v-cloak] {
@@ -1516,86 +1544,22 @@ hr {
   box-shadow: 0 28px 80px rgba(0, 0, 0, 0.45);
 }
 
-.review-modal-card .card-head {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: linear-gradient(180deg, rgba(12, 27, 40, 0.98), rgba(12, 27, 40, 0.92));
-  backdrop-filter: blur(8px);
-}
-
-.review-modal-head {
-  margin-bottom: 0;
-  padding: 20px 20px 16px;
-  align-items: flex-start;
-}
-
-.review-modal-heading {
-  min-width: 0;
+.review-modal-topbar {
   display: grid;
-  gap: 6px;
-}
-
-.review-modal-heading h2 {
-  font-size: 1.1rem;
-}
-
-.review-modal-subtitle {
-  margin: 0;
-  max-width: 56ch;
-  color: #9fc2d2;
-  line-height: 1.45;
-  font-size: 0.93rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 20px 20px 0;
 }
 
 .review-modal-close {
-  margin-top: 2px;
+  margin-top: 24px;
 }
 
 .review-modal-body {
   display: grid;
-  gap: 16px;
-  padding: 0 20px 22px;
-}
-
-.review-modal-summary {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(240px, 0.9fr);
   gap: 14px;
-  padding: 14px;
-  border: 1px solid rgba(110, 231, 255, 0.12);
-  border-radius: 16px;
-  background:
-    radial-gradient(circle at top right, rgba(110, 231, 255, 0.08), transparent 30%),
-    linear-gradient(160deg, rgba(11, 25, 37, 0.96) 0%, rgba(14, 38, 52, 0.94) 100%);
-}
-
-.review-modal-summary-main,
-.review-modal-summary-side {
-  min-width: 0;
-}
-
-.review-modal-summary-side {
-  display: grid;
-  align-content: start;
-  gap: 12px;
-}
-
-.review-modal-chip-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.review-modal-supporting-copy {
-  margin: 0;
-  padding: 12px 14px;
-  border: 1px solid rgba(71, 110, 131, 0.52);
-  border-radius: 14px;
-  background: rgba(8, 18, 27, 0.58);
-  color: #b8d6e3;
-  line-height: 1.52;
-  font-size: 0.92rem;
+  padding: 14px 20px 22px;
 }
 
 .review-modal-address-field {
@@ -1603,7 +1567,7 @@ hr {
 }
 
 .review-modal-code {
-  min-height: 56px;
+  min-height: 48px;
   resize: none;
   overflow: hidden;
 }
@@ -1631,8 +1595,8 @@ hr {
 .review-modal-toggle-card {
   padding: 14px;
   border: 1px solid #284255;
-  border-radius: 16px;
-  background: linear-gradient(180deg, rgba(18, 35, 47, 0.94), rgba(11, 24, 34, 0.98));
+  border-radius: 14px;
+  background: rgba(11, 24, 34, 0.9);
 }
 
 .review-toggle-row {
@@ -1653,14 +1617,6 @@ hr {
 .review-toggle-row strong {
   font-size: 0.95rem;
   color: #e8fbff;
-}
-
-.review-modal-toggle-card small {
-  display: block;
-  margin-top: 10px;
-  color: #8fb0bf;
-  line-height: 1.45;
-  font-size: 0.82rem;
 }
 
 .review-modal-footer {
@@ -2513,7 +2469,7 @@ hr {
     justify-content: flex-start;
   }
 
-  .review-modal-summary,
+  .review-modal-topbar,
   .review-modal-form-grid {
     grid-template-columns: 1fr;
   }

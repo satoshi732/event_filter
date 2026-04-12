@@ -1816,12 +1816,11 @@
 
       <div v-if="contractReviewModal.open" class="modal-backdrop" @click.self="closeContractReviewModal">
         <div class="modal-card review-modal-card">
-          <div class="card-head review-modal-head">
-            <div class="review-modal-heading">
-              <p class="kicker">Manual Review</p>
-              <h2>Contract Review</h2>
-              <p class="review-modal-subtitle">Capture analyst notes with the same visual context used in contract overview and token-related contract tables.</p>
-            </div>
+          <div class="review-modal-topbar">
+            <label class="stack-label review-modal-address-field">
+              <span>Contract</span>
+              <input :value="contractReviewModal.address" type="text" readonly class="code-box review-modal-code">
+            </label>
             <button class="icon-action-btn review-modal-close" type="button" @click="closeContractReviewModal" aria-label="Close review modal" title="Close">
               <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
                 <path d="m4.2 4.2 7.6 7.6-1 1-7.6-7.6z" fill="currentColor"></path>
@@ -1830,33 +1829,6 @@
             </button>
           </div>
           <div class="review-modal-body">
-            <section class="review-modal-summary">
-              <div class="review-modal-summary-main">
-                <label class="stack-label review-modal-address-field">
-                  <span>Contract</span>
-                  <input :value="contractReviewModal.address" type="text" readonly class="code-box review-modal-code">
-                </label>
-              </div>
-              <aside class="review-modal-summary-side">
-                <div class="review-modal-chip-row">
-                  <span class="chip small token-tone">{{ String(selectedChain || '').toUpperCase() || '--' }}</span>
-                  <span class="chip small plain">
-                    {{
-                      contractReviewModal.source === 'overview'
-                        ? 'overview'
-                        : contractReviewModal.source === 'token-related'
-                          ? 'related contracts'
-                          : 'table'
-                    }}
-                  </span>
-                  <span class="chip small" :class="contractReviewModal.exploitable ? 'bad' : 'ok'">
-                    {{ contractReviewModal.exploitable ? 'exploitable' : 'non-exploitable' }}
-                  </span>
-                </div>
-                <p class="review-modal-supporting-copy">Saving this review also marks the contract as manually audited and keeps the entry aligned with seen-contract history.</p>
-              </aside>
-            </section>
-
             <section class="review-modal-form-grid">
               <label class="stack-label review-modal-field">
                 <span>Label</span>
@@ -1866,9 +1838,8 @@
                 <span>Risk Status</span>
                 <span class="review-toggle-row">
                   <input v-model="contractReviewModal.exploitable" type="checkbox">
-                  <strong>{{ contractReviewModal.exploitable ? 'Exploitable' : 'Not marked exploitable' }}</strong>
+                  <strong>{{ contractReviewModal.exploitable ? 'Exploitable' : 'Review only' }}</strong>
                 </span>
-                <small>Use this when the contract should be surfaced as user-facing risk.</small>
               </label>
               <label class="stack-label review-modal-field review-modal-field-wide">
                 <span>Review Text</span>
@@ -1891,12 +1862,11 @@
 
       <div v-if="tokenReviewModal.open" class="modal-backdrop" @click.self="closeTokenReviewModal">
         <div class="modal-card review-modal-card">
-          <div class="card-head review-modal-head">
-            <div class="review-modal-heading">
-              <p class="kicker">Manual Review</p>
-              <h2>Token Review</h2>
-              <p class="review-modal-subtitle">Capture token-level notes directly from Token Directory and store them as the token's manual audit summary.</p>
-            </div>
+          <div class="review-modal-topbar">
+            <label class="stack-label review-modal-address-field">
+              <span>Token</span>
+              <input :value="tokenReviewModal.address" type="text" readonly class="code-box review-modal-code">
+            </label>
             <button class="icon-action-btn review-modal-close" type="button" @click="closeTokenReviewModal" aria-label="Close token review modal" title="Close">
               <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
                 <path d="m4.2 4.2 7.6 7.6-1 1-7.6-7.6z" fill="currentColor"></path>
@@ -1905,25 +1875,6 @@
             </button>
           </div>
           <div class="review-modal-body">
-            <section class="review-modal-summary">
-              <div class="review-modal-summary-main">
-                <label class="stack-label review-modal-address-field">
-                  <span>Token</span>
-                  <input :value="tokenReviewModal.address" type="text" readonly class="code-box review-modal-code">
-                </label>
-              </div>
-              <aside class="review-modal-summary-side">
-                <div class="review-modal-chip-row">
-                  <span class="chip small token-tone">{{ String(selectedChain || '').toUpperCase() || '--' }}</span>
-                  <span class="chip small plain">{{ tokenReviewModal.symbol || tokenReviewModal.name || 'token' }}</span>
-                  <span class="chip small" :class="tokenReviewModal.exploitable ? 'bad' : 'ok'">
-                    {{ tokenReviewModal.exploitable ? 'exploitable' : 'review only' }}
-                  </span>
-                </div>
-                <p class="review-modal-supporting-copy">Saving this review marks the token as manually audited and keeps a concise analyst summary attached to the token record.</p>
-              </aside>
-            </section>
-
             <section class="review-modal-form-grid">
               <label class="stack-label review-modal-field review-modal-field-wide">
                 <span>Review Text</span>
@@ -1933,9 +1884,8 @@
                 <span>Risk Status</span>
                 <span class="review-toggle-row">
                   <input v-model="tokenReviewModal.exploitable" type="checkbox">
-                  <strong>{{ tokenReviewModal.exploitable ? 'Mark as exploitable' : 'Not marked exploitable' }}</strong>
+                  <strong>{{ tokenReviewModal.exploitable ? 'Exploitable' : 'Review only' }}</strong>
                 </span>
-                <small>Use this when the token itself should be surfaced as a user-facing risk, not just noted for context.</small>
               </label>
             </section>
 

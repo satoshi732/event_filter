@@ -384,6 +384,8 @@
         contractDetail: new Map(),
         settings: null,
       };
+      const inFlightLoads = new Map();
+      const recentRunRefreshes = new Map();
 
       function assignDashboardContractsPayload(payload) {
         state.dashboard.run = payload.run || null;
@@ -405,6 +407,34 @@
       function assignContractDetailPayload(payload) {
         state.contractDetail = payload.contract ? markRaw(payload.contract) : null;
         state.prepared.contractDetail = payload.preparedContractDetail || prepareContractDetail(payload.contract);
+      }
+
+      function runSharedLoad(key, task) {
+        const existing = inFlightLoads.get(key);
+        if (existing) return existing;
+        const promise = Promise.resolve()
+          .then(task)
+          .finally(() => {
+            if (inFlightLoads.get(key) === promise) {
+              inFlightLoads.delete(key);
+            }
+          });
+        inFlightLoads.set(key, promise);
+        return promise;
+      }
+
+      function rememberRunRefresh(chain, refreshKey) {
+        const normalizedChain = chainCacheKey(chain);
+        const normalizedKey = String(refreshKey || '').trim();
+        if (!normalizedChain || !normalizedKey) return;
+        recentRunRefreshes.set(normalizedChain, normalizedKey);
+      }
+
+      function hasRecentRunRefresh(chain, refreshKey) {
+        const normalizedChain = chainCacheKey(chain);
+        const normalizedKey = String(refreshKey || '').trim();
+        if (!normalizedChain || !normalizedKey) return false;
+        return recentRunRefreshes.get(normalizedChain) === normalizedKey;
       }
 
       let copiedAddressTimer = null;
@@ -1080,19 +1110,27 @@
         state.autoAnalysis = data.auto_analysis || state.autoAnalysis;
 
         if (wasRunning && !state.running) {
-          invalidateChainCache(previousRunningChain || state.selectedChain);
-          if (currentView.value === 'dashboard') {
-            if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
-              await loadSettings({ showLoading: false, force: true });
+          const completedChain = previousRunningChain || state.selectedChain;
+          const latestCompletedRun = (data.latest_runs || []).find(
+            (row) => String(row?.chain || '').toLowerCase() === String(completedChain || '').toLowerCase(),
+          );
+          const refreshKey = latestCompletedRun?.generated_at || data.progress?.updated_at || '';
+          if (!hasRecentRunRefresh(completedChain, refreshKey)) {
+            rememberRunRefresh(completedChain, refreshKey);
+            invalidateChainCache(completedChain);
+            if (currentView.value === 'dashboard') {
+              if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
+                await loadSettings({ showLoading: false, force: true });
+              } else {
+                await loadDashboardContracts({ showLoading: false, force: true });
+              }
+            } else if (currentView.value === 'token') {
+              await loadDashboardTokens({ showLoading: false, force: true });
+            } else if (currentView.value === 'token-detail') {
+              await loadTokenDetail({ showLoading: false, force: true });
             } else {
-              await loadDashboardContracts({ showLoading: false, force: true });
+              await loadContractDetail({ showLoading: false, force: true });
             }
-          } else if (currentView.value === 'token') {
-            await loadDashboardTokens({ showLoading: false, force: true });
-          } else if (currentView.value === 'token-detail') {
-            await loadTokenDetail({ showLoading: false, force: true });
-          } else {
-            await loadContractDetail({ showLoading: false, force: true });
           }
         }
       }
@@ -1117,6 +1155,46 @@
               console.error(err);
             }
           });
+          stateEventSource.addEventListener('ai-audit', (event) => {
+            try {
+              const payload = JSON.parse(event.data);
+              void handleAiAuditSse(payload);
+            } catch (err) {
+              console.error(err);
+            }
+          });
+          stateEventSource.addEventListener('auto-analysis', (event) => {
+            try {
+              const payload = JSON.parse(event.data);
+              handleAutoAnalysisSse(payload);
+            } catch (err) {
+              console.error(err);
+            }
+          });
+          stateEventSource.addEventListener('pattern-sync', (event) => {
+            try {
+              const payload = JSON.parse(event.data);
+              handlePatternSyncSse(payload);
+            } catch (err) {
+              console.error(err);
+            }
+          });
+          stateEventSource.addEventListener('review-updated', (event) => {
+            try {
+              const payload = JSON.parse(event.data);
+              void handleReviewUpdatedSse(payload);
+            } catch (err) {
+              console.error(err);
+            }
+          });
+          stateEventSource.addEventListener('data-refresh', (event) => {
+            try {
+              const payload = JSON.parse(event.data);
+              void handleDataRefreshSse(payload);
+            } catch (err) {
+              console.error(err);
+            }
+          });
           stateEventSource.onerror = () => {
             // EventSource reconnects automatically. Keep the stream open unless closed explicitly.
           };
@@ -1125,6 +1203,127 @@
           stateStreamReadyPromise = Promise.resolve();
         }
         return stateStreamReadyPromise;
+      }
+
+      async function handleAiAuditSse(payload) {
+        const chain = String(payload?.chain || '').toLowerCase();
+        const targetType = String(payload?.targetType || '').toLowerCase();
+        const targetAddr = String(payload?.targetAddr || '').toLowerCase();
+        if (!chain || !targetType || !targetAddr) return;
+
+        invalidateChainCache(chain);
+        if (chain !== state.selectedChain) return;
+
+        if (currentView.value === 'token-detail') {
+          const tokenAddr = String(state.route.token || '').toLowerCase();
+          if (targetType === 'token' && tokenAddr === targetAddr) {
+            await loadTokenDetail({ showLoading: false, force: true });
+            return;
+          }
+          if (targetType === 'contract') {
+            const hasContract = (state.prepared.tokenDetail?.contractsFlat || []).some(
+              (row) => String(row?.contract || '').toLowerCase() === targetAddr,
+            );
+            if (hasContract) {
+              await loadTokenDetail({ showLoading: false, force: true });
+              return;
+            }
+          }
+        }
+
+        if (currentView.value === 'contract') {
+          const contractAddr = String(state.route.contract || '').toLowerCase();
+          if (targetType === 'contract' && contractAddr === targetAddr) {
+            await loadContractDetail({ showLoading: false, force: true });
+            return;
+          }
+        }
+
+        if (currentView.value === 'token' && targetType === 'token') {
+          await loadDashboardTokens({ showLoading: false, force: true });
+          return;
+        }
+
+        if (currentView.value === 'dashboard' && state.dashboardTab === 'tokens' && targetType === 'contract') {
+          await loadDashboardContracts({ showLoading: false, force: true });
+        }
+      }
+
+      function handleAutoAnalysisSse(payload) {
+        if (!payload || typeof payload !== 'object') return;
+        state.autoAnalysis = payload;
+      }
+
+      function handlePatternSyncSse(payload) {
+        const status = payload?.status;
+        if (status && typeof status === 'object') {
+          state.syncStatus = status;
+        }
+      }
+
+      async function handleReviewUpdatedSse(payload) {
+        const chain = String(payload?.chain || '').toLowerCase();
+        const targetType = String(payload?.targetType || '').toLowerCase();
+        const targetAddr = String(payload?.targetAddr || '').toLowerCase();
+        if (!chain || !targetType || !targetAddr) return;
+
+        invalidateChainCache(chain);
+        if (chain !== state.selectedChain) return;
+
+        if (currentView.value === 'token-detail') {
+          const tokenAddr = String(state.route.token || '').toLowerCase();
+          if (targetType === 'token' && tokenAddr === targetAddr) {
+            await loadTokenDetail({ showLoading: false, force: true });
+            return;
+          }
+          if (targetType === 'contract') {
+            const hasContract = (state.prepared.tokenDetail?.contractsFlat || []).some(
+              (row) => String(row?.contract || '').toLowerCase() === targetAddr,
+            );
+            if (hasContract) {
+              await loadTokenDetail({ showLoading: false, force: true });
+              return;
+            }
+          }
+        }
+
+        if (currentView.value === 'contract') {
+          const contractAddr = String(state.route.contract || '').toLowerCase();
+          if (targetType === 'contract' && contractAddr === targetAddr) {
+            await loadContractDetail({ showLoading: false, force: true });
+            return;
+          }
+        }
+
+        if (currentView.value === 'dashboard' && state.dashboardTab === 'tokens' && targetType === 'contract') {
+          await loadDashboardContracts({ showLoading: false, force: true });
+        }
+      }
+
+      async function handleDataRefreshSse(payload) {
+        const chain = String(payload?.chain || '').toLowerCase();
+        const kind = String(payload?.kind || '').toLowerCase();
+        if (!chain || chain !== state.selectedChain || kind !== 'run-completed') return;
+
+        rememberRunRefresh(chain, payload?.run?.generated_at || payload?.ts || '');
+        invalidateChainCache(chain);
+        if (currentView.value === 'dashboard') {
+          if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
+            await loadSettings({ showLoading: false, force: true });
+          } else {
+            await loadDashboardContracts({ showLoading: false, force: true });
+          }
+          return;
+        }
+        if (currentView.value === 'token') {
+          await loadDashboardTokens({ showLoading: false, force: true });
+          return;
+        }
+        if (currentView.value === 'token-detail') {
+          await loadTokenDetail({ showLoading: false, force: true });
+          return;
+        }
+        await loadContractDetail({ showLoading: false, force: true });
       }
 
       async function loadDashboard(options = {}) {
@@ -1151,7 +1350,8 @@
 
       async function loadDashboardContracts(options = {}) {
         if (!state.selectedChain) return;
-        const cacheKey = chainCacheKey(state.selectedChain);
+        const requestChain = chainCacheKey(state.selectedChain);
+        const cacheKey = requestChain;
         if (options.force !== true) {
           const cached = viewDataCache.dashboardContracts.get(cacheKey);
           if (cached) {
@@ -1159,28 +1359,33 @@
             return;
           }
         }
-        try {
-          const data = options.showLoading === false
-            ? await apiFetch(`/api/contracts?chain=${encodeURIComponent(state.selectedChain)}`)
-            : await withPageLoading(
-              'Loading contracts',
-              () => apiFetch(`/api/contracts?chain=${encodeURIComponent(state.selectedChain)}`),
-            );
-          const payload = {
-            run: data.run || null,
-            contracts: data.contracts || [],
-            preparedContracts: prepareDashboardContractRows(data.contracts || []),
-          };
-          viewDataCache.dashboardContracts.set(cacheKey, payload);
-          assignDashboardContractsPayload(payload);
-        } catch {
-          assignDashboardContractsPayload({ run: null, contracts: [], preparedContracts: [] });
-        }
+        await runSharedLoad(`dashboard-contracts:${cacheKey}`, async () => {
+          try {
+            const data = options.showLoading === false
+              ? await apiFetch(`/api/contracts?chain=${encodeURIComponent(requestChain)}`)
+              : await withPageLoading(
+                'Loading contracts',
+                () => apiFetch(`/api/contracts?chain=${encodeURIComponent(requestChain)}`),
+              );
+            const payload = {
+              run: data.run || null,
+              contracts: data.contracts || [],
+              preparedContracts: prepareDashboardContractRows(data.contracts || []),
+            };
+            viewDataCache.dashboardContracts.set(cacheKey, payload);
+            if (chainCacheKey(state.selectedChain) !== cacheKey) return;
+            assignDashboardContractsPayload(payload);
+          } catch {
+            if (chainCacheKey(state.selectedChain) !== cacheKey) return;
+            assignDashboardContractsPayload({ run: null, contracts: [], preparedContracts: [] });
+          }
+        });
       }
 
       async function loadDashboardTokens(options = {}) {
         if (!state.selectedChain) return;
-        const cacheKey = chainCacheKey(state.selectedChain);
+        const requestChain = chainCacheKey(state.selectedChain);
+        const cacheKey = requestChain;
         if (options.force !== true) {
           const cached = viewDataCache.dashboardTokens.get(cacheKey);
           if (cached) {
@@ -1188,28 +1393,34 @@
             return;
           }
         }
-        try {
-          const data = options.showLoading === false
-            ? await apiFetch(`/api/tokens?chain=${encodeURIComponent(state.selectedChain)}`)
-            : await withPageLoading(
-              'Loading tokens',
-              () => apiFetch(`/api/tokens?chain=${encodeURIComponent(state.selectedChain)}`),
-            );
-          const payload = {
-            run: data.run || null,
-            tokens: data.tokens || [],
-            preparedTokens: prepareDashboardTokenRows(data.tokens || []),
-          };
-          viewDataCache.dashboardTokens.set(cacheKey, payload);
-          assignDashboardTokensPayload(payload);
-        } catch {
-          assignDashboardTokensPayload({ run: null, tokens: [], preparedTokens: [] });
-        }
+        await runSharedLoad(`dashboard-tokens:${cacheKey}`, async () => {
+          try {
+            const data = options.showLoading === false
+              ? await apiFetch(`/api/tokens?chain=${encodeURIComponent(requestChain)}`)
+              : await withPageLoading(
+                'Loading tokens',
+                () => apiFetch(`/api/tokens?chain=${encodeURIComponent(requestChain)}`),
+              );
+            const payload = {
+              run: data.run || null,
+              tokens: data.tokens || [],
+              preparedTokens: prepareDashboardTokenRows(data.tokens || []),
+            };
+            viewDataCache.dashboardTokens.set(cacheKey, payload);
+            if (chainCacheKey(state.selectedChain) !== cacheKey) return;
+            assignDashboardTokensPayload(payload);
+          } catch {
+            if (chainCacheKey(state.selectedChain) !== cacheKey) return;
+            assignDashboardTokensPayload({ run: null, tokens: [], preparedTokens: [] });
+          }
+        });
       }
 
       async function loadTokenDetail(options = {}) {
         if (!state.selectedChain || !state.route.token) return;
-        const cacheKey = tokenCacheKey(state.selectedChain, state.route.token);
+        const requestChain = chainCacheKey(state.selectedChain);
+        const requestToken = String(state.route.token || '').toLowerCase();
+        const cacheKey = tokenCacheKey(requestChain, requestToken);
         if (options.force !== true) {
           const cached = viewDataCache.tokenDetail.get(cacheKey);
           if (cached) {
@@ -1225,39 +1436,45 @@
             return;
           }
         }
-        try {
-          const data = options.showLoading === false
-            ? await apiFetch(`/api/token?chain=${encodeURIComponent(state.selectedChain)}&token=${encodeURIComponent(state.route.token)}`)
-            : await withPageLoading(
-              'Loading token details',
-              () => apiFetch(`/api/token?chain=${encodeURIComponent(state.selectedChain)}&token=${encodeURIComponent(state.route.token)}`),
-            );
-          const payload = {
-            token: data.token || null,
-            preparedTokenDetail: prepareTokenDetail(data.token || null),
-            aiProviders: data.ai_config?.ai_providers || [],
-            aiModels: data.ai_config?.ai_models || [],
-            defaultProvider: data.ai_config?.default_provider || state.aiConfig.default_provider,
-            defaultModel: data.ai_config?.default_model || state.aiConfig.default_model,
-          };
-          viewDataCache.tokenDetail.set(cacheKey, payload);
-          assignTokenDetailPayload(payload);
-          state.aiConfig.providers = payload.aiProviders;
-          state.aiConfig.models = payload.aiModels;
-          state.aiConfig.default_provider = payload.defaultProvider;
-          state.aiConfig.default_model = payload.defaultModel;
-          state.analysisForm.title = state.tokenDetail?.auto_analysis?.title || 'AI Auto Audit';
-          state.analysisForm.provider = normalizeAiProvider(state.tokenDetail?.auto_analysis?.provider);
-          state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, state.tokenDetail?.auto_analysis?.model);
-          hydrateTokenReviewForm();
-        } catch {
-          assignTokenDetailPayload({ token: null, preparedTokenDetail: prepareTokenDetail(null) });
-        }
+        await runSharedLoad(`token-detail:${cacheKey}`, async () => {
+          try {
+            const data = options.showLoading === false
+              ? await apiFetch(`/api/token?chain=${encodeURIComponent(requestChain)}&token=${encodeURIComponent(requestToken)}`)
+              : await withPageLoading(
+                'Loading token details',
+                () => apiFetch(`/api/token?chain=${encodeURIComponent(requestChain)}&token=${encodeURIComponent(requestToken)}`),
+              );
+            const payload = {
+              token: data.token || null,
+              preparedTokenDetail: prepareTokenDetail(data.token || null),
+              aiProviders: data.ai_config?.ai_providers || [],
+              aiModels: data.ai_config?.ai_models || [],
+              defaultProvider: data.ai_config?.default_provider || state.aiConfig.default_provider,
+              defaultModel: data.ai_config?.default_model || state.aiConfig.default_model,
+            };
+            viewDataCache.tokenDetail.set(cacheKey, payload);
+            if (tokenCacheKey(state.selectedChain, state.route.token) !== cacheKey) return;
+            assignTokenDetailPayload(payload);
+            state.aiConfig.providers = payload.aiProviders;
+            state.aiConfig.models = payload.aiModels;
+            state.aiConfig.default_provider = payload.defaultProvider;
+            state.aiConfig.default_model = payload.defaultModel;
+            state.analysisForm.title = state.tokenDetail?.auto_analysis?.title || 'AI Auto Audit';
+            state.analysisForm.provider = normalizeAiProvider(state.tokenDetail?.auto_analysis?.provider);
+            state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, state.tokenDetail?.auto_analysis?.model);
+            hydrateTokenReviewForm();
+          } catch {
+            if (tokenCacheKey(state.selectedChain, state.route.token) !== cacheKey) return;
+            assignTokenDetailPayload({ token: null, preparedTokenDetail: prepareTokenDetail(null) });
+          }
+        });
       }
 
       async function loadContractDetail(options = {}) {
         if (!state.selectedChain || !state.route.contract) return;
-        const cacheKey = contractCacheKey(state.selectedChain, state.route.contract);
+        const requestChain = chainCacheKey(state.selectedChain);
+        const requestContract = String(state.route.contract || '').toLowerCase();
+        const cacheKey = contractCacheKey(requestChain, requestContract);
         if (options.force !== true) {
           const cached = viewDataCache.contractDetail.get(cacheKey);
           if (cached) {
@@ -1277,39 +1494,43 @@
             return;
           }
         }
-        try {
-          const data = options.showLoading === false
-            ? await apiFetch(`/api/contract?chain=${encodeURIComponent(state.selectedChain)}&contract=${encodeURIComponent(state.route.contract)}`)
-            : await withPageLoading(
-              'Loading contract details',
-              () => apiFetch(`/api/contract?chain=${encodeURIComponent(state.selectedChain)}&contract=${encodeURIComponent(state.route.contract)}`),
-            );
-          const payload = {
-            contract: data.contract || null,
-            preparedContractDetail: prepareContractDetail(data.contract || null),
-            aiProviders: data.ai_config?.ai_providers || [],
-            aiModels: data.ai_config?.ai_models || [],
-            defaultProvider: data.ai_config?.default_provider || state.aiConfig.default_provider,
-            defaultModel: data.ai_config?.default_model || state.aiConfig.default_model,
-          };
-          viewDataCache.contractDetail.set(cacheKey, payload);
-          assignContractDetailPayload(payload);
-          state.aiConfig.providers = payload.aiProviders;
-          state.aiConfig.models = payload.aiModels;
-          state.aiConfig.default_provider = payload.defaultProvider;
-          state.aiConfig.default_model = payload.defaultModel;
-          const availableTokens = state.contractDetail?.tokens || [];
-          const selected = state.selectedContractFlowToken?.toLowerCase();
-          if (!availableTokens.length) {
+        await runSharedLoad(`contract-detail:${cacheKey}`, async () => {
+          try {
+            const data = options.showLoading === false
+              ? await apiFetch(`/api/contract?chain=${encodeURIComponent(requestChain)}&contract=${encodeURIComponent(requestContract)}`)
+              : await withPageLoading(
+                'Loading contract details',
+                () => apiFetch(`/api/contract?chain=${encodeURIComponent(requestChain)}&contract=${encodeURIComponent(requestContract)}`),
+              );
+            const payload = {
+              contract: data.contract || null,
+              preparedContractDetail: prepareContractDetail(data.contract || null),
+              aiProviders: data.ai_config?.ai_providers || [],
+              aiModels: data.ai_config?.ai_models || [],
+              defaultProvider: data.ai_config?.default_provider || state.aiConfig.default_provider,
+              defaultModel: data.ai_config?.default_model || state.aiConfig.default_model,
+            };
+            viewDataCache.contractDetail.set(cacheKey, payload);
+            if (contractCacheKey(state.selectedChain, state.route.contract) !== cacheKey) return;
+            assignContractDetailPayload(payload);
+            state.aiConfig.providers = payload.aiProviders;
+            state.aiConfig.models = payload.aiModels;
+            state.aiConfig.default_provider = payload.defaultProvider;
+            state.aiConfig.default_model = payload.defaultModel;
+            const availableTokens = state.contractDetail?.tokens || [];
+            const selected = state.selectedContractFlowToken?.toLowerCase();
+            if (!availableTokens.length) {
+              state.selectedContractFlowToken = '';
+            } else if (!selected || !availableTokens.some((row) => row.token?.token?.toLowerCase() === selected)) {
+              state.selectedContractFlowToken = availableTokens[0]?.token?.token || '';
+            }
+            hydrateReviewForm();
+          } catch {
+            if (contractCacheKey(state.selectedChain, state.route.contract) !== cacheKey) return;
+            assignContractDetailPayload({ contract: null, preparedContractDetail: prepareContractDetail(null) });
             state.selectedContractFlowToken = '';
-          } else if (!selected || !availableTokens.some((row) => row.token?.token?.toLowerCase() === selected)) {
-            state.selectedContractFlowToken = availableTokens[0]?.token?.token || '';
           }
-          hydrateReviewForm();
-        } catch {
-          assignContractDetailPayload({ contract: null, preparedContractDetail: prepareContractDetail(null) });
-          state.selectedContractFlowToken = '';
-        }
+        });
       }
 
       async function loadSettings(options = {}) {
@@ -1337,30 +1558,32 @@
           if (state.contractDetail) hydrateReviewForm();
           return;
         }
-        const data = options.showLoading === false
-          ? await apiFetch('/api/settings')
-          : await withPageLoading('Loading settings', () => apiFetch('/api/settings'));
-        viewDataCache.settings = data;
-        state.settings.runtime_settings = {
-          ...state.settings.runtime_settings,
-          ...(data.runtime_settings || {}),
-          chainbase_keys: Array.isArray(data.runtime_settings?.chainbase_keys)
-            ? data.runtime_settings.chainbase_keys.join('\n')
-            : String(data.runtime_settings?.chainbase_keys || ''),
-          rpc_keys: Array.isArray(data.runtime_settings?.rpc_keys)
-            ? data.runtime_settings.rpc_keys.join('\n')
-            : String(data.runtime_settings?.rpc_keys || ''),
-        };
-        state.settings.chain_configs = data.chain_configs || [];
-        state.settings.ai_providers = data.ai_providers || [];
-        state.settings.ai_models = data.ai_models || [];
-        state.settings.whitelist_patterns = data.whitelist_patterns || [];
-        state.aiConfig.providers = data.ai_providers || [];
-        state.aiConfig.models = data.ai_models || [];
-        state.aiConfig.default_provider = data.ai_providers?.find?.((row) => row.isDefault)?.provider || state.aiConfig.default_provider;
-        state.analysisForm.provider = normalizeAiProvider(state.analysisForm.provider);
-        state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, state.analysisForm.model);
-        if (state.contractDetail) hydrateReviewForm();
+        await runSharedLoad('settings', async () => {
+          const data = options.showLoading === false
+            ? await apiFetch('/api/settings')
+            : await withPageLoading('Loading settings', () => apiFetch('/api/settings'));
+          viewDataCache.settings = data;
+          state.settings.runtime_settings = {
+            ...state.settings.runtime_settings,
+            ...(data.runtime_settings || {}),
+            chainbase_keys: Array.isArray(data.runtime_settings?.chainbase_keys)
+              ? data.runtime_settings.chainbase_keys.join('\n')
+              : String(data.runtime_settings?.chainbase_keys || ''),
+            rpc_keys: Array.isArray(data.runtime_settings?.rpc_keys)
+              ? data.runtime_settings.rpc_keys.join('\n')
+              : String(data.runtime_settings?.rpc_keys || ''),
+          };
+          state.settings.chain_configs = data.chain_configs || [];
+          state.settings.ai_providers = data.ai_providers || [];
+          state.settings.ai_models = data.ai_models || [];
+          state.settings.whitelist_patterns = data.whitelist_patterns || [];
+          state.aiConfig.providers = data.ai_providers || [];
+          state.aiConfig.models = data.ai_models || [];
+          state.aiConfig.default_provider = data.ai_providers?.find?.((row) => row.isDefault)?.provider || state.aiConfig.default_provider;
+          state.analysisForm.provider = normalizeAiProvider(state.analysisForm.provider);
+          state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, state.analysisForm.model);
+          if (state.contractDetail) hydrateReviewForm();
+        });
       }
 
       async function refreshCurrent(options = {}) {

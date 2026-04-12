@@ -25,6 +25,10 @@ async function initListPage() {
     summaries: [],
     sort: { key: 'related_contract_count', dir: 'desc' },
   };
+  let stateEventSource = null;
+  let summariesLoadPromise = null;
+  let summariesLoadChain = '';
+  let recentRunRefreshKey = '';
 
   const chainSelect = document.querySelector('#chainSelect');
   const runButton = document.querySelector('#runButton');
@@ -119,19 +123,38 @@ async function initListPage() {
   }
 
   async function loadSummaries(chain) {
-    try {
-      const data = await apiFetch(`/api/results?chain=${encodeURIComponent(chain)}`);
-      state.summaries = data.tokens || [];
-      renderRunMeta(data);
-      renderTokenTable();
-    } catch {
-      state.summaries = [];
-      renderRunMeta(null);
-      renderTokenTable();
+    const requestChain = String(chain || '').toLowerCase();
+    if (!requestChain) return;
+    if (summariesLoadPromise && summariesLoadChain === requestChain) {
+      return summariesLoadPromise;
     }
+
+    const promise = (async () => {
+      try {
+        const data = await apiFetch(`/api/results?chain=${encodeURIComponent(requestChain)}`);
+        if (String(state.selectedChain || '').toLowerCase() !== requestChain) return;
+        state.summaries = data.tokens || [];
+        renderRunMeta(data);
+        renderTokenTable();
+      } catch {
+        if (String(state.selectedChain || '').toLowerCase() !== requestChain) return;
+        state.summaries = [];
+        renderRunMeta(null);
+        renderTokenTable();
+      } finally {
+        if (summariesLoadPromise === promise) {
+          summariesLoadPromise = null;
+          summariesLoadChain = '';
+        }
+      }
+    })();
+
+    summariesLoadPromise = promise;
+    summariesLoadChain = requestChain;
+    return promise;
   }
 
-  async function loadState() {
+  async function loadState(options = {}) {
     const data = await apiFetch('/api/state');
     state.chains = data.chains || [];
     state.selectedChain = state.selectedChain || data.default_chain || state.chains[0] || null;
@@ -149,13 +172,97 @@ async function initListPage() {
     const latest = state.latestRuns.find((run) => run.chain === state.selectedChain);
     renderRunMeta(latest);
     if (state.selectedChain && latest) {
-      await loadSummaries(state.selectedChain);
+      const refreshKey = String(latest.generated_at || '');
+      if (!(options.skipRecentRunRefresh === true && refreshKey && refreshKey === recentRunRefreshKey)) {
+        await loadSummaries(state.selectedChain);
+      }
     } else {
       state.summaries = [];
       renderTokenTable();
     }
 
     setStatus(state.running ? 'running' : 'idle', state.running ? 'Running' : 'Waiting');
+  }
+
+  function applyStateSnapshot(data) {
+    state.chains = data.chains || state.chains;
+    state.selectedChain = state.selectedChain || data.default_chain || state.chains[0] || null;
+    state.running = Boolean(data.running);
+    state.latestRuns = data.latest_runs || state.latestRuns;
+    renderChains();
+
+    const latest = state.latestRuns.find((run) => run.chain === state.selectedChain);
+    renderRunMeta(latest || null);
+    setStatus(state.running ? 'running' : 'idle', state.running ? 'Running' : 'Waiting');
+
+    if (data.sync_status) {
+      const syncMeta = document.querySelector('#syncMeta');
+      if (syncMeta) syncMeta.textContent = formatSyncMeta(data.sync_status);
+    }
+  }
+
+  function startStateStream() {
+    if (stateEventSource) return;
+    try {
+      stateEventSource = new EventSource('/api/state/stream');
+      stateEventSource.addEventListener('state', (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          applyStateSnapshot(payload);
+        } catch (error) {
+          console.error(error);
+        }
+      });
+      stateEventSource.addEventListener('data-refresh', (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          const chain = String(payload?.chain || '').toLowerCase();
+          const kind = String(payload?.kind || '').toLowerCase();
+          if (chain && chain === state.selectedChain && kind === 'run-completed') {
+            recentRunRefreshKey = String(payload?.run?.generated_at || payload?.ts || '');
+            void loadSummaries(state.selectedChain);
+          }
+        } catch (error) {
+          console.error(error);
+        }
+      });
+      stateEventSource.addEventListener('ai-audit', (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          const chain = String(payload?.chain || '').toLowerCase();
+          const targetType = String(payload?.targetType || '').toLowerCase();
+          if (chain === state.selectedChain && targetType === 'token') {
+            void loadSummaries(state.selectedChain);
+          }
+        } catch (error) {
+          console.error(error);
+        }
+      });
+      stateEventSource.addEventListener('pattern-sync', (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          const syncMeta = document.querySelector('#syncMeta');
+          if (syncMeta && payload?.status) {
+            syncMeta.textContent = formatSyncMeta(payload.status);
+          }
+        } catch (error) {
+          console.error(error);
+        }
+      });
+      stateEventSource.addEventListener('review-updated', (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          const chain = String(payload?.chain || '').toLowerCase();
+          if (chain === state.selectedChain) {
+            void loadSummaries(state.selectedChain);
+          }
+        } catch (error) {
+          console.error(error);
+        }
+      });
+    } catch (error) {
+      console.error(error);
+    }
   }
 
   async function runAnalysis() {
@@ -172,7 +279,7 @@ async function initListPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chain: state.selectedChain }),
       });
-      await loadState();
+      await loadState({ skipRecentRunRefresh: true });
     } catch (error) {
       setStatus('error', 'Error');
       runMeta.textContent = error.message;
@@ -197,6 +304,7 @@ async function initListPage() {
 
   renderTokenTableHead();
   await loadState();
+  startStateStream();
   await syncController.refreshSyncStatus();
 }
 

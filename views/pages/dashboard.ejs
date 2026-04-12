@@ -1150,17 +1150,41 @@
               </button>
             </div>
             <div v-if="tokenReviewExpanded" class="token-review-inline-panel">
-              <label class="stack-label">
-                <span>Review</span>
-                <textarea v-model="tokenReviewForm.review_text" rows="6" class="code-box"></textarea>
-              </label>
-              <div class="token-review-actions">
-                <label class="stack-label inline">
-                  <input v-model="tokenReviewForm.exploitable" type="checkbox">
-                  <span>Mark as exploitable</span>
-                </label>
-                <div class="button-row">
-                  <button class="btn primary" type="button" @click="saveTokenReview">Save Review</button>
+              <div class="token-review-editor-card">
+                <div class="token-review-editor-head">
+                  <div>
+                    <p class="kicker">Manual Review</p>
+                    <h4>Token Review Notes</h4>
+                  </div>
+                  <div class="token-review-chip-row">
+                    <span class="chip small token-tone">{{ String(selectedChain || '').toUpperCase() || '--' }}</span>
+                    <span class="chip small" :class="tokenDetail.is_manual_audit ? 'ok' : 'warn'">
+                      {{ tokenDetail.is_manual_audit ? 'manual audit saved' : 'manual review pending' }}
+                    </span>
+                    <span class="chip small" :class="tokenReviewForm.exploitable ? 'bad' : 'plain'">
+                      {{ tokenReviewForm.exploitable ? 'exploitable' : 'review only' }}
+                    </span>
+                  </div>
+                </div>
+                <div class="token-review-editor-grid">
+                  <label class="stack-label token-review-main-field">
+                    <span>Review</span>
+                    <textarea v-model="tokenReviewForm.review_text" rows="7" class="code-box token-review-textarea" placeholder="Summarize token-level risks, exploitability, and any context worth keeping with the token detail."></textarea>
+                  </label>
+                  <div class="token-review-actions token-review-actions-card">
+                    <p class="token-review-supporting-copy">This review is stored with the token detail and can be used as a quick analyst summary before running deeper contract-by-contract work.</p>
+                    <label class="stack-label token-review-toggle-field">
+                      <span>Risk Status</span>
+                      <span class="review-toggle-row">
+                        <input v-model="tokenReviewForm.exploitable" type="checkbox">
+                        <strong>{{ tokenReviewForm.exploitable ? 'Mark as exploitable' : 'Not marked exploitable' }}</strong>
+                      </span>
+                    </label>
+                    <div class="button-row review-modal-actions">
+                      <button class="btn ghost" type="button" @click="toggleTokenReviewEditor(false)">Cancel</button>
+                      <button class="btn primary" type="button" @click="saveTokenReview">Save Review</button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1779,9 +1803,13 @@
 
       <div v-if="contractReviewModal.open" class="modal-backdrop" @click.self="closeContractReviewModal">
       <div class="modal-card review-modal-card">
-        <div class="card-head">
-          <h2>Contract Review</h2>
-          <button class="icon-action-btn" type="button" @click="closeContractReviewModal" aria-label="Close review modal" title="Close">
+        <div class="card-head review-modal-head">
+          <div class="review-modal-heading">
+            <p class="kicker">Manual Review</p>
+            <h2>Contract Review</h2>
+            <p class="review-modal-subtitle">Capture analyst notes with the same visual context used in contract overview and token-related contract tables.</p>
+          </div>
+          <button class="icon-action-btn review-modal-close" type="button" @click="closeContractReviewModal" aria-label="Close review modal" title="Close">
             <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
               <path d="m4.2 4.2 7.6 7.6-1 1-7.6-7.6z" fill="currentColor"></path>
               <path d="m11.8 4.2-7.6 7.6-1-1 7.6-7.6z" fill="currentColor"></path>
@@ -1789,29 +1817,60 @@
           </button>
         </div>
         <div class="review-modal-body">
-          <label class="stack-label">
-            <span>Contract</span>
-            <input :value="contractReviewModal.address" type="text" readonly class="code-box">
-          </label>
-          <label class="stack-label">
-            <span>Label</span>
-            <input v-model="contractReviewModal.label" type="text" placeholder="label">
-          </label>
-          <label class="stack-label">
-            <span>Review Text</span>
-            <textarea v-model="contractReviewModal.review_text" rows="7" class="code-box"></textarea>
-          </label>
-          <label class="stack-label inline">
-            <input v-model="contractReviewModal.exploitable" type="checkbox">
-            <span>Exploitable</span>
-          </label>
-          <p class="muted">Saving this review also marks the contract as manually audited.</p>
-          <p v-if="contractReviewModal.error" class="inline-error">{{ contractReviewModal.error }}</p>
-          <div class="button-row">
-            <button class="btn ghost" type="button" @click="closeContractReviewModal">Cancel</button>
-            <button class="btn primary" type="button" :disabled="contractReviewModal.saving" @click="saveContractReviewModal">
-              {{ contractReviewModal.saving ? 'Saving...' : 'Save Review' }}
-            </button>
+          <section class="review-modal-summary">
+            <div class="review-modal-summary-main">
+              <label class="stack-label review-modal-address-field">
+                <span>Contract</span>
+                <input :value="contractReviewModal.address" type="text" readonly class="code-box review-modal-code">
+              </label>
+            </div>
+            <aside class="review-modal-summary-side">
+              <div class="review-modal-chip-row">
+                <span class="chip small token-tone">{{ String(selectedChain || '').toUpperCase() || '--' }}</span>
+                <span class="chip small plain">
+                  {{
+                    contractReviewModal.source === 'overview'
+                      ? 'overview'
+                      : contractReviewModal.source === 'token-related'
+                        ? 'related contracts'
+                        : 'table'
+                  }}
+                </span>
+                <span class="chip small" :class="contractReviewModal.exploitable ? 'bad' : 'ok'">
+                  {{ contractReviewModal.exploitable ? 'exploitable' : 'non-exploitable' }}
+                </span>
+              </div>
+              <p class="review-modal-supporting-copy">Saving this review also marks the contract as manually audited and keeps the entry aligned with seen-contract history.</p>
+            </aside>
+          </section>
+
+          <section class="review-modal-form-grid">
+            <label class="stack-label review-modal-field">
+              <span>Label</span>
+              <input v-model="contractReviewModal.label" type="text" placeholder="review label">
+            </label>
+            <label class="stack-label review-modal-toggle-card">
+              <span>Risk Status</span>
+              <span class="review-toggle-row">
+                <input v-model="contractReviewModal.exploitable" type="checkbox">
+                <strong>{{ contractReviewModal.exploitable ? 'Exploitable' : 'Not marked exploitable' }}</strong>
+              </span>
+              <small>Use this when the contract should be surfaced as user-facing risk.</small>
+            </label>
+            <label class="stack-label review-modal-field review-modal-field-wide">
+              <span>Review Text</span>
+              <textarea v-model="contractReviewModal.review_text" rows="8" class="code-box review-modal-textarea" placeholder="Summarize why this contract matters, what the pattern does, and any review outcome."></textarea>
+            </label>
+          </section>
+
+          <div class="review-modal-footer">
+            <p v-if="contractReviewModal.error" class="inline-error review-modal-error">{{ contractReviewModal.error }}</p>
+            <div class="button-row review-modal-actions">
+              <button class="btn ghost" type="button" @click="closeContractReviewModal">Cancel</button>
+              <button class="btn primary" type="button" :disabled="contractReviewModal.saving" @click="saveContractReviewModal">
+                {{ contractReviewModal.saving ? 'Saving...' : 'Save Review' }}
+              </button>
+            </div>
           </div>
         </div>
       </div>

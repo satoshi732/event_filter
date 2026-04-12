@@ -88,6 +88,31 @@ interface ParsedAuditReport {
   medium: number;
 }
 
+export interface AiAuditEvent {
+  kind: 'queued' | 'started' | 'completed' | 'failed' | 'worker';
+  chain: string;
+  targetType: 'contract' | 'token';
+  targetAddr: string;
+  requestSession: string;
+  title: string;
+  provider: string;
+  model: string;
+  status: 'requested' | 'running' | 'completed' | 'failed';
+  reportPath: string | null;
+  critical: number | null;
+  high: number | null;
+  medium: number | null;
+  error: string | null;
+  queued: number;
+  active: number;
+  capacity: number;
+  queuedContracts: number;
+  queuedTokens: number;
+  activeContracts: number;
+  activeTokens: number;
+  ts: string;
+}
+
 class HttpError extends Error {
   statusCode: number;
   body: string;
@@ -123,9 +148,54 @@ const queuedSessions = new Set<string>();
 const activeSessions = new Set<string>();
 const activeJobTypes = new Map<string, 'contract' | 'token'>();
 const queue: QueuedAuditJob[] = [];
+const aiAuditListeners = new Set<(event: AiAuditEvent) => void | Promise<void>>();
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function publishAiAuditEvent(job: QueuedAuditJob, patch: {
+  kind: AiAuditEvent['kind'];
+  status: AiAuditEvent['status'];
+  reportPath?: string | null;
+  critical?: number | null;
+  high?: number | null;
+  medium?: number | null;
+  error?: string | null;
+}): void {
+  const worker = getAiAuditWorkerStatus();
+  const event: AiAuditEvent = {
+    kind: patch.kind,
+    chain: job.chain,
+    targetType: job.targetType,
+    targetAddr: job.targetAddr,
+    requestSession: job.requestSession,
+    title: job.title,
+    provider: job.provider,
+    model: job.model,
+    status: patch.status,
+    reportPath: patch.reportPath ?? null,
+    critical: patch.critical ?? null,
+    high: patch.high ?? null,
+    medium: patch.medium ?? null,
+    error: patch.error ?? null,
+    queued: worker.queued,
+    active: worker.active,
+    capacity: worker.capacity,
+    queuedContracts: worker.queuedContracts,
+    queuedTokens: worker.queuedTokens,
+    activeContracts: worker.activeContracts,
+    activeTokens: worker.activeTokens,
+    ts: new Date().toISOString(),
+  };
+
+  for (const listener of aiAuditListeners) {
+    try {
+      void listener(event);
+    } catch {
+      // no-op
+    }
+  }
 }
 
 function requestText(rawUrl: string, options: RequestOptions = {}): Promise<ResponsePayload> {
@@ -547,6 +617,12 @@ function persistFailure(job: QueuedAuditJob): void {
   } else {
     saveTokenAiAuditResult({ ...payload, tokenAddr: job.targetAddr });
   }
+
+  publishAiAuditEvent(job, {
+    kind: 'failed',
+    status: 'failed',
+    error: 'audit failed',
+  });
 }
 
 function persistSuccess(job: QueuedAuditJob, report: ParsedAuditReport): void {
@@ -569,6 +645,15 @@ function persistSuccess(job: QueuedAuditJob, report: ParsedAuditReport): void {
   } else {
     saveTokenAiAuditResult({ ...payload, tokenAddr: job.targetAddr });
   }
+
+  publishAiAuditEvent(job, {
+    kind: 'completed',
+    status: 'completed',
+    reportPath: payload.resultPath,
+    critical: report.critical,
+    high: report.high,
+    medium: report.medium,
+  });
 }
 
 async function executeAuditJob(job: QueuedAuditJob): Promise<void> {
@@ -603,6 +688,10 @@ async function executeAuditJob(job: QueuedAuditJob): Promise<void> {
   }
 
   logger.info(`[ai-audit] Starting ${job.targetType} audit ${job.chain}:${job.targetAddr} (${mode}) via ${job.provider}/${job.model}`);
+  publishAiAuditEvent(job, {
+    kind: 'started',
+    status: 'running',
+  });
 
   try {
     const verification = await resolveVerificationStatus(backend, chain, verificationAddress);
@@ -673,6 +762,10 @@ function enqueueAudit(job: QueuedAuditJob | null | undefined): void {
   if (queuedSessions.has(job.requestSession) || activeSessions.has(job.requestSession)) return;
   queuedSessions.add(job.requestSession);
   queue.push(job);
+  publishAiAuditEvent(job, {
+    kind: 'queued',
+    status: 'requested',
+  });
   void drainQueue();
 }
 
@@ -720,6 +813,15 @@ export function setAiAuditWorkerCapacity(nextCapacity: number): void {
     : 10;
   maxConcurrentAudits = normalized;
   void drainQueue();
+}
+
+export function subscribeAiAuditEvents(
+  listener: (event: AiAuditEvent) => void | Promise<void>,
+): () => void {
+  aiAuditListeners.add(listener);
+  return () => {
+    aiAuditListeners.delete(listener);
+  };
 }
 
 export function enqueueContractAiAudit(row: BaseAiAuditRow | null | undefined): void {

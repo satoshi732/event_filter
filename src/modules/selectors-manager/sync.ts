@@ -30,10 +30,18 @@ export interface PatternSyncStatus {
   queue: Record<string, number>;
 }
 
+export interface PatternSyncEvent {
+  kind: 'pull' | 'push' | 'verify';
+  result: Record<string, unknown>;
+  status: PatternSyncStatus;
+  ts: string;
+}
+
 const AUTO_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const REMOTE_SYNC_CONNECT_TIMEOUT_MS = 5_000;
 let autoSyncTimer: NodeJS.Timeout | null = null;
 let autoSyncRunning = false;
+const listeners = new Set<(event: PatternSyncEvent) => void | Promise<void>>();
 
 function getConfigOrThrow() {
   const config = getPatternSyncConfig();
@@ -49,6 +57,23 @@ function normalizeSelector(selector: string): string {
 
 function normalizeSelectors(selectors: string[]): string[] {
   return [...new Set(selectors.map(normalizeSelector))].sort();
+}
+
+async function publishPatternSyncEvent(kind: PatternSyncEvent['kind'], result: Record<string, unknown>): Promise<void> {
+  const status = await getPatternSyncStatus();
+  const payload: PatternSyncEvent = {
+    kind,
+    result,
+    status,
+    ts: new Date().toISOString(),
+  };
+  for (const listener of listeners) {
+    try {
+      await listener(payload);
+    } catch {
+      // no-op
+    }
+  }
 }
 
 async function withRemoteClient<T>(fn: (client: Client) => Promise<T>): Promise<T> {
@@ -181,7 +206,9 @@ export async function pullPatterns(): Promise<{ pulled: number; lastPullAt: stri
   }
 
   if (highest) updatePatternSyncState(config.remoteName, { lastPullAt: highest });
-  return { pulled: rows.length, lastPullAt: highest };
+  const result = { pulled: rows.length, lastPullAt: highest };
+  void publishPatternSyncEvent('pull', result);
+  return result;
 }
 
 export async function pushPatterns(): Promise<{ pushed: number; failed: number }> {
@@ -218,7 +245,9 @@ async function pushPatternsByStatuses(statuses: string[]): Promise<{ pushed: num
   });
 
   if (pushed) updatePatternSyncState(config.remoteName, { lastPushAt: new Date().toISOString() });
-  return { pushed, failed };
+  const result = { pushed, failed };
+  void publishPatternSyncEvent('push', result);
+  return result;
 }
 
 export async function verifyPatterns(): Promise<{ checked: number; mismatches: Array<{ hash: string; computedHash: string; label: string }> }> {
@@ -258,7 +287,9 @@ export async function verifyPatterns(): Promise<{ checked: number; mismatches: A
   }
 
   if (highest) updatePatternSyncState(config.remoteName, { lastVerifyAt: highest });
-  return { checked: rows.length, mismatches };
+  const result = { checked: rows.length, mismatches };
+  void publishPatternSyncEvent('verify', { checked: result.checked, mismatches: result.mismatches });
+  return result;
 }
 
 export async function getPatternSyncStatus(): Promise<PatternSyncStatus> {
@@ -337,4 +368,13 @@ export function startAutoPatternSyncLoop(intervalMs = AUTO_SYNC_INTERVAL_MS): vo
   tick();
   autoSyncTimer = setInterval(tick, intervalMs);
   logger.info(`[pattern-sync] Auto sync loop started (every ${Math.floor(intervalMs / 60000)} minutes)`);
+}
+
+export function subscribePatternSyncEvents(
+  listener: (event: PatternSyncEvent) => void | Promise<void>,
+): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }

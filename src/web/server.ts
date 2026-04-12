@@ -55,6 +55,7 @@ import {
   pushPatterns,
   queueSeenContractReviewTarget,
   saveSeenContractReview,
+  subscribePatternSyncEvents,
   startAutoPatternSyncLoop,
   verifyPatterns,
 } from '../modules/selectors-manager/index.js';
@@ -62,6 +63,7 @@ import {
   enqueueContractAiAudit,
   enqueueTokenAiAudit,
   getContractAiAuditPlan,
+  subscribeAiAuditEvents,
   startAiAuditWorker,
 } from '../modules/ai-audit-runner/index.js';
 import {
@@ -456,6 +458,17 @@ export async function startWebServer(
     client.write(`data: ${JSON.stringify(payload)}\n\n`);
   }
 
+  function broadcastNamedEvent(event: string, payload: unknown): void {
+    if (!stateStreamClients.size) return;
+    for (const client of stateStreamClients) {
+      if (client.destroyed || client.writableEnded) {
+        stateStreamClients.delete(client);
+        continue;
+      }
+      writeSseEvent(client, event, payload);
+    }
+  }
+
   async function broadcastStateSnapshot(): Promise<void> {
     if (!stateStreamClients.size) return;
     const payload = await buildStatePayload();
@@ -482,6 +495,11 @@ export async function startWebServer(
       percent: 0,
       updated_at: new Date().toISOString(),
     };
+    broadcastNamedEvent('data-refresh', {
+      kind: 'run-started',
+      chain,
+      ts: new Date().toISOString(),
+    });
     await broadcastStateSnapshot();
 
     try {
@@ -502,6 +520,12 @@ export async function startWebServer(
         detail: `blocks ${run.block_from} -> ${run.block_to}`,
         updated_at: new Date().toISOString(),
       };
+      broadcastNamedEvent('data-refresh', {
+        kind: 'run-completed',
+        chain,
+        run: latestRunMeta(run),
+        ts: new Date().toISOString(),
+      });
       await broadcastStateSnapshot();
       return run;
     } catch (err) {
@@ -513,6 +537,12 @@ export async function startWebServer(
         detail: (err as Error).message || 'Unknown error',
         updated_at: new Date().toISOString(),
       };
+      broadcastNamedEvent('data-refresh', {
+        kind: 'run-failed',
+        chain,
+        error: (err as Error).message || 'Unknown error',
+        ts: new Date().toISOString(),
+      });
       await broadcastStateSnapshot();
       throw err;
     } finally {
@@ -526,8 +556,14 @@ export async function startWebServer(
     runRound: handleRun,
     isRoundRunning: () => state.running,
   });
-  const unsubscribeAutoAnalysis = subscribeAutoAnalysisStatus(() => {
-    void broadcastStateSnapshot();
+  const unsubscribeAutoAnalysis = subscribeAutoAnalysisStatus((status) => {
+    broadcastNamedEvent('auto-analysis', status);
+  });
+  const unsubscribeAiAudit = subscribeAiAuditEvents((event) => {
+    broadcastNamedEvent('ai-audit', event);
+  });
+  const unsubscribePatternSync = subscribePatternSyncEvents((event) => {
+    broadcastNamedEvent('pattern-sync', event);
   });
   startAutoAnalysisEngine();
 
@@ -780,7 +816,6 @@ export async function startWebServer(
           result,
           status: await getPatternSyncStatus(),
         });
-        await broadcastStateSnapshot();
         return;
       }
 
@@ -791,7 +826,6 @@ export async function startWebServer(
           result,
           status: await getPatternSyncStatus(),
         });
-        await broadcastStateSnapshot();
         return;
       }
 
@@ -802,7 +836,6 @@ export async function startWebServer(
           result,
           status: await getPatternSyncStatus(),
         });
-        await broadcastStateSnapshot();
         return;
       }
 
@@ -818,12 +851,27 @@ export async function startWebServer(
         }
 
         const hash = queueSeenContractReviewTarget(chain, address, label, targetKind);
+        const status = await getPatternSyncStatus();
         sendJson(res, 200, {
           ok: true,
           hash,
-          status: await getPatternSyncStatus(),
+          status,
         });
-        await broadcastStateSnapshot();
+        broadcastNamedEvent('review-updated', {
+          kind: 'queued-contract-review',
+          chain,
+          targetType: 'contract',
+          targetAddr: address,
+          targetKind,
+          hash,
+          ts: new Date().toISOString(),
+        });
+        broadcastNamedEvent('pattern-sync', {
+          kind: 'review-queue',
+          result: { hash, targetKind, action: 'queue' },
+          status,
+          ts: new Date().toISOString(),
+        });
         return;
       }
 
@@ -848,12 +896,29 @@ export async function startWebServer(
           reviewText,
           exploitable,
         });
+        const status = await getPatternSyncStatus();
         sendJson(res, 200, {
           ok: true,
           hash,
-          status: await getPatternSyncStatus(),
+          status,
         });
-        await broadcastStateSnapshot();
+        broadcastNamedEvent('review-updated', {
+          kind: 'saved-contract-review',
+          chain,
+          targetType: 'contract',
+          targetAddr: address,
+          targetKind,
+          label,
+          exploitable,
+          hash,
+          ts: new Date().toISOString(),
+        });
+        broadcastNamedEvent('pattern-sync', {
+          kind: 'review-save',
+          result: { hash, targetKind, action: 'save' },
+          status,
+          ts: new Date().toISOString(),
+        });
         return;
       }
 
@@ -943,6 +1008,25 @@ export async function startWebServer(
           ok: true,
           analysis,
         });
+        broadcastNamedEvent('ai-audit', {
+          kind: analysis.auditedAt ? (analysis.isSuccess === false ? 'failed' : 'completed') : 'queued',
+          chain,
+          targetType: 'contract',
+          targetAddr: contract,
+          requestSession: analysis.requestSession,
+          title: analysis.title,
+          provider: analysis.provider,
+          model: analysis.model,
+          status: analysis.auditedAt
+            ? (analysis.isSuccess === false ? 'failed' : 'completed')
+            : 'requested',
+          reportPath: analysis.resultPath,
+          critical: analysis.critical,
+          high: analysis.high,
+          medium: analysis.medium,
+          error: analysis.isSuccess === false ? 'audit failed' : null,
+          ts: new Date().toISOString(),
+        });
         return;
       }
 
@@ -973,6 +1057,25 @@ export async function startWebServer(
         sendJson(res, 200, {
           ok: true,
           analysis,
+        });
+        broadcastNamedEvent('ai-audit', {
+          kind: analysis.auditedAt ? (analysis.isSuccess === false ? 'failed' : 'completed') : 'queued',
+          chain,
+          targetType: 'token',
+          targetAddr: token,
+          requestSession: analysis.requestSession,
+          title: analysis.title,
+          provider: analysis.provider,
+          model: analysis.model,
+          status: analysis.auditedAt
+            ? (analysis.isSuccess === false ? 'failed' : 'completed')
+            : 'requested',
+          reportPath: analysis.resultPath,
+          critical: analysis.critical,
+          high: analysis.high,
+          medium: analysis.medium,
+          error: analysis.isSuccess === false ? 'audit failed' : null,
+          ts: new Date().toISOString(),
         });
         return;
       }
@@ -1197,6 +1300,14 @@ export async function startWebServer(
           ok: true,
           token: saved,
         });
+        broadcastNamedEvent('review-updated', {
+          kind: 'saved-token-review',
+          chain,
+          targetType: 'token',
+          targetAddr: token,
+          exploitable,
+          ts: new Date().toISOString(),
+        });
         return;
       }
 
@@ -1402,5 +1513,7 @@ export async function startWebServer(
   });
   server.on('close', () => {
     unsubscribeAutoAnalysis();
+    unsubscribeAiAudit();
+    unsubscribePatternSync();
   });
 }

@@ -168,6 +168,9 @@ function initSchema(db: Database.Database): void {
       link_type           TEXT DEFAULT NULL,
       label               TEXT DEFAULT '',
       review              TEXT DEFAULT '',
+      contract_selector_hash TEXT DEFAULT NULL,
+      contract_selectors  TEXT NOT NULL DEFAULT '',
+      contract_code_size  INTEGER NOT NULL DEFAULT 0,
       selector_hash       TEXT DEFAULT NULL,
       is_exploitable      INTEGER NOT NULL DEFAULT 0,
       portfolio           TEXT NOT NULL DEFAULT '{}',
@@ -564,6 +567,15 @@ function ensureContractsRegistrySchema(db: Database.Database): void {
   const cols = db.prepare(`PRAGMA table_info(contracts_registry)`).all() as Array<{ name: string }>;
   if (!cols.some((col) => col.name === 'deployed_at')) {
     db.exec(`ALTER TABLE contracts_registry ADD COLUMN deployed_at TEXT DEFAULT NULL;`);
+  }
+  if (!cols.some((col) => col.name === 'contract_selector_hash')) {
+    db.exec(`ALTER TABLE contracts_registry ADD COLUMN contract_selector_hash TEXT DEFAULT NULL;`);
+  }
+  if (!cols.some((col) => col.name === 'contract_selectors')) {
+    db.exec(`ALTER TABLE contracts_registry ADD COLUMN contract_selectors TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!cols.some((col) => col.name === 'contract_code_size')) {
+    db.exec(`ALTER TABLE contracts_registry ADD COLUMN contract_code_size INTEGER NOT NULL DEFAULT 0;`);
   }
 }
 

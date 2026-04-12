@@ -15,6 +15,9 @@ export interface PersistableContract {
   linkType: 'proxy' | 'eip7702' | null;
   label: string;
   review?: string;
+  contractSelectorHash?: string | null;
+  contractSelectors?: string[];
+  contractCodeSize?: number;
   selectorHash: string | null;
   isExploitable: boolean;
   portfolio: string;
@@ -53,7 +56,24 @@ export function persistNewContracts(input: {
         bytecodeSize: row.codeSize,
       })),
   );
-  persistSelectorsTempRows(input.chain, selectorRows);
+  const contractSelectorRows = buildSelectorsTempRows(
+    input.chain,
+    input.rows
+      .filter((row) =>
+        row.contractSelectorHash
+        && (row.contractSelectors?.length ?? 0) > 0
+        && row.contractSelectorHash !== row.selectorHash
+        && !row.label,
+      )
+      .map((row) => ({
+        contractAddr: row.contractAddr,
+        selectorHash: row.contractSelectorHash!,
+        selectors: row.contractSelectors ?? [],
+        label: row.label,
+        bytecodeSize: row.contractCodeSize ?? 0,
+      })),
+  );
+  persistSelectorsTempRows(input.chain, [...selectorRows, ...contractSelectorRows]);
 
   logger.info(`[${input.chain}] Contract manager: persisted ${input.rows.length} contract(s)`);
 }

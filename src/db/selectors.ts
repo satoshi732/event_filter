@@ -9,7 +9,7 @@ import {
   SeenSelectorEntry,
   SelectorTempReviewTarget,
 } from './types.js';
-import { upsertContractsRegistryBatch } from './contracts.js';
+import { getContractsRegistry, upsertContractsRegistryBatch } from './contracts.js';
 
 export function addSeenSelectors(
   selectors: string[],
@@ -56,55 +56,106 @@ export function findSelectorTempReviewTarget(
   const chainName = chain.toLowerCase();
   const targetAddress = address.toLowerCase();
   const requestedKind = targetKind.toLowerCase();
-
   const rows = getDb().prepare(`
     SELECT
       cr.contract_addr AS owner_address,
-      COALESCE(st.selector_hash, cr.selector_hash) AS pattern_hash,
-      COALESCE(NULLIF(st.selectors, ''), cr.selectors, '') AS selectors,
-      COALESCE(st.bytecode_size, cr.code_size, 0) AS bytecode_size,
       cr.link_type AS link_type,
-      cr.linkage AS linkage
+      cr.linkage AS linkage,
+      cr.contract_selector_hash AS contract_selector_hash,
+      cr.contract_selectors AS contract_selectors,
+      cr.contract_code_size AS contract_code_size,
+      cr.selector_hash AS selector_hash,
+      cr.selectors AS selectors,
+      cr.code_size AS code_size
     FROM contracts_registry cr
-    LEFT JOIN selectors_temp st
-      ON st.chain = cr.chain
-     AND st.contract_addr = cr.contract_addr
-     AND st.selector_hash = cr.selector_hash
     WHERE cr.chain = ?
-      AND COALESCE(NULLIF(st.selectors, ''), cr.selectors, '') != ''
-      AND COALESCE(st.selector_hash, cr.selector_hash, '') != ''
       AND (
         cr.contract_addr = ?
         OR COALESCE(cr.linkage, '') = ?
       )
-    ORDER BY COALESCE(st.updated_at, cr.updated_at) DESC, COALESCE(st.created_at, cr.created_at) DESC
+    ORDER BY cr.updated_at DESC, cr.created_at DESC
   `).all(chainName, targetAddress, targetAddress) as Array<{
     owner_address: string;
-    pattern_hash: string;
-    selectors: string;
-    bytecode_size: number;
     link_type: string | null;
     linkage: string | null;
+    contract_selector_hash: string | null;
+    contract_selectors: string;
+    contract_code_size: number;
+    selector_hash: string | null;
+    selectors: string;
+    code_size: number;
   }>;
 
   if (!rows.length) return null;
 
-  const normalizedRows = rows.map((row) => {
-    const derivedKind = row.link_type === 'proxy'
+  const tempRows = getDb().prepare(`
+    SELECT contract_addr, selector_hash, selectors, bytecode_size
+    FROM selectors_temp
+    WHERE chain = ?
+      AND contract_addr IN (${rows.map(() => '?').join(', ')})
+  `).all(chainName, ...rows.map((row) => row.owner_address.toLowerCase())) as Array<{
+    contract_addr: string;
+    selector_hash: string;
+    selectors: string;
+    bytecode_size: number;
+  }>;
+  const tempMap = new Map<string, { selectors: string[]; bytecodeSize: number }>();
+  for (const row of tempRows) {
+    tempMap.set(
+      `${row.contract_addr.toLowerCase()}:${row.selector_hash}`,
+      {
+        selectors: row.selectors.split(',').filter(Boolean),
+        bytecodeSize: row.bytecode_size ?? 0,
+      },
+    );
+  }
+
+  const normalizedRows: SelectorTempReviewTarget[] = [];
+  for (const row of rows) {
+    const ownerAddress = row.owner_address.toLowerCase();
+    const contractHash = row.contract_selector_hash ?? (row.link_type ? null : row.selector_hash);
+    const contractTemp = contractHash ? tempMap.get(`${ownerAddress}:${contractHash}`) : null;
+    const contractSelectors = contractTemp?.selectors
+      ?? (row.contract_selectors ? row.contract_selectors.split(',').filter(Boolean) : [])
+      ?? [];
+    const contractCodeSize = contractTemp?.bytecodeSize
+      ?? row.contract_code_size
+      ?? 0;
+
+    if (contractHash && contractSelectors.length > 0) {
+      normalizedRows.push({
+        ownerAddress,
+        targetAddress: ownerAddress,
+        targetKind: 'contract',
+        patternHash: contractHash,
+        selectors: contractSelectors,
+        bytecodeSize: contractCodeSize,
+      });
+    }
+
+    const effectiveKind = row.link_type === 'proxy'
       ? 'implementation'
-      : (row.link_type === 'eip7702' ? 'delegate' : 'contract');
-    const derivedTargetAddress = derivedKind === 'contract'
-      ? row.owner_address
-      : (row.linkage?.toLowerCase() ?? row.owner_address);
-    return {
-      ownerAddress: row.owner_address.toLowerCase(),
-      targetAddress: derivedTargetAddress,
-      targetKind: derivedKind,
-      patternHash: row.pattern_hash,
-      selectors: row.selectors.split(',').filter(Boolean),
-      bytecodeSize: row.bytecode_size ?? 0,
-    };
-  });
+      : (row.link_type === 'eip7702' ? 'delegate' : null);
+    const effectiveTargetAddress = row.linkage?.toLowerCase() ?? ownerAddress;
+    const effectiveHash = row.selector_hash;
+    const effectiveTemp = effectiveHash ? tempMap.get(`${ownerAddress}:${effectiveHash}`) : null;
+    const effectiveSelectors = effectiveTemp?.selectors
+      ?? row.selectors.split(',').filter(Boolean);
+    const effectiveCodeSize = effectiveTemp?.bytecodeSize
+      ?? row.code_size
+      ?? 0;
+
+    if (effectiveKind && effectiveHash && effectiveSelectors.length > 0) {
+      normalizedRows.push({
+        ownerAddress,
+        targetAddress: effectiveTargetAddress,
+        targetKind: effectiveKind,
+        patternHash: effectiveHash,
+        selectors: effectiveSelectors,
+        bytecodeSize: effectiveCodeSize,
+      });
+    }
+  }
 
   const matchesKind = (row: SelectorTempReviewTarget): boolean => (
     requestedKind === 'auto' || row.targetKind === requestedKind
@@ -135,6 +186,7 @@ export function upsertSeenContractReview(input: {
   const selectors = [...new Set(input.selectors.map((value) => value.toLowerCase()))].sort();
   const bytecodeSize = input.bytecodeSize ?? 0;
   const syncStatus = 'prepared';
+  const existing = getContractsRegistry(chain, [contractAddress]).get(contractAddress);
 
   if (selectors.length > 0) {
     upsertSelectorsTempBatch(chain, [{
@@ -148,24 +200,49 @@ export function upsertSeenContractReview(input: {
     }]);
   }
 
-  const linkType: 'proxy' | 'eip7702' | null = patternKind === 'implementation'
+  const requestedLinkType: 'proxy' | 'eip7702' | null = patternKind === 'implementation'
     ? 'proxy'
     : (patternKind === 'delegate' ? 'eip7702' : null);
-  const linkage = linkType ? patternAddress : null;
+  const nextLinkType = requestedLinkType ?? existing?.linkType ?? null;
+  const linkage = requestedLinkType
+    ? patternAddress
+    : (existing?.linkage ?? null);
+  const contractSelectorHash = patternKind === 'contract'
+    ? patternHash
+    : (existing?.contractSelectorHash ?? null);
+  const contractSelectors = patternKind === 'contract'
+    ? selectors
+    : (existing?.contractSelectors ?? []);
+  const contractCodeSize = patternKind === 'contract'
+    ? bytecodeSize
+    : (existing?.contractCodeSize ?? 0);
+  const effectiveSelectorHash = patternKind === 'contract'
+    ? (nextLinkType ? (existing?.selectorHash ?? null) : patternHash)
+    : patternHash;
+  const effectiveSelectors = patternKind === 'contract'
+    ? (nextLinkType ? (existing?.selectors ?? []) : selectors)
+    : selectors;
+  const effectiveCodeSize = patternKind === 'contract'
+    ? (nextLinkType ? (existing?.codeSize ?? 0) : bytecodeSize)
+    : bytecodeSize;
+
   upsertContractsRegistryBatch(chain, [{
     contractAddr: contractAddress,
     linkage,
-    linkType,
+    linkType: nextLinkType,
     label: input.label,
     review: input.reviewText ?? '',
-    selectorHash: patternHash,
+    contractSelectorHash,
+    contractSelectors,
+    contractCodeSize,
+    selectorHash: effectiveSelectorHash,
     isExploitable: Boolean(input.exploitable),
     portfolio: '{}',
     isAutoAudit: false,
     isManualAudit: true,
     whitelistPatterns: [],
-    selectors,
-    codeSize: bytecodeSize,
+    selectors: effectiveSelectors,
+    codeSize: effectiveCodeSize,
   }]);
 }
 
@@ -292,6 +369,29 @@ export function getSeenContractReviewsByPatternHashes(hashes: string[]): Map<str
       cr.id AS id,
       cr.chain AS chain,
       cr.contract_addr AS contract_address,
+      COALESCE(cr.contract_selector_hash, CASE WHEN cr.link_type IS NULL THEN cr.selector_hash ELSE NULL END) AS pattern_hash,
+      'contract' AS pattern_kind,
+      cr.contract_addr AS pattern_address,
+      cr.label AS label,
+      cr.review AS review_text,
+      cr.is_exploitable AS exploitable,
+      COALESCE(NULLIF(cr.contract_selectors, ''), st_contract.selectors, CASE WHEN cr.link_type IS NULL THEN cr.selectors ELSE '' END) AS selectors,
+      COALESCE(st_contract.bytecode_size, cr.contract_code_size, CASE WHEN cr.link_type IS NULL THEN cr.code_size ELSE 0 END) AS bytecode_size,
+      COALESCE(st_contract.status, 'synced') AS status,
+      st_contract.last_error AS last_error,
+      cr.created_at AS created_at,
+      cr.updated_at AS updated_at
+    FROM contracts_registry cr
+    LEFT JOIN selectors_temp st_contract
+      ON st_contract.chain = cr.chain
+     AND st_contract.contract_addr = cr.contract_addr
+     AND st_contract.selector_hash = COALESCE(cr.contract_selector_hash, CASE WHEN cr.link_type IS NULL THEN cr.selector_hash ELSE NULL END)
+    WHERE COALESCE(cr.contract_selector_hash, CASE WHEN cr.link_type IS NULL THEN cr.selector_hash ELSE NULL END) IN (${placeholders})
+    UNION ALL
+    SELECT
+      cr.id AS id,
+      cr.chain AS chain,
+      cr.contract_addr AS contract_address,
       COALESCE(cr.selector_hash, st.selector_hash) AS pattern_hash,
       CASE
         WHEN cr.link_type = 'proxy' THEN 'implementation'
@@ -313,9 +413,10 @@ export function getSeenContractReviewsByPatternHashes(hashes: string[]): Map<str
       ON st.chain = cr.chain
      AND st.contract_addr = cr.contract_addr
      AND st.selector_hash = cr.selector_hash
-    WHERE COALESCE(cr.selector_hash, st.selector_hash) IN (${placeholders})
-    ORDER BY cr.updated_at DESC, cr.created_at DESC
-  `).all(...normalized) as Array<{
+    WHERE cr.link_type IS NOT NULL
+      AND COALESCE(cr.selector_hash, st.selector_hash) IN (${placeholders})
+    ORDER BY updated_at DESC, created_at DESC
+  `).all(...normalized, ...normalized) as Array<{
     id: string;
     chain: string;
     contract_address: string;

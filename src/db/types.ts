@@ -178,6 +178,9 @@ export interface ContractRegistryRow {
   linkType: 'proxy' | 'eip7702' | null;
   label: string;
   review: string;
+  contractSelectorHash: string | null;
+  contractSelectors: string[];
+  contractCodeSize: number;
   selectorHash: string | null;
   isExploitable: boolean;
   portfolio: string;

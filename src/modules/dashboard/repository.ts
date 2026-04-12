@@ -92,7 +92,8 @@ export function listDashboardSeenSelectors(): SeenSelectorEntry[] {
 export function listDashboardContractsRegistry(chain: string): ContractRegistryRow[] {
   const rows = getDb().prepare(`
     SELECT
-      id, contract_addr, chain, linkage, link_type, label, review, selector_hash,
+      id, contract_addr, chain, linkage, link_type, label, review,
+      contract_selector_hash, contract_selectors, contract_code_size, selector_hash,
       is_exploitable, portfolio, is_auto_audit, is_manual_audit, whitelist_patterns, selectors, code_size,
       deployed_at
     FROM contracts_registry
@@ -107,6 +108,9 @@ export function listDashboardContractsRegistry(chain: string): ContractRegistryR
     link_type: 'proxy' | 'eip7702' | null;
     label: string;
     review: string;
+    contract_selector_hash: string | null;
+    contract_selectors: string;
+    contract_code_size: number;
     selector_hash: string | null;
     is_exploitable: number;
     portfolio: string;
@@ -126,6 +130,9 @@ export function listDashboardContractsRegistry(chain: string): ContractRegistryR
     linkType: row.link_type,
     label: row.label ?? '',
     review: row.review ?? '',
+    contractSelectorHash: row.contract_selector_hash,
+    contractSelectors: (row.contract_selectors ?? '').split(',').map((value) => value.trim()).filter(Boolean),
+    contractCodeSize: row.contract_code_size ?? 0,
     selectorHash: row.selector_hash,
     isExploitable: Boolean(row.is_exploitable),
     portfolio: row.portfolio ?? '{}',

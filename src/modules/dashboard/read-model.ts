@@ -221,42 +221,70 @@ function buildPatternTargets(
   contractAddress: string,
   liveSeenLabelByHash: Map<string, string>,
 ) {
-  if (!registry?.selectorHash) return [];
+  if (!registry?.selectorHash && !registry?.contractSelectorHash) return [];
 
-  const seenLabel = liveSeenLabelByHash.get(registry.selectorHash) || undefined;
+  const contractHash = registry.contractSelectorHash ?? (registry.linkType ? null : registry.selectorHash);
+  const contractSeenLabel = contractHash ? (liveSeenLabelByHash.get(contractHash) || undefined) : undefined;
+  const effectiveSeenLabel = registry.selectorHash ? (liveSeenLabelByHash.get(registry.selectorHash) || undefined) : undefined;
   const targets: Array<{
     kind: 'contract' | 'implementation' | 'delegate';
     address: string;
     code_size: number;
     pattern_hash: string;
     seen_label?: string;
-  }> = [{
-    kind: 'contract',
-    address: contractAddress,
-    code_size: registry.codeSize ?? 0,
-    pattern_hash: registry.selectorHash,
-    ...(seenLabel ? { seen_label: seenLabel } : {}),
-  }];
+  }> = [];
 
-  if (registry.linkType === 'proxy' && registry.linkage) {
+  if (contractHash) {
+    targets.push({
+      kind: 'contract',
+      address: contractAddress,
+      code_size: registry.contractCodeSize || registry.codeSize || 0,
+      pattern_hash: contractHash,
+      ...(contractSeenLabel ? { seen_label: contractSeenLabel } : {}),
+    });
+  }
+
+  if (registry.linkType === 'proxy' && registry.linkage && registry.selectorHash) {
     targets.push({
       kind: 'implementation',
       address: registry.linkage.toLowerCase(),
       code_size: registry.codeSize ?? 0,
       pattern_hash: registry.selectorHash,
-      ...(seenLabel ? { seen_label: seenLabel } : {}),
+      ...(effectiveSeenLabel ? { seen_label: effectiveSeenLabel } : {}),
     });
-  } else if (registry.linkType === 'eip7702' && registry.linkage) {
+  } else if (registry.linkType === 'eip7702' && registry.linkage && registry.selectorHash) {
     targets.push({
       kind: 'delegate',
       address: registry.linkage.toLowerCase(),
       code_size: registry.codeSize ?? 0,
       pattern_hash: registry.selectorHash,
-      ...(seenLabel ? { seen_label: seenLabel } : {}),
+      ...(effectiveSeenLabel ? { seen_label: effectiveSeenLabel } : {}),
+    });
+  } else if (!targets.length && registry.selectorHash) {
+    targets.push({
+      kind: 'contract',
+      address: contractAddress,
+      code_size: registry.codeSize ?? 0,
+      pattern_hash: registry.selectorHash,
+      ...(effectiveSeenLabel ? { seen_label: effectiveSeenLabel } : {}),
     });
   }
 
   return targets;
+}
+
+function primaryPatternTarget(
+  targets: Array<{
+    kind: 'contract' | 'implementation' | 'delegate';
+    address: string;
+    code_size: number;
+    pattern_hash: string;
+    seen_label?: string;
+  }>,
+) {
+  return targets.find((target) => target.kind !== 'contract')
+    ?? targets.find((target) => target.kind === 'contract')
+    ?? null;
 }
 
 export function buildPersistedRun(chain: string): PipelineRunResult | null {
@@ -282,7 +310,9 @@ export function buildPersistedRun(chain: string): PipelineRunResult | null {
   const liveSeenLabelByHash = new Map(
     listDashboardSeenSelectors().map((entry) => [entry.hash, entry.label]),
   );
-  const reviewHashes = [...new Set(registryContracts.map((row) => row.selectorHash).filter(Boolean) as string[])];
+  const reviewHashes = [...new Set(
+    registryContracts.flatMap((row) => [row.contractSelectorHash, row.selectorHash].filter(Boolean) as string[]),
+  )];
   const reviewMap = getDashboardSeenContractReviews(reviewHashes);
   const contractRegistryMap = new Map(registryContracts.map((row) => [row.contractAddr, row]));
   const candidateContracts = new Set(registryContracts.map((row) => row.contractAddr));
@@ -366,16 +396,19 @@ export function buildPersistedRun(chain: string): PipelineRunResult | null {
       };
       const registry = contractRegistryMap.get(contractAddr);
       const patternTargets = buildPatternTargets(registry, contractAddr, liveSeenLabelByHash);
-      const selectorHash = registry?.selectorHash ?? null;
+      const selectorHash = primaryPatternTarget(patternTargets)?.pattern_hash
+        ?? registry?.selectorHash
+        ?? registry?.contractSelectorHash
+        ?? null;
       const seenLabel = selectorHash ? liveSeenLabelByHash.get(selectorHash) : undefined;
-      const reviews = selectorHash
-        ? (reviewMap.get(selectorHash) ?? [])
+      const reviews = patternTargets.flatMap((target) =>
+        (reviewMap.get(target.pattern_hash) ?? [])
           .filter((entry) =>
             entry.chain === chain.toLowerCase()
             && entry.contractAddress === contractAddr.toLowerCase(),
           )
-          .map(mapSeenContractReview)
-        : [];
+          .map(mapSeenContractReview),
+      );
       const activity = addrActivity.get(contractAddr);
       const flowBreakdown = [...pairAgg.counterparties.values()]
         .map((counterparty) => ({
@@ -519,16 +552,18 @@ function applyLiveReviewsToToken(
     const normalizedAddress = contract.contract.toLowerCase();
     const registry = registryMap.get(normalizedAddress);
     const autoAnalysis = autoAnalysisMap.get(normalizedAddress);
-    const selectorHash = registry?.selectorHash
+    const patternTargets = registry
+      ? buildPatternTargets(registry, normalizedAddress, liveSeenLabelByHash)
+      : (contract.pattern_targets ?? []).map((target) => {
+        const liveSeenLabel = liveSeenLabelByHash.get(target.pattern_hash);
+        if (!liveSeenLabel || target.seen_label === liveSeenLabel) return target;
+        return { ...target, seen_label: liveSeenLabel };
+      });
+    const selectorHash = primaryPatternTarget(patternTargets)?.pattern_hash
+      ?? registry?.selectorHash
+      ?? registry?.contractSelectorHash
       ?? contract.selector_hash
-      ?? contract.pattern_targets?.[0]?.pattern_hash
       ?? null;
-    const patternTargets = (contract.pattern_targets ?? []).map((target) => {
-      const liveSeenLabel = liveSeenLabelByHash.get(target.pattern_hash);
-      if (!liveSeenLabel || target.seen_label === liveSeenLabel) return target;
-      return { ...target, seen_label: liveSeenLabel };
-    });
-
     const reviews = patternTargets.flatMap((target) =>
       (reviewMap.get(target.pattern_hash) ?? [])
         .filter((entry) =>
@@ -668,7 +703,7 @@ export function buildDashboardContracts(chain: string, run: PipelineRunResult): 
           isExploitable: false,
           reviewIds: new Set<string>(),
           isSeenPattern: Boolean(contract.is_seen_pattern) || Boolean(contract.seen_label),
-          selectorHash: contract.pattern_targets?.[0]?.pattern_hash ?? null,
+          selectorHash: primaryPatternTarget(contract.pattern_targets ?? [])?.pattern_hash ?? null,
           codeSize: contract.code_size ?? 0,
           whitelist: new Set<string>(),
         };
@@ -685,7 +720,7 @@ export function buildDashboardContracts(chain: string, run: PipelineRunResult): 
         current.isSeenPattern = current.isSeenPattern || Boolean(contract.is_seen_pattern) || Boolean(contract.seen_label);
         if (!current.label && contract.seen_label) current.label = contract.seen_label;
         if (!current.selectorHash && contract.pattern_targets?.length) {
-          current.selectorHash = contract.pattern_targets[0]?.pattern_hash ?? null;
+          current.selectorHash = primaryPatternTarget(contract.pattern_targets)?.pattern_hash ?? null;
         }
         current.codeSize = Math.max(current.codeSize, contract.code_size ?? 0);
         current.deployedAt = current.deployedAt ?? contract.created_at ?? null;
@@ -815,7 +850,7 @@ export function buildContractDetail(chain: string, run: PipelineRunResult, contr
           token: tokenSummary(token),
           group_kind: group.kind,
           group_label: group.label,
-          selector_hash: contract.selector_hash ?? contract.pattern_targets?.[0]?.pattern_hash ?? null,
+          selector_hash: contract.selector_hash ?? primaryPatternTarget(contract.pattern_targets ?? [])?.pattern_hash ?? null,
           is_manual_audit: contract.is_manual_audit ?? false,
           transfer_in_count: contract.transfer_in_count,
           transfer_in_amount: contract.transfer_in_amount,
@@ -835,7 +870,7 @@ export function buildContractDetail(chain: string, run: PipelineRunResult, contr
         codeSize = Math.max(codeSize, contract.code_size ?? 0);
         if (!seenLabel && contract.seen_label) seenLabel = contract.seen_label;
         if (!selectorHash && contract.pattern_targets?.length) {
-          selectorHash = contract.pattern_targets[0]?.pattern_hash ?? null;
+          selectorHash = primaryPatternTarget(contract.pattern_targets)?.pattern_hash ?? null;
         }
 
         const nextLinkType: 'proxy' | 'eip7702' | null = contract.proxy_impl

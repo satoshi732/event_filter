@@ -199,6 +199,23 @@ function compareTokenContractsByBalance(a: TokenContractResult, b: TokenContract
   return b.pair_tx_count - a.pair_tx_count;
 }
 
+function normalizeSelectorList(selectors: string[]): string[] {
+  return [...new Set((selectors ?? []).map((value) => value.toLowerCase()))].sort();
+}
+
+function selectorListsEqual(left: string[], right: string[]): boolean {
+  const a = normalizeSelectorList(left);
+  const b = normalizeSelectorList(right);
+  if (a.length !== b.length) return false;
+  return a.every((value, index) => value === b[index]);
+}
+
+function primaryPatternTarget(targets: PatternTargetInfo[]): PatternTargetInfo | null {
+  return targets.find((target) => target.kind !== 'contract')
+    ?? targets.find((target) => target.kind === 'contract')
+    ?? null;
+}
+
 function mapSeenContractReview(row: SeenContractRow): ContractReviewInfo {
   return {
     id: row.id,
@@ -410,6 +427,9 @@ export async function runPipeline(
     linkType: 'proxy' | 'eip7702' | null;
     label: string;
     review?: string;
+    contractSelectorHash: string | null;
+    contractSelectors: string[];
+    contractCodeSize: number;
     selectorHash: string | null;
     isExploitable: boolean;
     portfolio: string;
@@ -426,6 +446,9 @@ export async function runPipeline(
     linkType: 'proxy' | 'eip7702' | null;
     label: string;
     review?: string;
+    contractSelectorHash: string | null;
+    contractSelectors: string[];
+    contractCodeSize: number;
     selectorHash: string | null;
     isExploitable: boolean;
     portfolio: string;
@@ -461,41 +484,112 @@ export async function runPipeline(
     const effectiveSeenEntry = matchSeenEntryBySimilarity(effectiveSelectors, effectiveCodeSize, seenEntries);
     const selfSeenLabel = selfSeenEntry?.label;
     const effectiveSeenLabel = effectiveSeenEntry?.label;
-    const knownPatternHash = known?.selectorHash ?? selfSeenEntry?.hash ?? effectiveSeenEntry?.hash ?? null;
-    const knownPatternLabel = known?.label || selfSeenLabel || effectiveSeenLabel;
-    const patternTargets: PatternTargetInfo[] = knownPatternHash
-      ? [{
-          kind: 'contract',
-          address: addr,
-          code_size: known?.codeSize || selfCodeSize || effectiveCodeSize,
-          pattern_hash: knownPatternHash,
-          ...(knownPatternLabel ? { seen_label: knownPatternLabel } : {}),
-        }]
-      : [];
+    const selfPatternHash = (selfBytecode.length > 0 || selfSelectors.length > 0)
+      ? (selfSeenEntry?.hash ?? resolvePatternHash(selfSelectors, selfBytecode, `contract:${addr}`))
+      : null;
+    const effectivePatternKind: 'implementation' | 'delegate' | null = proxy
+      ? 'implementation'
+      : (delegate && delegate !== addr ? 'delegate' : null);
+    const effectivePatternAddress = proxy?.implementation ?? (delegate && delegate !== addr ? delegate : null);
+    const effectivePatternHash = effectivePatternKind && (bytecode.length > 0 || effectiveSelectors.length > 0)
+      ? (effectiveSeenEntry?.hash ?? resolvePatternHash(
+          effectiveSelectors,
+          bytecode,
+          `${effectivePatternKind}:${effectivePatternAddress}`,
+        ))
+      : selfPatternHash;
+    const effectiveSelectorValues = effectivePatternKind ? effectiveSelectors : selfSelectors;
+    const effectiveCodeSizeValue = effectivePatternKind ? effectiveCodeSize : selfCodeSize;
+    const effectivePatternLabel = effectiveSeenLabel || selfSeenLabel;
+    const knownPatternLabel = known?.label || effectivePatternLabel || selfSeenLabel;
+    const patternTargets: PatternTargetInfo[] = [];
 
     if (known) {
       const linkage = known.linkage ?? proxy?.implementation ?? delegate ?? null;
       const linkType = known.linkType ?? (proxy ? 'proxy' : (delegate ? 'eip7702' : null));
-      const matchedSeenEntry = selfSeenEntry ?? effectiveSeenEntry;
+      const storedContractHash = known.contractSelectorHash ?? (linkType ? null : known.selectorHash);
+      const storedContractSelectors = known.contractSelectors.length
+        ? known.contractSelectors
+        : (linkType ? [] : known.selectors);
+      const storedContractCodeSize = known.contractCodeSize || (linkType ? 0 : known.codeSize);
+      const resolvedContractHash = selfPatternHash ?? storedContractHash ?? null;
+      const resolvedContractSelectors = selfSelectors.length ? selfSelectors : storedContractSelectors;
+      const resolvedContractCodeSize = selfCodeSize || storedContractCodeSize || effectiveCodeSize;
+      const resolvedEffectiveHash = effectivePatternHash ?? known.selectorHash ?? resolvedContractHash;
+      const resolvedEffectiveSelectors = effectiveSelectorValues.length ? effectiveSelectorValues : known.selectors;
+      const resolvedEffectiveCodeSize = effectiveCodeSizeValue || known.codeSize || resolvedContractCodeSize;
+
+      if (resolvedContractHash) {
+        patternTargets.push({
+          kind: 'contract',
+          address: addr,
+          code_size: resolvedContractCodeSize,
+          pattern_hash: resolvedContractHash,
+          ...(selfSeenLabel ? { seen_label: selfSeenLabel } : {}),
+        });
+      }
       if (
-        matchedSeenEntry
-        && (!known.label || !known.selectorHash)
+        linkType === 'proxy'
+        && linkage
+        && resolvedEffectiveHash
       ) {
+        patternTargets.push({
+          kind: 'implementation',
+          address: linkage,
+          code_size: resolvedEffectiveCodeSize,
+          pattern_hash: resolvedEffectiveHash,
+          ...(effectivePatternLabel ? { seen_label: effectivePatternLabel } : {}),
+        });
+      } else if (
+        linkType === 'eip7702'
+        && linkage
+        && resolvedEffectiveHash
+      ) {
+        patternTargets.push({
+          kind: 'delegate',
+          address: linkage,
+          code_size: resolvedEffectiveCodeSize,
+          pattern_hash: resolvedEffectiveHash,
+          ...(effectivePatternLabel ? { seen_label: effectivePatternLabel } : {}),
+        });
+      } else if (!patternTargets.length && resolvedEffectiveHash) {
+        patternTargets.push({
+          kind: 'contract',
+          address: addr,
+          code_size: resolvedEffectiveCodeSize,
+          pattern_hash: resolvedEffectiveHash,
+          ...(knownPatternLabel ? { seen_label: knownPatternLabel } : {}),
+        });
+      }
+
+      const shouldBackfill = (
+        (!known.label && Boolean(knownPatternLabel))
+        || storedContractHash !== resolvedContractHash
+        || !selectorListsEqual(storedContractSelectors, resolvedContractSelectors)
+        || storedContractCodeSize !== resolvedContractCodeSize
+        || known.selectorHash !== resolvedEffectiveHash
+        || !selectorListsEqual(known.selectors, resolvedEffectiveSelectors)
+        || known.codeSize !== resolvedEffectiveCodeSize
+      );
+      if (shouldBackfill) {
         contractPatternBackfillRows.push({
           contractAddr: addr,
           linkage,
           linkType,
-          label: known.label || matchedSeenEntry.label,
+          label: known.label || knownPatternLabel || '',
           review: known.review ?? '',
-          selectorHash: known.selectorHash ?? matchedSeenEntry.hash,
+          contractSelectorHash: resolvedContractHash,
+          contractSelectors: resolvedContractSelectors,
+          contractCodeSize: resolvedContractCodeSize,
+          selectorHash: resolvedEffectiveHash,
           isExploitable: known.isExploitable,
           portfolio: known.portfolio ?? '{}',
           deployedAt: contractInfos.get(addr)?.block_timestamp ?? known.deployedAt ?? null,
           isAutoAudit: known.isAutoAudit,
           isManualAudit: known.isManualAudit,
           whitelistPatterns: known.whitelistPatterns,
-          selectors: known.selectors.length ? known.selectors : effectiveSelectors,
-          codeSize: known.codeSize || effectiveCodeSize,
+          selectors: resolvedEffectiveSelectors,
+          codeSize: resolvedEffectiveCodeSize,
         });
       }
 
@@ -507,9 +601,9 @@ export async function runPipeline(
         eth_in: agg.eth_in.toString(),
         tx_count: agg.tx_hashes.size,
         matched_whitelist: known.whitelistPatterns,
-        selectors: known.selectors,
-        code_size: known.codeSize || effectiveCodeSize,
-        seen_label: knownPatternLabel,
+        selectors: resolvedEffectiveSelectors,
+        code_size: resolvedEffectiveCodeSize,
+        seen_label: knownPatternLabel || undefined,
         transfer_in_count: 0,
         transfer_in_amount: '0',
         transfer_out_count: 0,
@@ -541,37 +635,37 @@ export async function runPipeline(
       continue;
     }
 
-    if (selfBytecode.length > 0 || selfSelectors.length > 0) {
+    if (selfPatternHash) {
       patternTargets.push({
         kind: 'contract',
         address: addr,
         code_size: selfCodeSize,
-        pattern_hash: selfSeenEntry?.hash ?? resolvePatternHash(selfSelectors, selfBytecode, `contract:${addr}`),
+        pattern_hash: selfPatternHash,
         ...(selfSeenLabel ? { seen_label: selfSeenLabel } : {}),
       });
     }
-    if (proxy && proxy.implementation !== addr && (bytecode.length > 0 || effectiveSelectors.length > 0)) {
+    if (
+      effectivePatternKind === 'implementation'
+      && effectivePatternAddress
+      && effectivePatternHash
+    ) {
       patternTargets.push({
         kind: 'implementation',
-        address: proxy.implementation,
+        address: effectivePatternAddress,
         code_size: effectiveCodeSize,
-        pattern_hash: effectiveSeenEntry?.hash ?? resolvePatternHash(
-          effectiveSelectors,
-          bytecode,
-          `implementation:${proxy.implementation}`,
-        ),
+        pattern_hash: effectivePatternHash,
         ...(effectiveSeenLabel ? { seen_label: effectiveSeenLabel } : {}),
       });
-    } else if (delegate && delegate !== addr && (bytecode.length > 0 || effectiveSelectors.length > 0)) {
+    } else if (
+      effectivePatternKind === 'delegate'
+      && effectivePatternAddress
+      && effectivePatternHash
+    ) {
       patternTargets.push({
         kind: 'delegate',
-        address: delegate,
+        address: effectivePatternAddress,
         code_size: effectiveCodeSize,
-        pattern_hash: effectiveSeenEntry?.hash ?? resolvePatternHash(
-          effectiveSelectors,
-          bytecode,
-          `delegate:${delegate}`,
-        ),
+        pattern_hash: effectivePatternHash,
         ...(effectiveSeenLabel ? { seen_label: effectiveSeenLabel } : {}),
       });
     }
@@ -603,21 +697,24 @@ export async function runPipeline(
       reviews: [],
       is_exploitable: false,
       selectors: effectiveSelectors,
-      seen_label: selfSeenLabel ?? effectiveSeenLabel,
+      seen_label: effectivePatternLabel || undefined,
     };
     if (proxy) result.proxy_impl = proxy.implementation;
     if (delegate) result.eip7702_delegate = delegate;
     contractResults.set(addr, result);
 
     if (!knownContractSet.has(addr)) {
-      const selectorHashValue = result.pattern_targets[0]?.pattern_hash ?? null;
+      const primaryTarget = primaryPatternTarget(result.pattern_targets);
       newContractRows.push({
         contractAddr: addr,
         linkage: proxy?.implementation ?? delegate ?? null,
         linkType: proxy ? 'proxy' : (delegate ? 'eip7702' : null),
         label: result.seen_label ?? '',
         review: '',
-        selectorHash: selectorHashValue,
+        contractSelectorHash: selfPatternHash,
+        contractSelectors: selfSelectors,
+        contractCodeSize: selfCodeSize,
+        selectorHash: primaryTarget?.pattern_hash ?? selfPatternHash,
         isExploitable: false,
         portfolio: '{}',
         deployedAt: result.created_at ?? null,
@@ -681,7 +778,7 @@ export async function runPipeline(
       selectors: latest?.selectors ?? row.selectors,
       codeSize: latest?.code_size ?? row.codeSize,
       deployedAt: latest?.created_at ?? row.deployedAt ?? null,
-      selectorHash: latest?.pattern_targets?.[0]?.pattern_hash ?? row.selectorHash,
+      selectorHash: primaryPatternTarget(latest?.pattern_targets ?? [])?.pattern_hash ?? row.selectorHash,
     };
   });
   persistNewContracts({ chain, rows: contractsToPersist });

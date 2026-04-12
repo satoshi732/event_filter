@@ -25,7 +25,8 @@ export function getContractsRegistry(
   const placeholders = normalized.map(() => '?').join(', ');
   const rows = getDb().prepare(`
     SELECT
-      id, contract_addr, chain, linkage, link_type, label, review, selector_hash,
+      id, contract_addr, chain, linkage, link_type, label, review,
+      contract_selector_hash, contract_selectors, contract_code_size, selector_hash,
       is_exploitable, portfolio, is_auto_audit, is_manual_audit, whitelist_patterns, selectors, code_size,
       deployed_at
     FROM contracts_registry
@@ -40,6 +41,9 @@ export function getContractsRegistry(
     link_type: 'proxy' | 'eip7702' | null;
     label: string;
     review: string;
+    contract_selector_hash: string | null;
+    contract_selectors: string;
+    contract_code_size: number;
     selector_hash: string | null;
     is_exploitable: number;
     portfolio: string;
@@ -61,6 +65,9 @@ export function getContractsRegistry(
       linkType: row.link_type,
       label: row.label ?? '',
       review: row.review ?? '',
+      contractSelectorHash: row.contract_selector_hash,
+      contractSelectors: (row.contract_selectors ?? '').split(',').map((value) => value.trim()).filter(Boolean),
+      contractCodeSize: row.contract_code_size ?? 0,
       selectorHash: row.selector_hash,
       isExploitable: Boolean(row.is_exploitable),
       portfolio: row.portfolio ?? '{}',
@@ -81,6 +88,9 @@ export function upsertContractsRegistryBatch(
     linkType: 'proxy' | 'eip7702' | null;
     label: string;
     review?: string;
+    contractSelectorHash?: string | null;
+    contractSelectors?: string[];
+    contractCodeSize?: number;
     selectorHash: string | null;
     isExploitable: boolean;
     portfolio: string;
@@ -96,11 +106,13 @@ export function upsertContractsRegistryBatch(
   const chainName = chain.toLowerCase();
   const insert = getDb().prepare(`
     INSERT INTO contracts_registry (
-      id, contract_addr, chain, linkage, link_type, label, review, selector_hash,
+      id, contract_addr, chain, linkage, link_type, label, review,
+      contract_selector_hash, contract_selectors, contract_code_size, selector_hash,
       is_exploitable, portfolio, is_auto_audit, is_manual_audit, whitelist_patterns, selectors,
       code_size, deployed_at, created_at, updated_at
     ) VALUES (
-      @id, @contract_addr, @chain, @linkage, @link_type, @label, @review, @selector_hash,
+      @id, @contract_addr, @chain, @linkage, @link_type, @label, @review,
+      @contract_selector_hash, @contract_selectors, @contract_code_size, @selector_hash,
       @is_exploitable, @portfolio, @is_auto_audit, @is_manual_audit, @whitelist_patterns, @selectors,
       @code_size, @deployed_at, datetime('now'), datetime('now')
     )
@@ -110,6 +122,15 @@ export function upsertContractsRegistryBatch(
       link_type = COALESCE(excluded.link_type, contracts_registry.link_type),
       label = CASE WHEN excluded.label != '' THEN excluded.label ELSE contracts_registry.label END,
       review = CASE WHEN excluded.review != '' THEN excluded.review ELSE contracts_registry.review END,
+      contract_selector_hash = COALESCE(excluded.contract_selector_hash, contracts_registry.contract_selector_hash),
+      contract_selectors = CASE
+        WHEN excluded.contract_selectors != '' THEN excluded.contract_selectors
+        ELSE contracts_registry.contract_selectors
+      END,
+      contract_code_size = CASE
+        WHEN excluded.contract_code_size > 0 THEN excluded.contract_code_size
+        ELSE contracts_registry.contract_code_size
+      END,
       selector_hash = COALESCE(excluded.selector_hash, contracts_registry.selector_hash),
       is_exploitable = CASE
         WHEN excluded.is_exploitable = 1 THEN 1
@@ -153,6 +174,9 @@ export function upsertContractsRegistryBatch(
         link_type: row.linkType,
         label: row.label ?? '',
         review: row.review ?? '',
+        contract_selector_hash: row.contractSelectorHash ?? null,
+        contract_selectors: (row.contractSelectors ?? []).join(','),
+        contract_code_size: row.contractCodeSize ?? 0,
         selector_hash: row.selectorHash,
         is_exploitable: row.isExploitable ? 1 : 0,
         portfolio: row.portfolio ?? '{}',

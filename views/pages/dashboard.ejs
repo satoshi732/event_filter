@@ -915,21 +915,34 @@
                   <td>{{ formatUsd(token.token_price_usd) }}</td>
                   <td>{{ token.related_contract_count }}</td>
                   <td>
-                    <button
-                      v-if="canRequestTokenAutoAudit(token)"
-                      class="icon-action-btn"
-                      type="button"
-                      @click="requestTokenAutoAudit(token)"
-                      :aria-label="`Request AI auto audit for ${token.token}`"
-                      title="Request AI auto audit"
-                    >
-                      <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
-                        <path d="M8 1.2 9.4 5l3.8 1.4L9.4 7.8 8 11.6 6.6 7.8 2.8 6.4 6.6 5z" fill="currentColor"></path>
-                        <path d="M12 9.8 12.7 11.6 14.5 12.3 12.7 13 12 14.8 11.3 13 9.5 12.3 11.3 11.6z" fill="currentColor"></path>
-                      </svg>
-                    </button>
-                    <span v-else-if="autoAuditStatusLabel(token.auto_audit_status) === 'processing'" class="chip small warn">processing</span>
-                    <span v-else class="muted">--</span>
+                    <div class="icon-action-row">
+                      <button
+                        class="icon-action-btn"
+                        type="button"
+                        @click="openTokenReviewModal(token)"
+                        :aria-label="`Open review for ${token.token}`"
+                        title="Add review"
+                      >
+                        <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                          <path d="M3 2.5A1.5 1.5 0 0 1 4.5 1h5.8a1.5 1.5 0 0 1 1.06.44l1.2 1.2A1.5 1.5 0 0 1 13 3.7v8.8A1.5 1.5 0 0 1 11.5 14h-7A1.5 1.5 0 0 1 3 12.5zm1.5 0v10h7V4.2l-.7-.7H4.5zm1.2 2.3h4.6v1H5.7zm0 2h4.6v1H5.7zm0 2h3v1h-3z" fill="currentColor"></path>
+                        </svg>
+                      </button>
+                      <button
+                        v-if="canRequestTokenAutoAudit(token)"
+                        class="icon-action-btn"
+                        type="button"
+                        @click="requestTokenAutoAudit(token)"
+                        :aria-label="`Request AI auto audit for ${token.token}`"
+                        title="Request AI auto audit"
+                      >
+                        <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                          <path d="M8 1.2 9.4 5l3.8 1.4L9.4 7.8 8 11.6 6.6 7.8 2.8 6.4 6.6 5z" fill="currentColor"></path>
+                          <path d="M12 9.8 12.7 11.6 14.5 12.3 12.7 13 12 14.8 11.3 13 9.5 12.3 11.3 11.6z" fill="currentColor"></path>
+                        </svg>
+                      </button>
+                      <span v-else-if="autoAuditStatusLabel(token.auto_audit_status) === 'processing'" class="chip small warn">processing</span>
+                      <span v-else class="muted">--</span>
+                    </div>
                   </td>
                 </tr>
               </tbody>
@@ -1875,6 +1888,69 @@
         </div>
       </div>
     </div>
+    </div>
+
+      <div v-if="tokenReviewModal.open" class="modal-backdrop" @click.self="closeTokenReviewModal">
+      <div class="modal-card review-modal-card">
+        <div class="card-head review-modal-head">
+          <div class="review-modal-heading">
+            <p class="kicker">Manual Review</p>
+            <h2>Token Review</h2>
+            <p class="review-modal-subtitle">Capture token-level notes directly from Token Directory and store them as the token's manual audit summary.</p>
+          </div>
+          <button class="icon-action-btn review-modal-close" type="button" @click="closeTokenReviewModal" aria-label="Close token review modal" title="Close">
+            <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+              <path d="m4.2 4.2 7.6 7.6-1 1-7.6-7.6z" fill="currentColor"></path>
+              <path d="m11.8 4.2-7.6 7.6-1-1 7.6-7.6z" fill="currentColor"></path>
+            </svg>
+          </button>
+        </div>
+        <div class="review-modal-body">
+          <section class="review-modal-summary">
+            <div class="review-modal-summary-main">
+              <label class="stack-label review-modal-address-field">
+                <span>Token</span>
+                <input :value="tokenReviewModal.address" type="text" readonly class="code-box review-modal-code">
+              </label>
+            </div>
+            <aside class="review-modal-summary-side">
+              <div class="review-modal-chip-row">
+                <span class="chip small token-tone">{{ String(selectedChain || '').toUpperCase() || '--' }}</span>
+                <span class="chip small plain">{{ tokenReviewModal.symbol || tokenReviewModal.name || 'token' }}</span>
+                <span class="chip small" :class="tokenReviewModal.exploitable ? 'bad' : 'ok'">
+                  {{ tokenReviewModal.exploitable ? 'exploitable' : 'review only' }}
+                </span>
+              </div>
+              <p class="review-modal-supporting-copy">Saving this review marks the token as manually audited and keeps a concise analyst summary attached to the token record.</p>
+            </aside>
+          </section>
+
+          <section class="review-modal-form-grid">
+            <label class="stack-label review-modal-field review-modal-field-wide">
+              <span>Review Text</span>
+              <textarea v-model="tokenReviewModal.review_text" rows="8" class="code-box review-modal-textarea" placeholder="Summarize token-level risks, exploitability, and any context worth preserving for later review."></textarea>
+            </label>
+            <label class="stack-label review-modal-toggle-card review-modal-field-wide">
+              <span>Risk Status</span>
+              <span class="review-toggle-row">
+                <input v-model="tokenReviewModal.exploitable" type="checkbox">
+                <strong>{{ tokenReviewModal.exploitable ? 'Mark as exploitable' : 'Not marked exploitable' }}</strong>
+              </span>
+              <small>Use this when the token itself should be surfaced as a user-facing risk, not just noted for context.</small>
+            </label>
+          </section>
+
+          <div class="review-modal-footer">
+            <p v-if="tokenReviewModal.error" class="inline-error review-modal-error">{{ tokenReviewModal.error }}</p>
+            <div class="button-row review-modal-actions">
+              <button class="btn ghost" type="button" @click="closeTokenReviewModal">Cancel</button>
+              <button class="btn primary" type="button" :disabled="tokenReviewModal.saving" @click="saveTokenReviewModal">
+                {{ tokenReviewModal.saving ? 'Saving...' : 'Save Review' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <script src="/vendor/vue.global.prod.js"></script>

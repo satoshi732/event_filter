@@ -20,6 +20,9 @@ const ROOT = path.dirname(path.dirname(path.dirname(path.dirname(fileURLToPath(i
 const REPORT_DIR = path.join(ROOT, 'reports', 'ai-audits');
 const MUCH_SMALLER_RATIO = 0.35;
 const MUCH_SMALLER_ABS_DELTA = 300;
+const VERIFICATION_RETRY_ATTEMPTS = 3;
+const VERIFICATION_RETRY_BACKOFF_MS = 1_500;
+const VERIFICATION_CACHE_TTL_MS = 30 * 60 * 1000;
 
 type QueuedAuditJob = BaseAiAuditRow;
 type AuditMode = ProviderAuditMode;
@@ -149,9 +152,55 @@ const activeSessions = new Set<string>();
 const activeJobTypes = new Map<string, 'contract' | 'token'>();
 const queue: QueuedAuditJob[] = [];
 const aiAuditListeners = new Set<(event: AiAuditEvent) => void | Promise<void>>();
+const verificationStatusCache = new Map<string, { expiresAt: number; status: VerificationStatus }>();
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function verificationCacheKey(chain: string, address: string): string {
+  return `${String(chain || '').toLowerCase()}:${normalizeAddress(address)}`;
+}
+
+function getCachedVerificationStatus(chain: string, address: string): VerificationStatus | null {
+  const key = verificationCacheKey(chain, address);
+  const cached = verificationStatusCache.get(key);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    verificationStatusCache.delete(key);
+    return null;
+  }
+  return cached.status;
+}
+
+function setCachedVerificationStatus(chain: string, address: string, status: VerificationStatus): VerificationStatus {
+  verificationStatusCache.set(verificationCacheKey(chain, address), {
+    expiresAt: Date.now() + VERIFICATION_CACHE_TTL_MS,
+    status,
+  });
+  return status;
+}
+
+async function retryVerificationProbe<T>(
+  label: string,
+  request: () => Promise<T>,
+): Promise<T> {
+  let lastError: Error | null = null;
+  for (let attempt = 1; attempt <= VERIFICATION_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await request();
+    } catch (error) {
+      lastError = error as Error;
+      const finalAttempt = attempt >= VERIFICATION_RETRY_ATTEMPTS;
+      logger.warn(
+        `[ai-audit] ${label} failed (attempt ${attempt}/${VERIFICATION_RETRY_ATTEMPTS}): ${lastError.message}`,
+      );
+      if (!finalAttempt) {
+        await sleep(VERIFICATION_RETRY_BACKOFF_MS * attempt);
+      }
+    }
+  }
+  throw lastError ?? new Error(`${label} failed`);
 }
 
 function publishAiAuditEvent(job: QueuedAuditJob, patch: {
@@ -204,7 +253,11 @@ function requestText(rawUrl: string, options: RequestOptions = {}): Promise<Resp
   const timeoutMs = options.timeoutMs ?? 30_000;
   const method = options.method ?? 'GET';
   const body = options.body ?? '';
-  const headers = { ...(options.headers ?? {}) };
+  const headers: Record<string, string> = {
+    'user-agent': 'event-filter-ai-audit/1.0',
+    accept: '*/*',
+    ...(options.headers ?? {}),
+  };
 
   if (body && !headers['content-length'] && !headers['Content-Length']) {
     headers['content-length'] = String(Buffer.byteLength(body));
@@ -375,6 +428,10 @@ async function resolveVerificationStatus(
   chain: ChainSpec,
   verificationAddress: string,
 ): Promise<VerificationStatus> {
+  const cached = getCachedVerificationStatus(chain.canonical, verificationAddress);
+  if (cached) return cached;
+
+  let etherscanErrorMessage = '';
   if (baseUrlConfig.etherscanApiKey) {
     const url = new URL('https://api.etherscan.io/v2/api');
     url.searchParams.set('module', 'contract');
@@ -384,9 +441,12 @@ async function resolveVerificationStatus(
     url.searchParams.set('apikey', baseUrlConfig.etherscanApiKey);
 
     try {
-      const response = await requestJson<{
+      const response = await retryVerificationProbe(
+        `Etherscan verification for ${chain.canonical}:${verificationAddress}`,
+        async () => await requestJson<{
         result?: Array<{ SourceCode?: string; ABI?: string }> | string;
-      }>(url.toString());
+      }>(url.toString()),
+      );
 
       if (Array.isArray(response.result) && response.result.length > 0) {
         const record = response.result[0] ?? {};
@@ -396,25 +456,51 @@ async function resolveVerificationStatus(
           Boolean(sourceCode) &&
           abi !== 'Contract source code not verified' &&
           !sourceCode.includes('Contract source code not verified');
-        return {
+        return setCachedVerificationStatus(chain.canonical, verificationAddress, {
           verified,
           method: 'etherscan-api',
           detail: verified ? 'verified source returned by Etherscan API' : 'Etherscan API indicates source is not verified',
-        };
+        });
+      }
+      if (typeof response.result === 'string' && response.result.trim()) {
+        etherscanErrorMessage = `Etherscan API result: ${response.result.trim()}`;
       }
     } catch (error) {
-      logger.warn(`[ai-audit] Etherscan verification failed for ${chain.canonical}:${verificationAddress}: ${(error as Error).message}`);
+      etherscanErrorMessage = (error as Error).message || 'unknown error';
     }
   }
 
   const explorerUrl = `${chain.explorerUrl}/address/${verificationAddress}#code`;
-  const html = await requestText(explorerUrl, { timeoutMs: 30_000 });
-  const verified = html.text.includes('Source Code Verified') || html.text.includes('Contract Source Code Verified');
-  return {
-    verified,
-    method: 'explorer-html',
-    detail: verified ? `verified marker found at ${explorerUrl}` : `verified marker not found at ${explorerUrl}`,
-  };
+  try {
+    const html = await retryVerificationProbe(
+      `Explorer verification for ${chain.canonical}:${verificationAddress}`,
+      async () => await requestText(explorerUrl, { timeoutMs: 30_000 }),
+    );
+    const verified =
+      html.text.includes('Source Code Verified')
+      || html.text.includes('Contract Source Code Verified')
+      || html.text.includes('Similar Match Source Code')
+      || html.text.includes('Contract: Verified');
+    const similarMatch = html.text.includes('Similar Match Source Code');
+    return setCachedVerificationStatus(chain.canonical, verificationAddress, {
+      verified,
+      method: 'explorer-html',
+      detail: verified
+        ? (similarMatch
+          ? `similar-match verified marker found at ${explorerUrl}`
+          : `verified marker found at ${explorerUrl}`)
+        : `verified marker not found at ${explorerUrl}`,
+    });
+  } catch (error) {
+    const explorerErrorMessage = (error as Error).message || 'unknown error';
+    return setCachedVerificationStatus(chain.canonical, verificationAddress, {
+      verified: false,
+      method: 'explorer-html',
+      detail: etherscanErrorMessage
+        ? `verification probes failed; etherscan: ${etherscanErrorMessage}; explorer: ${explorerErrorMessage}`
+        : `verification probe failed at ${explorerUrl}: ${explorerErrorMessage}`,
+    });
+  }
 }
 
 async function waitForDedaubFile(

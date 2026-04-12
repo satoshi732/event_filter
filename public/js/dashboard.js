@@ -351,6 +351,16 @@
         saving: false,
         error: '',
       },
+      tokenReviewModal: {
+        open: false,
+        address: '',
+        name: '',
+        symbol: '',
+        review_text: '',
+        exploitable: false,
+        saving: false,
+        error: '',
+      },
       tokenReviewForm: {
         review_text: '',
         exploitable: false,
@@ -1290,6 +1300,11 @@
           }
         }
 
+        if (currentView.value === 'token' && targetType === 'token') {
+          await loadDashboardTokens({ showLoading: false, force: true });
+          return;
+        }
+
         if (currentView.value === 'dashboard' && state.dashboardTab === 'tokens' && targetType === 'contract') {
           await loadDashboardContracts({ showLoading: false, force: true });
         }
@@ -1867,6 +1882,24 @@
         state.contractReviewModal.error = '';
       }
 
+      function openTokenReviewModal(row) {
+        if (!row?.token) return;
+        state.tokenReviewModal.open = true;
+        state.tokenReviewModal.address = String(row.token || '').toLowerCase();
+        state.tokenReviewModal.name = String(row.token_name || '').trim();
+        state.tokenReviewModal.symbol = String(row.token_symbol || '').trim();
+        state.tokenReviewModal.review_text = String(row.review || '').trim();
+        state.tokenReviewModal.exploitable = Boolean(row.is_exploitable);
+        state.tokenReviewModal.saving = false;
+        state.tokenReviewModal.error = '';
+      }
+
+      function closeTokenReviewModal() {
+        state.tokenReviewModal.open = false;
+        state.tokenReviewModal.saving = false;
+        state.tokenReviewModal.error = '';
+      }
+
       async function saveContractReviewModal() {
         if (!state.contractReviewModal.address) return;
         if (!state.contractReviewModal.label.trim()) {
@@ -1902,6 +1935,36 @@
           state.contractReviewModal.error = err instanceof Error ? err.message : String(err);
         } finally {
           state.contractReviewModal.saving = false;
+        }
+      }
+
+      async function saveTokenReviewModal() {
+        if (!state.tokenReviewModal.address) return;
+        state.tokenReviewModal.saving = true;
+        state.tokenReviewModal.error = '';
+        try {
+          await apiFetch('/api/token-review', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chain: state.selectedChain,
+              token: state.tokenReviewModal.address,
+              review_text: state.tokenReviewModal.review_text,
+              exploitable: state.tokenReviewModal.exploitable,
+            }),
+          });
+          invalidateChainCache(state.selectedChain);
+          if (currentView.value === 'token') {
+            await loadDashboardTokens({ showLoading: false, force: true });
+          }
+          if (state.tokenDetail?.token === state.tokenReviewModal.address) {
+            await loadTokenDetail({ force: true });
+          }
+          closeTokenReviewModal();
+        } catch (err) {
+          state.tokenReviewModal.error = err instanceof Error ? err.message : String(err);
+        } finally {
+          state.tokenReviewModal.saving = false;
         }
       }
 
@@ -2377,6 +2440,7 @@
         currentUser: computed(() => state.currentUser),
         reviewForm: state.reviewForm,
         contractReviewModal: state.contractReviewModal,
+        tokenReviewModal: state.tokenReviewModal,
         tokenReviewForm: state.tokenReviewForm,
         tokenReviewExpanded: computed({
           get: () => state.tokenReviewExpanded,
@@ -2457,6 +2521,9 @@
         openContractReviewModal,
         closeContractReviewModal,
         saveContractReviewModal,
+        openTokenReviewModal,
+        closeTokenReviewModal,
+        saveTokenReviewModal,
         analysisStatusLabel,
         analysisStatusTone,
         analysisStatusHint,

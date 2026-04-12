@@ -429,7 +429,7 @@ export async function startWebServer(
   const stateStreamClients = new Set<StateStreamClient>();
 
   function resolveRun(chain: string): PipelineRunResult | null {
-    return state.latestRuns.get(chain) ?? buildPersistedRun(chain);
+    return buildPersistedRun(chain) ?? state.latestRuns.get(chain) ?? null;
   }
 
   async function buildStatePayload() {
@@ -439,7 +439,9 @@ export async function startWebServer(
       if (inMemory) return [latestRunMeta(inMemory)];
       const persisted = latestPersistedRunMeta(chain);
       return persisted ? [persisted] : [];
-    });
+    }).sort((left, right) =>
+      String(right.generated_at || '').localeCompare(String(left.generated_at || '')),
+    );
 
     return {
       running: state.running,

@@ -477,6 +477,12 @@
         }
       }
 
+      function invalidateChainCollectionCache(chain) {
+        const normalizedChain = chainCacheKey(chain);
+        viewDataCache.dashboardContracts.delete(normalizedChain);
+        viewDataCache.dashboardTokens.delete(normalizedChain);
+      }
+
       function syncStateFromRoute() {
         const route = router.currentRoute.value;
         const routeQuery = route.query || {};
@@ -1084,23 +1090,16 @@
         const wasRunning = state.running;
         const previousRunningChain = state.runningChain;
         state.chains = data.chains || [];
-        const explicitRouteChain = String(router.currentRoute.value?.query?.chain || query.get('chain') || '').toLowerCase();
-        const latestRunChain = String(data.latest_runs?.[0]?.chain || '').toLowerCase();
+        const explicitRouteChain = String(router.currentRoute.value?.query?.chain || '').toLowerCase();
         if (!state.selectedChain) {
           state.selectedChain = (
             explicitRouteChain
-            || latestRunChain
             || data.default_chain
             || state.chains[0]
             || ''
           ).toLowerCase();
-        } else if (!explicitRouteChain && latestRunChain && state.selectedChain !== latestRunChain && !data.running) {
-          const hasCurrentLatestRun = (data.latest_runs || []).some(
-            (row) => String(row.chain || '').toLowerCase() === state.selectedChain,
-          );
-          if (!hasCurrentLatestRun) {
-            state.selectedChain = latestRunChain;
-          }
+        } else if (!explicitRouteChain && state.selectedChain && !state.chains.includes(state.selectedChain)) {
+          state.selectedChain = (data.default_chain || state.chains[0] || '').toLowerCase();
         }
         state.latestRuns = data.latest_runs || [];
         state.running = Boolean(data.running);
@@ -1117,7 +1116,7 @@
           const refreshKey = latestCompletedRun?.generated_at || data.progress?.updated_at || '';
           if (!hasRecentRunRefresh(completedChain, refreshKey)) {
             rememberRunRefresh(completedChain, refreshKey);
-            invalidateChainCache(completedChain);
+            invalidateChainCollectionCache(completedChain);
             if (currentView.value === 'dashboard') {
               if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
                 await loadSettings({ showLoading: false, force: true });
@@ -1126,10 +1125,6 @@
               }
             } else if (currentView.value === 'token') {
               await loadDashboardTokens({ showLoading: false, force: true });
-            } else if (currentView.value === 'token-detail') {
-              await loadTokenDetail({ showLoading: false, force: true });
-            } else {
-              await loadContractDetail({ showLoading: false, force: true });
             }
           }
         }
@@ -1306,7 +1301,7 @@
         if (!chain || chain !== state.selectedChain || kind !== 'run-completed') return;
 
         rememberRunRefresh(chain, payload?.run?.generated_at || payload?.ts || '');
-        invalidateChainCache(chain);
+        invalidateChainCollectionCache(chain);
         if (currentView.value === 'dashboard') {
           if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
             await loadSettings({ showLoading: false, force: true });
@@ -1319,11 +1314,6 @@
           await loadDashboardTokens({ showLoading: false, force: true });
           return;
         }
-        if (currentView.value === 'token-detail') {
-          await loadTokenDetail({ showLoading: false, force: true });
-          return;
-        }
-        await loadContractDetail({ showLoading: false, force: true });
       }
 
       async function loadDashboard(options = {}) {

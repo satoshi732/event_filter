@@ -122,6 +122,16 @@
   const SCROLL_STORAGE_KEY = 'event-filter-dashboard.scroll.v1';
   const FILTER_STORAGE_KEY = 'event-filter-dashboard.filters.v1';
   const GROUP_COLLAPSE_STORAGE_KEY = 'event-filter-dashboard.group-collapse.v1';
+  const PAGE_SIZE_STORAGE_KEY = 'event-filter-dashboard.page-sizes.v1';
+  const TABLE_PAGE_SIZE = {
+    contractOverview: 40,
+    tokenDirectory: 40,
+    tokenRelatedContracts: 30,
+    contractTokens: 24,
+    contractTokenFlows: 24,
+    reviewHistory: 20,
+  };
+  const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
   const DEFAULT_AI_PROVIDER_MODELS = {
     claude: ['claude-sonnet', 'claude-opus'],
     codex: ['gpt-5-codex', 'gpt-5-codex-mini'],
@@ -185,6 +195,14 @@
     writeJsonStorage(window.localStorage, GROUP_COLLAPSE_STORAGE_KEY, groups);
   }
 
+  function readStoredPageSizes() {
+    return readJsonStorage(window.localStorage, PAGE_SIZE_STORAGE_KEY, {});
+  }
+
+  function persistStoredPageSizes(pageSizes) {
+    writeJsonStorage(window.localStorage, PAGE_SIZE_STORAGE_KEY, pageSizes);
+  }
+
   function countSettingLines(value) {
     if (Array.isArray(value)) return value.filter(Boolean).length;
     return String(value || '')
@@ -197,6 +215,7 @@
   const useDashboardStore = defineStore('eventFilterDashboard', () => {
     const storedFilters = readStoredFilters();
     const storedCollapsedGroups = readStoredCollapsedGroups();
+    const storedPageSizes = readStoredPageSizes();
     const state = reactive({
       chains: [],
       selectedChain: (query.get('chain') || '').toLowerCase(),
@@ -210,6 +229,10 @@
         run: null,
         tokens: [],
         contracts: [],
+      },
+      listMeta: {
+        contractOverview: { totalRows: 0, pageSize: TABLE_PAGE_SIZE.contractOverview },
+        tokenDirectory: { totalRows: 0, pageSize: TABLE_PAGE_SIZE.tokenDirectory },
       },
       prepared: {
         dashboardTokens: [],
@@ -241,6 +264,22 @@
       collapsedGroups: {
         contractOverview: storedCollapsedGroups.contractOverview || {},
         tokenRelatedContracts: storedCollapsedGroups.tokenRelatedContracts || {},
+      },
+      tablePages: {
+        contractOverview: 1,
+        tokenDirectory: 1,
+        tokenRelatedContracts: 1,
+        contractTokens: 1,
+        contractTokenFlows: 1,
+        reviewHistory: 1,
+      },
+      tablePageSizes: {
+        contractOverview: Number(storedPageSizes.contractOverview) || TABLE_PAGE_SIZE.contractOverview,
+        tokenDirectory: Number(storedPageSizes.tokenDirectory) || TABLE_PAGE_SIZE.tokenDirectory,
+        tokenRelatedContracts: Number(storedPageSizes.tokenRelatedContracts) || TABLE_PAGE_SIZE.tokenRelatedContracts,
+        contractTokens: Number(storedPageSizes.contractTokens) || TABLE_PAGE_SIZE.contractTokens,
+        contractTokenFlows: Number(storedPageSizes.contractTokenFlows) || TABLE_PAGE_SIZE.contractTokenFlows,
+        reviewHistory: Number(storedPageSizes.reviewHistory) || TABLE_PAGE_SIZE.reviewHistory,
       },
       tableSorts: {
         contractOverview: { key: 'total_usd', dir: 'desc' },
@@ -454,6 +493,7 @@
       let stateStreamReady = false;
       let pendingExplicitRestoreKey = '';
       let pendingExplicitRestorePosition = 0;
+      let collectionReloadTimer = null;
       const storedSorts = readJsonStorage(window.localStorage, SORT_STORAGE_KEY, {});
       Object.entries(storedSorts || {}).forEach(([tableId, sortState]) => {
         if (!sortState || typeof sortState !== 'object') return;
@@ -465,6 +505,41 @@
 
       function chainCacheKey(chain) {
         return String(chain || '').toLowerCase();
+      }
+
+      function contractsListParams(chain = state.selectedChain) {
+        const sort = getTableSort('contractOverview');
+        return {
+          chain: chainCacheKey(chain),
+          q: state.dashboardFilters.contractQuery || '',
+          risk: state.dashboardFilters.contractRisk || 'all',
+          link: state.dashboardFilters.contractLinkType || 'all',
+          sort_key: sort.key || 'total_usd',
+          sort_dir: sort.dir || 'desc',
+          page: String(getTablePage('contractOverview')),
+          page_size: String(getTablePageSize('contractOverview')),
+        };
+      }
+
+      function tokensListParams(chain = state.selectedChain) {
+        const sort = getTableSort('tokenDirectory');
+        return {
+          chain: chainCacheKey(chain),
+          q: state.dashboardFilters.tokenQuery || '',
+          sort_key: sort.key || 'contracts',
+          sort_dir: sort.dir || 'desc',
+          page: String(getTablePage('tokenDirectory')),
+          page_size: String(getTablePageSize('tokenDirectory')),
+        };
+      }
+
+      function toQueryString(params) {
+        const search = new URLSearchParams();
+        Object.entries(params || {}).forEach(([key, value]) => {
+          if (value == null || value === '') return;
+          search.set(key, String(value));
+        });
+        return search.toString();
       }
 
       function tokenCacheKey(chain, token) {
@@ -491,6 +566,36 @@
         const normalizedChain = chainCacheKey(chain);
         viewDataCache.dashboardContracts.delete(normalizedChain);
         viewDataCache.dashboardTokens.delete(normalizedChain);
+        for (const key of [...viewDataCache.dashboardContracts.keys()]) {
+          if (String(key).startsWith(`${normalizedChain}?`)) viewDataCache.dashboardContracts.delete(key);
+        }
+        for (const key of [...viewDataCache.dashboardTokens.keys()]) {
+          if (String(key).startsWith(`${normalizedChain}?`)) viewDataCache.dashboardTokens.delete(key);
+        }
+      }
+
+      function currentContractsCacheKey() {
+        const requestChain = chainCacheKey(state.selectedChain);
+        return `${requestChain}?${toQueryString(contractsListParams(requestChain))}`;
+      }
+
+      function currentTokensCacheKey() {
+        const requestChain = chainCacheKey(state.selectedChain);
+        return `${requestChain}?${toQueryString(tokensListParams(requestChain))}`;
+      }
+
+      function scheduleCollectionReload(kind) {
+        if (collectionReloadTimer) {
+          window.clearTimeout(collectionReloadTimer);
+        }
+        collectionReloadTimer = window.setTimeout(() => {
+          collectionReloadTimer = null;
+          if (kind === 'contracts' && currentView.value === 'dashboard' && state.dashboardTab === 'tokens') {
+            void loadDashboardContracts({ showLoading: false });
+          } else if (kind === 'tokens' && currentView.value === 'token') {
+            void loadDashboardTokens({ showLoading: false });
+          }
+        }, 220);
       }
 
       function syncStateFromRoute() {
@@ -636,6 +741,9 @@
           key,
           dir: current.key === key && current.dir === 'asc' ? 'desc' : 'asc',
         };
+        if (Object.prototype.hasOwnProperty.call(state.tablePages, tableId)) {
+          state.tablePages[tableId] = 1;
+        }
         persistTableSorts();
       }
 
@@ -647,6 +755,129 @@
 
       function isActiveSort(tableId, key) {
         return getTableSort(tableId).key === key;
+      }
+
+      function getTablePageSize(tableId) {
+        return Math.max(1, Number(state.tablePageSizes?.[tableId] || TABLE_PAGE_SIZE[tableId] || 25));
+      }
+
+      function getTablePage(tableId) {
+        return Math.max(1, Number(state.tablePages?.[tableId] || 1));
+      }
+
+      function getTableRowCount(tableId) {
+        switch (tableId) {
+          case 'contractOverview':
+            return Number(state.listMeta.contractOverview?.totalRows || 0);
+          case 'tokenDirectory':
+            return Number(state.listMeta.tokenDirectory?.totalRows || 0);
+          case 'tokenRelatedContracts':
+            return sortedTokenContracts.value.length;
+          case 'contractTokens':
+            return sortedContractTokens.value.length;
+          case 'contractTokenFlows':
+            return sortedContractTokenFlows.value.length;
+          case 'reviewHistory':
+            return sortedContractReviews.value.length;
+          default:
+            return 0;
+        }
+      }
+
+      function getTableTotalPages(tableId, totalRowsOverride) {
+        const totalRows = Number(
+          totalRowsOverride == null ? getTableRowCount(tableId) : totalRowsOverride,
+        ) || 0;
+        return Math.max(1, Math.ceil(totalRows / getTablePageSize(tableId)));
+      }
+
+      function setTablePage(tableId, page) {
+        if (!Object.prototype.hasOwnProperty.call(state.tablePages, tableId)) return;
+        const totalPages = getTableTotalPages(tableId);
+        state.tablePages[tableId] = Math.max(1, Math.min(totalPages, Math.floor(Number(page) || 1)));
+      }
+
+      function resetTablePage(tableId) {
+        if (!Object.prototype.hasOwnProperty.call(state.tablePages, tableId)) return;
+        state.tablePages[tableId] = 1;
+      }
+
+      function setTablePageSize(tableId, size) {
+        if (!Object.prototype.hasOwnProperty.call(state.tablePageSizes, tableId)) return;
+        const normalizedSize = PAGE_SIZE_OPTIONS.includes(Number(size))
+          ? Number(size)
+          : (TABLE_PAGE_SIZE[tableId] || 25);
+        if (getTablePageSize(tableId) === normalizedSize) return;
+        state.tablePageSizes[tableId] = normalizedSize;
+        resetTablePage(tableId);
+        persistStoredPageSizes(state.tablePageSizes);
+        if (tableId === 'contractOverview' && currentView.value === 'dashboard' && state.dashboardTab === 'tokens') {
+          scheduleCollectionReload('contracts');
+        }
+        if (tableId === 'tokenDirectory' && currentView.value === 'token') {
+          scheduleCollectionReload('tokens');
+        }
+      }
+
+      function paginateRows(rows, tableId) {
+        const list = Array.isArray(rows) ? rows : [];
+        const totalPages = getTableTotalPages(tableId, list.length);
+        const page = Math.max(1, Math.min(getTablePage(tableId), totalPages));
+        if (page !== getTablePage(tableId) && Object.prototype.hasOwnProperty.call(state.tablePages, tableId)) {
+          state.tablePages[tableId] = page;
+        }
+        const pageSize = getTablePageSize(tableId);
+        const start = (page - 1) * pageSize;
+        return list.slice(start, start + pageSize);
+      }
+
+      function getTablePaginationMeta(tableId, totalRowsOverride) {
+        const totalRows = Number(
+          totalRowsOverride == null ? getTableRowCount(tableId) : totalRowsOverride,
+        ) || 0;
+        const totalPages = getTableTotalPages(tableId, totalRows);
+        const page = Math.max(1, Math.min(getTablePage(tableId), totalPages));
+        const pageSize = getTablePageSize(tableId);
+        const start = totalRows ? ((page - 1) * pageSize) + 1 : 0;
+        const end = totalRows ? Math.min(totalRows, page * pageSize) : 0;
+        return { page, totalPages, totalRows, start, end };
+      }
+
+      function canMoveTablePage(tableId, direction) {
+        const meta = getTablePaginationMeta(tableId);
+        return direction < 0 ? meta.page > 1 : meta.page < meta.totalPages;
+      }
+
+      function moveTablePage(tableId, direction) {
+        setTablePage(tableId, getTablePage(tableId) + direction);
+      }
+
+      function goToTablePage(tableId, page) {
+        setTablePage(tableId, page);
+      }
+
+      function getTablePageButtons(tableId, totalRowsOverride) {
+        const meta = getTablePaginationMeta(tableId, totalRowsOverride);
+        if (meta.totalPages <= 1) return [1];
+        const pages = new Set([1, meta.totalPages, meta.page - 1, meta.page, meta.page + 1]);
+        if (meta.page <= 3) {
+          pages.add(2);
+          pages.add(3);
+        }
+        if (meta.page >= meta.totalPages - 2) {
+          pages.add(meta.totalPages - 1);
+          pages.add(meta.totalPages - 2);
+        }
+        return [...pages]
+          .filter((page) => page >= 1 && page <= meta.totalPages)
+          .sort((left, right) => left - right)
+          .reduce((acc, page) => {
+            if (acc.length && typeof acc[acc.length - 1] === 'number' && page - acc[acc.length - 1] > 1) {
+              acc.push('ellipsis');
+            }
+            acc.push(page);
+            return acc;
+          }, []);
       }
 
       function sortRows(rows, tableId, compareFn) {
@@ -710,79 +941,23 @@
       }
 
       const filteredTokens = computed(() => {
-        const queryText = state.dashboardFilters.tokenQuery.trim().toLowerCase();
-        const rows = state.prepared.dashboardTokens.filter((token) => (
-          !queryText || token._searchText.includes(queryText)
-        ));
-        return sortRows(rows, 'tokenDirectory', (a, b) => {
-          const sort = getTableSort('tokenDirectory');
-          switch (sort.key) {
-            case 'token':
-              return compareString(a.token, b.token);
-            case 'name':
-              return compareString(a.token_name || a.token, b.token_name || b.token);
-            case 'symbol':
-              return compareString(a.token_symbol || '', b.token_symbol || '');
-            case 'sync':
-              return compareString(syncStateLabel(a.token_calls_sync), syncStateLabel(b.token_calls_sync));
-            case 'auto_audit_status':
-              return compareString(a.auto_audit_status || 'no', b.auto_audit_status || 'no');
-            case 'audit_result':
-              return compareString(auditResultDisplay(a), auditResultDisplay(b));
-            case 'manual_audit':
-              return compareBoolean(a.is_manual_audit, b.is_manual_audit);
-            case 'price':
-              return compareNumber(a.token_price_usd, b.token_price_usd);
-            case 'contracts':
-            default:
-              return compareNumber(a.related_contract_count || 0, b.related_contract_count || 0);
-          }
-        });
+        return state.prepared.dashboardTokens || [];
       });
+
+      const paginatedFilteredTokens = computed(() => (
+        filteredTokens.value
+      ));
 
       const filteredContracts = computed(() => {
-        const queryText = state.dashboardFilters.contractQuery.trim().toLowerCase();
-        const rows = state.prepared.dashboardContracts.filter((row) => {
-          const riskMatch = state.dashboardFilters.contractRisk === 'all'
-            || (state.dashboardFilters.contractRisk === 'exploitable' && row.is_exploitable)
-            || (state.dashboardFilters.contractRisk === 'seen' && Boolean(row.is_seen_pattern || row.seen_label || row.group_kind === 'seen'))
-            || (state.dashboardFilters.contractRisk === 'unseen' && !(row.is_seen_pattern || row.seen_label || row.group_kind === 'seen'));
-
-          const linkType = row.link_type || 'plain';
-          const linkMatch = state.dashboardFilters.contractLinkType === 'all'
-            || state.dashboardFilters.contractLinkType === linkType;
-
-          const queryMatch = !queryText || row._searchText.includes(queryText);
-
-          return riskMatch && linkMatch && queryMatch;
-        });
-
-        return sortRows(rows, 'contractOverview', (a, b) => {
-          const sort = getTableSort('contractOverview');
-          switch (sort.key) {
-            case 'contract':
-              return compareString(a.contract, b.contract);
-            case 'label':
-              return compareString(a.label || '', b.label || '');
-            case 'linkage':
-              return compareString(a.linkage || '', b.linkage || '');
-            case 'patterns':
-              return compareString((a.patterns || []).join(','), (b.patterns || []).join(','));
-            case 'deployed':
-              return compareDate(a.deployed_at, b.deployed_at);
-            case 'auto_audit_status':
-              return compareString(a.auto_audit_status || 'no', b.auto_audit_status || 'no');
-            case 'is_exploitable':
-              return compareBoolean(a.is_exploitable, b.is_exploitable);
-            case 'total_usd':
-            default:
-              return compareNumber(a.portfolio_usd, b.portfolio_usd);
-          }
-        });
+        return state.prepared.dashboardContracts || [];
       });
 
+      const paginatedFilteredContracts = computed(() => (
+        filteredContracts.value
+      ));
+
       const contractOverviewSections = computed(() => (
-        buildPatternSections(filteredContracts.value).map((section) => ({
+        buildPatternSections(paginatedFilteredContracts.value).map((section) => ({
           ...section,
           collapsed: section.isGrouped && Boolean(state.collapsedGroups.contractOverview?.[section.key]),
         }))
@@ -821,8 +996,12 @@
         })
       ));
 
+      const paginatedTokenContracts = computed(() => (
+        paginateRows(sortedTokenContracts.value, 'tokenRelatedContracts')
+      ));
+
       const tokenContractSections = computed(() => (
-        buildPatternSections(sortedTokenContracts.value).map((section) => ({
+        buildPatternSections(paginatedTokenContracts.value).map((section) => ({
           ...section,
           collapsed: section.isGrouped && Boolean(state.collapsedGroups.tokenRelatedContracts?.[section.key]),
         }))
@@ -917,6 +1096,10 @@
         })
       ));
 
+      const paginatedContractReviews = computed(() => (
+        paginateRows(sortedContractReviews.value, 'reviewHistory')
+      ));
+
       const sortedContractTokens = computed(() => (
         sortRows((state.contractDetail?.tokens || []), 'contractTokens', (a, b) => {
           const sort = getTableSort('contractTokens');
@@ -940,6 +1123,10 @@
               return compareBigInt(a.current_balance, b.current_balance);
           }
         })
+      ));
+
+      const paginatedContractTokens = computed(() => (
+        paginateRows(sortedContractTokens.value, 'contractTokens')
       ));
 
       const contractFlowTokenOptions = computed(() => (
@@ -978,6 +1165,10 @@
           }
         });
       });
+
+      const paginatedContractTokenFlows = computed(() => (
+        paginateRows(sortedContractTokenFlows.value, 'contractTokenFlows')
+      ));
 
       const sortedChainConfigs = computed(() => (
         sortRows((state.settings.chain_configs || []), 'chainConfig', (a, b) => {
@@ -1356,32 +1547,48 @@
       async function loadDashboardContracts(options = {}) {
         if (!state.selectedChain) return;
         const requestChain = chainCacheKey(state.selectedChain);
-        const cacheKey = requestChain;
+        const queryParams = contractsListParams(requestChain);
+        const queryString = toQueryString(queryParams);
+        const cacheKey = `${requestChain}?${queryString}`;
         if (options.force !== true) {
           const cached = viewDataCache.dashboardContracts.get(cacheKey);
           if (cached) {
             assignDashboardContractsPayload(cached);
+            state.listMeta.contractOverview = {
+              totalRows: Number(cached.totalRows || 0),
+              pageSize: Number(cached.pageSize || getTablePageSize('contractOverview')),
+            };
             return;
           }
         }
         await runSharedLoad(`dashboard-contracts:${cacheKey}`, async () => {
           try {
             const data = options.showLoading === false
-              ? await apiFetch(`/api/contracts?chain=${encodeURIComponent(requestChain)}`)
+              ? await apiFetch(`/api/contracts?${queryString}`)
               : await withPageLoading(
                 'Loading contracts',
-                () => apiFetch(`/api/contracts?chain=${encodeURIComponent(requestChain)}`),
+                () => apiFetch(`/api/contracts?${queryString}`),
               );
             const payload = {
               run: data.run || null,
               contracts: data.contracts || [],
               preparedContracts: prepareDashboardContractRows(data.contracts || []),
+              totalRows: Number(data.total_rows || 0),
+              pageSize: Number(data.page_size || getTablePageSize('contractOverview')),
             };
             viewDataCache.dashboardContracts.set(cacheKey, payload);
-            if (chainCacheKey(state.selectedChain) !== cacheKey) return;
+            if (currentContractsCacheKey() !== cacheKey) return;
+            state.listMeta.contractOverview = {
+              totalRows: payload.totalRows,
+              pageSize: payload.pageSize,
+            };
             assignDashboardContractsPayload(payload);
           } catch {
-            if (chainCacheKey(state.selectedChain) !== cacheKey) return;
+            if (chainCacheKey(state.selectedChain) !== requestChain) return;
+            state.listMeta.contractOverview = {
+              totalRows: 0,
+              pageSize: getTablePageSize('contractOverview'),
+            };
             assignDashboardContractsPayload({ run: null, contracts: [], preparedContracts: [] });
           }
         });
@@ -1390,32 +1597,48 @@
       async function loadDashboardTokens(options = {}) {
         if (!state.selectedChain) return;
         const requestChain = chainCacheKey(state.selectedChain);
-        const cacheKey = requestChain;
+        const queryParams = tokensListParams(requestChain);
+        const queryString = toQueryString(queryParams);
+        const cacheKey = `${requestChain}?${queryString}`;
         if (options.force !== true) {
           const cached = viewDataCache.dashboardTokens.get(cacheKey);
           if (cached) {
             assignDashboardTokensPayload(cached);
+            state.listMeta.tokenDirectory = {
+              totalRows: Number(cached.totalRows || 0),
+              pageSize: Number(cached.pageSize || getTablePageSize('tokenDirectory')),
+            };
             return;
           }
         }
         await runSharedLoad(`dashboard-tokens:${cacheKey}`, async () => {
           try {
             const data = options.showLoading === false
-              ? await apiFetch(`/api/tokens?chain=${encodeURIComponent(requestChain)}`)
+              ? await apiFetch(`/api/tokens?${queryString}`)
               : await withPageLoading(
                 'Loading tokens',
-                () => apiFetch(`/api/tokens?chain=${encodeURIComponent(requestChain)}`),
+                () => apiFetch(`/api/tokens?${queryString}`),
               );
             const payload = {
               run: data.run || null,
               tokens: data.tokens || [],
               preparedTokens: prepareDashboardTokenRows(data.tokens || []),
+              totalRows: Number(data.total_rows || 0),
+              pageSize: Number(data.page_size || getTablePageSize('tokenDirectory')),
             };
             viewDataCache.dashboardTokens.set(cacheKey, payload);
-            if (chainCacheKey(state.selectedChain) !== cacheKey) return;
+            if (currentTokensCacheKey() !== cacheKey) return;
+            state.listMeta.tokenDirectory = {
+              totalRows: payload.totalRows,
+              pageSize: payload.pageSize,
+            };
             assignDashboardTokensPayload(payload);
           } catch {
-            if (chainCacheKey(state.selectedChain) !== cacheKey) return;
+            if (chainCacheKey(state.selectedChain) !== requestChain) return;
+            state.listMeta.tokenDirectory = {
+              totalRows: 0,
+              pageSize: getTablePageSize('tokenDirectory'),
+            };
             assignDashboardTokensPayload({ run: null, tokens: [], preparedTokens: [] });
           }
         });
@@ -1632,6 +1855,8 @@
         state.dashboard.run = null;
         state.dashboard.tokens = [];
         state.dashboard.contracts = [];
+        state.listMeta.contractOverview = { totalRows: 0, pageSize: getTablePageSize('contractOverview') };
+        state.listMeta.tokenDirectory = { totalRows: 0, pageSize: getTablePageSize('tokenDirectory') };
         state.prepared.dashboardTokens = [];
         state.prepared.dashboardContracts = [];
         state.tokenDetail = null;
@@ -2008,17 +2233,17 @@
 
       function canRequestContractAnalysis() {
         const source = contractAiAnalysis.value;
-        return source.status === 'idle' || source.status === 'failed';
+        return source.status !== 'requested' && source.status !== 'running';
       }
 
       function canRequestTokenAnalysis() {
         const source = tokenAiAnalysis.value;
-        return source.status === 'idle' || source.status === 'failed';
+        return source.status !== 'requested' && source.status !== 'running';
       }
 
       function analysisRequestButtonLabel() {
         const source = contractAiAnalysis.value;
-        if (source.status === 'completed') return 'Already Analyzed';
+        if (source.status === 'completed') return 'Re-run AI Analysis';
         if (source.status === 'requested') return 'Queued';
         if (source.status === 'running') return 'Running';
         if (source.status === 'failed') return 'Retry AI Analysis';
@@ -2027,7 +2252,7 @@
 
       function tokenAnalysisRequestButtonLabel() {
         const source = tokenAiAnalysis.value;
-        if (source.status === 'completed') return 'Already Analyzed';
+        if (source.status === 'completed') return 'Re-run AI Analysis';
         if (source.status === 'requested') return 'Queued';
         if (source.status === 'running') return 'Running';
         if (source.status === 'failed') return 'Retry AI Analysis';
@@ -2036,12 +2261,12 @@
 
       function canRequestOverviewAutoAudit(row) {
         const status = autoAuditStatusLabel(row?.auto_audit_status);
-        return status === 'no' || status === 'failed';
+        return status !== 'processing';
       }
 
       function canRequestTokenAutoAudit(row) {
         const status = autoAuditStatusLabel(row?.auto_audit_status);
-        return status === 'no' || status === 'failed';
+        return status !== 'processing';
       }
 
       async function requestOverviewAutoAudit(row) {
@@ -2383,8 +2608,67 @@
         }),
         (filters) => {
           persistStoredFilters(filters);
+          if (currentView.value === 'token') {
+            resetTablePage('tokenDirectory');
+            scheduleCollectionReload('tokens');
+          }
+          if (currentView.value === 'dashboard' && state.dashboardTab === 'tokens') {
+            resetTablePage('contractOverview');
+            scheduleCollectionReload('contracts');
+          }
         },
         { deep: true },
+      );
+
+      watch(
+        () => ({
+          key: state.tableSorts.contractOverview.key,
+          dir: state.tableSorts.contractOverview.dir,
+          page: state.tablePages.contractOverview,
+        }),
+        () => {
+          if (currentView.value === 'dashboard' && state.dashboardTab === 'tokens') {
+            scheduleCollectionReload('contracts');
+          }
+        },
+        { deep: true },
+      );
+
+      watch(
+        () => ({
+          key: state.tableSorts.tokenDirectory.key,
+          dir: state.tableSorts.tokenDirectory.dir,
+          page: state.tablePages.tokenDirectory,
+        }),
+        () => {
+          if (currentView.value === 'token') {
+            scheduleCollectionReload('tokens');
+          }
+        },
+        { deep: true },
+      );
+
+      watch(
+        () => routeToken.value,
+        () => {
+          resetTablePage('tokenRelatedContracts');
+        },
+      );
+
+      watch(
+        () => routeContract.value,
+        () => {
+          resetTablePage('contractTokens');
+          resetTablePage('contractTokenFlows');
+          resetTablePage('reviewHistory');
+        },
+      );
+
+      watch(
+        () => state.selectedContractFlowToken,
+        () => {
+          resetTablePage('contractTokenFlows');
+        },
       );
 
       watch(
@@ -2459,13 +2743,24 @@
         progressStageLabel,
         progressDetailText,
         progressStatusTone,
+        pageSizeOptions: PAGE_SIZE_OPTIONS,
+        getTablePaginationMeta,
+        canMoveTablePage,
+        moveTablePage,
+        goToTablePage,
+        getTablePageButtons,
+        getTablePageSize,
+        setTablePageSize,
         pageLoading: computed(() => state.pageLoading.count > 0),
         pageLoadingLabel: computed(() => state.pageLoading.label || 'Loading'),
         filteredTokens,
+        paginatedFilteredTokens,
         filteredContracts,
+        paginatedFilteredContracts,
         contractOverviewSections,
         tokenContracts,
         sortedTokenContracts,
+        paginatedTokenContracts,
         tokenContractSections,
         tokenGroupCards,
         tokenExploitableCount,
@@ -2475,10 +2770,13 @@
         contractReviews,
         contractAiAnalysis,
         sortedContractReviews,
+        paginatedContractReviews,
         sortedContractTokens,
+        paginatedContractTokens,
         contractFlowTokenOptions,
         selectedContractFlowTokenRow,
         sortedContractTokenFlows,
+        paginatedContractTokenFlows,
         sortedChainConfigs,
         contractSelectorPreview,
         contractStatusLabel,

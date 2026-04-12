@@ -50,6 +50,7 @@ interface RequestOptions {
   body?: string;
   timeoutMs?: number;
   insecureTls?: boolean;
+  family?: 4 | 6;
 }
 
 interface ResponsePayload {
@@ -271,6 +272,7 @@ function requestText(rawUrl: string, options: RequestOptions = {}): Promise<Resp
       method,
       headers,
       rejectUnauthorized: url.protocol === 'https:' ? !Boolean(options.insecureTls) : undefined,
+      family: options.family,
     }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
@@ -362,6 +364,36 @@ export function getContractAiAuditPlan(chain: string, contractAddr: string): Con
   const selfSize = registry.codeSize ?? 0;
   const linkedSize = linkedRegistry?.codeSize ?? 0;
 
+  if (!linkedRegistry) {
+    if (registry.linkType === 'proxy') {
+      return {
+        accepted: true,
+        mode: 'proxy',
+        reason: null,
+        auditAddress: target,
+        verificationAddress: linkage,
+      };
+    }
+
+    if (!hasSelectors(registry)) {
+      return {
+        accepted: false,
+        mode: 'single',
+        reason: 'Linked contract metadata is missing and the target has no selectors',
+        auditAddress: target,
+        verificationAddress: target,
+      };
+    }
+
+    return {
+      accepted: true,
+      mode: 'single',
+      reason: null,
+      auditAddress: target,
+      verificationAddress: target,
+    };
+  }
+
   if (isMuchSmaller(selfSize, linkedSize)) {
     return {
       accepted: true,
@@ -448,7 +480,7 @@ async function resolveVerificationStatus(
         `Etherscan verification for ${chain.canonical}:${verificationAddress}`,
         async () => await requestJson<{
         result?: Array<{ SourceCode?: string; ABI?: string }> | string;
-      }>(url.toString()),
+      }>(url.toString(), { family: 4 }),
       );
 
       if (Array.isArray(response.result) && response.result.length > 0) {
@@ -477,7 +509,7 @@ async function resolveVerificationStatus(
   try {
     const html = await retryVerificationProbe(
       `Explorer verification for ${chain.canonical}:${verificationAddress}`,
-      async () => await requestText(explorerUrl, { timeoutMs: 30_000 }),
+      async () => await requestText(explorerUrl, { timeoutMs: 30_000, family: 4 }),
     );
     const verified =
       html.text.includes('Source Code Verified')

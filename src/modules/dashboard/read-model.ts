@@ -471,24 +471,50 @@ export function latestPersistedRunMeta(chain: string): LatestRunMeta | null {
   };
 }
 
-export function withLiveReviews(chain: string, token: TokenResult): TokenResult {
+interface LiveReviewContext {
+  liveSeenLabelByHash: Map<string, string>;
+  reviewMap: ReturnType<typeof getDashboardSeenContractReviews>;
+  registryMap: ReturnType<typeof getDashboardContractRegistry>;
+  autoAnalysisMap: ReturnType<typeof getDashboardContractAutoAnalysis>;
+}
+
+function buildLiveReviewContext(chain: string, tokens: TokenResult[]): LiveReviewContext {
   const liveSeenLabelByHash = new Map(
     listDashboardSeenSelectors().map((entry) => [entry.hash, entry.label]),
   );
   const reviewHashes = new Set<string>();
   const contractAddresses = new Set<string>();
-  for (const group of token.groups) {
-    for (const contract of group.contracts) {
-      contractAddresses.add(contract.contract.toLowerCase());
-      for (const target of contract.pattern_targets ?? []) {
-        reviewHashes.add(target.pattern_hash);
+  for (const token of tokens) {
+    for (const group of token.groups) {
+      for (const contract of group.contracts) {
+        contractAddresses.add(contract.contract.toLowerCase());
+        for (const target of contract.pattern_targets ?? []) {
+          reviewHashes.add(target.pattern_hash);
+        }
       }
     }
   }
 
-  const reviewMap = getDashboardSeenContractReviews([...reviewHashes]);
-  const registryMap = getDashboardContractRegistry(chain, [...contractAddresses]);
-  const autoAnalysisMap = getDashboardContractAutoAnalysis(chain, [...contractAddresses]);
+  return {
+    liveSeenLabelByHash,
+    reviewMap: getDashboardSeenContractReviews([...reviewHashes]),
+    registryMap: getDashboardContractRegistry(chain, [...contractAddresses]),
+    autoAnalysisMap: getDashboardContractAutoAnalysis(chain, [...contractAddresses]),
+  };
+}
+
+function applyLiveReviewsToToken(
+  chain: string,
+  token: TokenResult,
+  context: LiveReviewContext,
+): TokenResult {
+  const {
+    liveSeenLabelByHash,
+    reviewMap,
+    registryMap,
+    autoAnalysisMap,
+  } = context;
+
   const refreshedContracts = token.groups.flatMap((group) => group.contracts.map((contract) => {
     const normalizedAddress = contract.contract.toLowerCase();
     const registry = registryMap.get(normalizedAddress);
@@ -561,6 +587,10 @@ export function withLiveReviews(chain: string, token: TokenResult): TokenResult 
   };
 }
 
+export function withLiveReviews(chain: string, token: TokenResult): TokenResult {
+  return applyLiveReviewsToToken(chain, token, buildLiveReviewContext(chain, [token]));
+}
+
 function resolveRegistryContractSummary(
   registry: ContractRegistryRow | undefined,
   source: {
@@ -592,6 +622,7 @@ function resolveRegistryContractSummary(
 }
 
 export function buildDashboardContracts(chain: string, run: PipelineRunResult): DashboardContractSummary[] {
+  const liveReviewContext = buildLiveReviewContext(chain, run.tokens);
   const acc = new Map<string, {
     contract: string;
     groupKind: 'seen' | 'similar' | 'single';
@@ -612,7 +643,7 @@ export function buildDashboardContracts(chain: string, run: PipelineRunResult): 
   }>();
 
   for (const tokenEntry of run.tokens) {
-    const token = withLiveReviews(chain, tokenEntry);
+    const token = applyLiveReviewsToToken(chain, tokenEntry, liveReviewContext);
     const tokenRef: DashboardTokenRef = {
       token: token.token,
       token_symbol: token.token_symbol,
@@ -722,6 +753,7 @@ export function buildDashboardContracts(chain: string, run: PipelineRunResult): 
 }
 
 export function buildContractDetail(chain: string, run: PipelineRunResult, contractAddress: string) {
+  const liveReviewContext = buildLiveReviewContext(chain, run.tokens);
   const target = contractAddress.toLowerCase();
   const tokenRows: Array<{
     token: ReturnType<typeof tokenSummary>;
@@ -774,7 +806,7 @@ export function buildContractDetail(chain: string, run: PipelineRunResult, contr
   const whitelistPatterns = new Set<string>();
 
   for (const rawToken of run.tokens) {
-    const token = withLiveReviews(chain, rawToken);
+    const token = applyLiveReviewsToToken(chain, rawToken, liveReviewContext);
     for (const group of token.groups) {
       for (const contract of group.contracts) {
         if (contract.contract.toLowerCase() !== target) continue;

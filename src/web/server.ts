@@ -31,6 +31,8 @@ import {
   latestPersistedRunMeta,
   tokenSummary,
   withLiveReviews,
+  type DashboardContractSummary,
+  type DashboardTokenSummary,
   type LatestRunMeta,
 } from '../modules/dashboard/read-model.js';
 import {
@@ -175,6 +177,161 @@ function sanitizeRuntimeConfig(snapshot: ReturnType<typeof getConfigSnapshot>) {
     web_security: {
       ...access,
     },
+  };
+}
+
+function parsePositiveInt(value: string | null, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
+function compareNumberLike(a: number | null | undefined, b: number | null | undefined): number {
+  return (Number(a) || 0) - (Number(b) || 0);
+}
+
+function compareStringLike(a: string | null | undefined, b: string | null | undefined): number {
+  return String(a || '').localeCompare(String(b || ''));
+}
+
+function applyDashboardContractQuery(
+  rows: DashboardContractSummary[],
+  search: string,
+  risk: string,
+  link: string,
+  sortKey: string,
+  sortDir: string,
+  page: number,
+  pageSize: number,
+) {
+  const queryText = String(search || '').trim().toLowerCase();
+  let filtered = rows.filter((row) => {
+    const isSeen = Boolean(row.is_seen_pattern || row.group_kind === 'seen');
+    const riskMatch = risk === 'all'
+      || (risk === 'exploitable' && row.is_exploitable)
+      || (risk === 'seen' && isSeen)
+      || (risk === 'unseen' && !isSeen);
+    const linkType = row.link_type || 'plain';
+    const linkMatch = link === 'all' || link === linkType;
+    const searchBlob = [
+      row.contract,
+      row.linkage,
+      row.label,
+      ...(row.patterns || []),
+      ...(row.tokens || []).map((token) => `${token.token} ${token.token_symbol || ''} ${token.token_name || ''}`),
+    ].join(' ').toLowerCase();
+    const queryMatch = !queryText || searchBlob.includes(queryText);
+    return riskMatch && linkMatch && queryMatch;
+  });
+
+  filtered = [...filtered].sort((a, b) => {
+    let delta = 0;
+    switch (sortKey) {
+      case 'contract':
+        delta = compareStringLike(a.contract, b.contract);
+        break;
+      case 'label':
+        delta = compareStringLike(a.label, b.label);
+        break;
+      case 'linkage':
+        delta = compareStringLike(a.linkage, b.linkage);
+        break;
+      case 'patterns':
+        delta = compareStringLike((a.patterns || []).join(','), (b.patterns || []).join(','));
+        break;
+      case 'deployed':
+        delta = compareStringLike(a.deployed_at, b.deployed_at);
+        break;
+      case 'auto_audit_status':
+        delta = compareStringLike(a.auto_audit_status, b.auto_audit_status);
+        break;
+      case 'total_usd':
+      default:
+        delta = compareNumberLike(a.portfolio_usd, b.portfolio_usd);
+        break;
+    }
+    if (delta === 0) {
+      delta = compareStringLike(a.contract, b.contract);
+    }
+    return sortDir === 'asc' ? delta : -delta;
+  });
+
+  const totalRows = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
+  const normalizedPage = Math.max(1, Math.min(page, totalPages));
+  const start = (normalizedPage - 1) * pageSize;
+  return {
+    rows: filtered.slice(start, start + pageSize),
+    totalRows,
+    page: normalizedPage,
+    pageSize,
+  };
+}
+
+function applyDashboardTokenQuery(
+  rows: DashboardTokenSummary[],
+  search: string,
+  sortKey: string,
+  sortDir: string,
+  page: number,
+  pageSize: number,
+) {
+  const queryText = String(search || '').trim().toLowerCase();
+  let filtered = rows.filter((row) => {
+    const searchBlob = `${row.token} ${row.token_name || ''} ${row.token_symbol || ''}`.toLowerCase();
+    return !queryText || searchBlob.includes(queryText);
+  });
+
+  filtered = [...filtered].sort((a, b) => {
+    let delta = 0;
+    switch (sortKey) {
+      case 'token':
+        delta = compareStringLike(a.token, b.token);
+        break;
+      case 'name':
+        delta = compareStringLike(a.token_name || a.token, b.token_name || b.token);
+        break;
+      case 'symbol':
+        delta = compareStringLike(a.token_symbol, b.token_symbol);
+        break;
+      case 'sync':
+        delta = compareStringLike(String(a.token_calls_sync), String(b.token_calls_sync));
+        break;
+      case 'auto_audit_status':
+        delta = compareStringLike(a.auto_audit_status, b.auto_audit_status);
+        break;
+      case 'audit_result':
+        delta = compareStringLike(
+          `${a.auto_audit_critical ?? 0}:${a.auto_audit_high ?? 0}:${a.auto_audit_medium ?? 0}`,
+          `${b.auto_audit_critical ?? 0}:${b.auto_audit_high ?? 0}:${b.auto_audit_medium ?? 0}`,
+        );
+        break;
+      case 'manual_audit':
+        delta = compareNumberLike(a.is_manual_audit ? 1 : 0, b.is_manual_audit ? 1 : 0);
+        break;
+      case 'price':
+        delta = compareNumberLike(a.token_price_usd, b.token_price_usd);
+        break;
+      case 'contracts':
+      default:
+        delta = compareNumberLike(a.related_contract_count, b.related_contract_count);
+        break;
+    }
+    if (delta === 0) {
+      delta = compareStringLike(a.token, b.token);
+    }
+    return sortDir === 'asc' ? delta : -delta;
+  });
+
+  const totalRows = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
+  const normalizedPage = Math.max(1, Math.min(page, totalPages));
+  const start = (normalizedPage - 1) * pageSize;
+  return {
+    rows: filtered.slice(start, start + pageSize),
+    totalRows,
+    page: normalizedPage,
+    pageSize,
   };
 }
 
@@ -427,9 +584,74 @@ export async function startWebServer(
     latestRuns: new Map(),
   };
   const stateStreamClients = new Set<StateStreamClient>();
+  const persistedRunCache = new Map<string, PipelineRunResult | null>();
+  const dashboardContractsCache = new Map<string, { runKey: string; rows: DashboardContractSummary[] }>();
+  const dashboardTokensCache = new Map<string, { runKey: string; rows: DashboardTokenSummary[] }>();
+  const contractDetailCache = new Map<string, { runKey: string; detail: ReturnType<typeof buildContractDetail> }>();
+
+  function runCacheKey(run: PipelineRunResult): string {
+    return `${run.chain}:${run.generated_at}:${run.block_from}:${run.block_to}:${run.token_count}`;
+  }
+
+  function invalidateReadCaches(chain?: string): void {
+    if (!chain) {
+      persistedRunCache.clear();
+      dashboardContractsCache.clear();
+      dashboardTokensCache.clear();
+      contractDetailCache.clear();
+      return;
+    }
+    const normalizedChain = chain.toLowerCase();
+    persistedRunCache.delete(normalizedChain);
+    dashboardContractsCache.delete(normalizedChain);
+    dashboardTokensCache.delete(normalizedChain);
+    for (const key of [...contractDetailCache.keys()]) {
+      if (key.startsWith(`${normalizedChain}:`)) contractDetailCache.delete(key);
+    }
+  }
 
   function resolveRun(chain: string): PipelineRunResult | null {
-    return buildPersistedRun(chain) ?? state.latestRuns.get(chain) ?? null;
+    const normalizedChain = chain.toLowerCase();
+    const inMemory = state.latestRuns.get(normalizedChain);
+    if (inMemory) return inMemory;
+    if (persistedRunCache.has(normalizedChain)) {
+      return persistedRunCache.get(normalizedChain) ?? null;
+    }
+    const persisted = buildPersistedRun(normalizedChain) ?? null;
+    persistedRunCache.set(normalizedChain, persisted);
+    return persisted;
+  }
+
+  function resolveDashboardContracts(chain: string, run: PipelineRunResult): DashboardContractSummary[] {
+    const normalizedChain = chain.toLowerCase();
+    const key = runCacheKey(run);
+    const cached = dashboardContractsCache.get(normalizedChain);
+    if (cached?.runKey === key) return cached.rows;
+    const rows = buildDashboardContracts(normalizedChain, run);
+    dashboardContractsCache.set(normalizedChain, { runKey: key, rows });
+    return rows;
+  }
+
+  function resolveDashboardTokens(chain: string, run: PipelineRunResult): DashboardTokenSummary[] {
+    const normalizedChain = chain.toLowerCase();
+    const key = runCacheKey(run);
+    const cached = dashboardTokensCache.get(normalizedChain);
+    if (cached?.runKey === key) return cached.rows;
+    const rows = buildDashboardTokens(normalizedChain, run);
+    dashboardTokensCache.set(normalizedChain, { runKey: key, rows });
+    return rows;
+  }
+
+  function resolveContractDetail(chain: string, run: PipelineRunResult, contract: string) {
+    const normalizedChain = chain.toLowerCase();
+    const normalizedContract = contract.toLowerCase();
+    const key = `${normalizedChain}:${normalizedContract}`;
+    const runKey = runCacheKey(run);
+    const cached = contractDetailCache.get(key);
+    if (cached?.runKey === runKey) return cached.detail;
+    const detail = buildContractDetail(normalizedChain, run, normalizedContract);
+    contractDetailCache.set(key, { runKey, detail });
+    return detail;
   }
 
   async function buildStatePayload() {
@@ -512,6 +734,7 @@ export async function startWebServer(
         },
       });
       state.latestRuns.set(chain, run);
+      invalidateReadCaches(chain);
       state.progress = {
         chain,
         stage: 'complete',
@@ -769,8 +992,8 @@ export async function startWebServer(
 
         sendJson(res, 200, {
           run: latestRunMeta(run),
-          tokens: buildDashboardTokens(chain, run),
-          contracts: buildDashboardContracts(chain, run),
+          tokens: resolveDashboardTokens(chain, run),
+          contracts: resolveDashboardContracts(chain, run),
         });
         return;
       }
@@ -782,10 +1005,30 @@ export async function startWebServer(
           sendJson(res, 404, { error: 'No results for this chain yet' });
           return;
         }
+        const search = url.searchParams.get('q') ?? '';
+        const risk = (url.searchParams.get('risk') ?? 'all').toLowerCase();
+        const link = (url.searchParams.get('link') ?? 'all').toLowerCase();
+        const sortKey = String(url.searchParams.get('sort_key') ?? 'total_usd');
+        const sortDir = String(url.searchParams.get('sort_dir') ?? 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
+        const page = parsePositiveInt(url.searchParams.get('page'), 1);
+        const pageSize = parsePositiveInt(url.searchParams.get('page_size'), 40);
+        const result = applyDashboardContractQuery(
+          resolveDashboardContracts(chain, run),
+          search,
+          risk,
+          link,
+          sortKey,
+          sortDir,
+          page,
+          pageSize,
+        );
 
         sendJson(res, 200, {
           run: latestRunMeta(run),
-          contracts: buildDashboardContracts(chain, run),
+          contracts: result.rows,
+          total_rows: result.totalRows,
+          page: result.page,
+          page_size: result.pageSize,
         });
         return;
       }
@@ -797,10 +1040,26 @@ export async function startWebServer(
           sendJson(res, 404, { error: 'No results for this chain yet' });
           return;
         }
+        const search = url.searchParams.get('q') ?? '';
+        const sortKey = String(url.searchParams.get('sort_key') ?? 'contracts');
+        const sortDir = String(url.searchParams.get('sort_dir') ?? 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
+        const page = parsePositiveInt(url.searchParams.get('page'), 1);
+        const pageSize = parsePositiveInt(url.searchParams.get('page_size'), 40);
+        const result = applyDashboardTokenQuery(
+          resolveDashboardTokens(chain, run),
+          search,
+          sortKey,
+          sortDir,
+          page,
+          pageSize,
+        );
 
         sendJson(res, 200, {
           run: latestRunMeta(run),
-          tokens: buildDashboardTokens(chain, run),
+          tokens: result.rows,
+          total_rows: result.totalRows,
+          page: result.page,
+          page_size: result.pageSize,
         });
         return;
       }
@@ -813,6 +1072,7 @@ export async function startWebServer(
 
       if (reqPath === '/api/sync/pull' && method === 'POST') {
         const result = await pullPatterns();
+        invalidateReadCaches();
         sendJson(res, 200, {
           ok: true,
           result,
@@ -823,6 +1083,7 @@ export async function startWebServer(
 
       if (reqPath === '/api/sync/push' && method === 'POST') {
         const result = await pushPatterns();
+        invalidateReadCaches();
         sendJson(res, 200, {
           ok: true,
           result,
@@ -898,6 +1159,7 @@ export async function startWebServer(
           reviewText,
           exploitable,
         });
+        invalidateReadCaches(chain);
         const status = await getPatternSyncStatus();
         sendJson(res, 200, {
           ok: true,
@@ -950,6 +1212,7 @@ export async function startWebServer(
         }
         const analysis = requestContractAiAudit({ chain, contractAddr: contract, title, provider, model });
         enqueueContractAiAudit(analysis);
+        invalidateReadCaches(chain);
         sendJson(res, 200, {
           ok: true,
           analysis,
@@ -977,6 +1240,7 @@ export async function startWebServer(
         );
         const analysis = requestTokenAiAudit({ chain, tokenAddr: token, title, provider, model });
         enqueueTokenAiAudit(analysis);
+        invalidateReadCaches(chain);
         sendJson(res, 200, {
           ok: true,
           analysis,
@@ -1007,6 +1271,7 @@ export async function startWebServer(
           isSuccess: body.isSuccess == null ? null : Boolean(body.isSuccess),
           auditedAt: typeof body.audited_at === 'string' ? body.audited_at : null,
         });
+        invalidateReadCaches(chain);
 
         sendJson(res, 200, {
           ok: true,
@@ -1057,6 +1322,7 @@ export async function startWebServer(
           isSuccess: body.isSuccess == null ? null : Boolean(body.isSuccess),
           auditedAt: typeof body.audited_at === 'string' ? body.audited_at : null,
         });
+        invalidateReadCaches(chain);
 
         sendJson(res, 200, {
           ok: true,
@@ -1218,7 +1484,7 @@ export async function startWebServer(
 
         sendJson(res, 200, {
           ...latestRunMeta(run),
-          tokens: buildDashboardTokens(chain, run),
+          tokens: resolveDashboardTokens(chain, run),
         });
         return;
       }
@@ -1300,6 +1566,7 @@ export async function startWebServer(
           reviewText,
           exploitable,
         });
+        invalidateReadCaches(chain);
         sendJson(res, 200, {
           ok: true,
           token: saved,
@@ -1328,7 +1595,7 @@ export async function startWebServer(
           return;
         }
 
-        const detail = buildContractDetail(chain, run, contract);
+        const detail = resolveContractDetail(chain, run, contract);
         if (!detail) {
           sendJson(res, 404, { error: 'Contract not found in latest results' });
           return;

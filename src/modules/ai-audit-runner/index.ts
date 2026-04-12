@@ -23,6 +23,7 @@ const MUCH_SMALLER_ABS_DELTA = 300;
 const VERIFICATION_RETRY_ATTEMPTS = 3;
 const VERIFICATION_RETRY_BACKOFF_MS = 1_500;
 const VERIFICATION_CACHE_TTL_MS = 30 * 60 * 1000;
+const AUDIT_START_STAGGER_MS = 400;
 
 type QueuedAuditJob = BaseAiAuditRow;
 type AuditMode = ProviderAuditMode;
@@ -153,6 +154,8 @@ const activeJobTypes = new Map<string, 'contract' | 'token'>();
 const queue: QueuedAuditJob[] = [];
 const aiAuditListeners = new Set<(event: AiAuditEvent) => void | Promise<void>>();
 const verificationStatusCache = new Map<string, { expiresAt: number; status: VerificationStatus }>();
+let drainLoopRunning = false;
+let nextAuditStartAt = 0;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -824,22 +827,38 @@ async function executeAuditJob(job: QueuedAuditJob): Promise<void> {
 }
 
 async function drainQueue(): Promise<void> {
-  while (queue.length && activeSessions.size < maxConcurrentAudits) {
-    const job = queue.shift();
-    if (!job) continue;
-    queuedSessions.delete(job.requestSession);
-    if (activeSessions.has(job.requestSession)) continue;
-    activeSessions.add(job.requestSession);
-    activeJobTypes.set(job.requestSession, job.targetType);
-    void (async () => {
-      try {
-        await executeAuditJob(job);
-      } finally {
-        activeSessions.delete(job.requestSession);
-        activeJobTypes.delete(job.requestSession);
-        void drainQueue();
+  if (drainLoopRunning) return;
+  drainLoopRunning = true;
+  try {
+    while (queue.length && activeSessions.size < maxConcurrentAudits) {
+      const waitMs = Math.max(0, nextAuditStartAt - Date.now());
+      if (waitMs > 0) {
+        await sleep(waitMs);
       }
-    })();
+
+      const job = queue.shift();
+      if (!job) continue;
+      queuedSessions.delete(job.requestSession);
+      if (activeSessions.has(job.requestSession)) continue;
+
+      nextAuditStartAt = Date.now() + AUDIT_START_STAGGER_MS;
+      activeSessions.add(job.requestSession);
+      activeJobTypes.set(job.requestSession, job.targetType);
+      void (async () => {
+        try {
+          await executeAuditJob(job);
+        } finally {
+          activeSessions.delete(job.requestSession);
+          activeJobTypes.delete(job.requestSession);
+          void drainQueue();
+        }
+      })();
+    }
+  } finally {
+    drainLoopRunning = false;
+    if (queue.length && activeSessions.size < maxConcurrentAudits) {
+      void drainQueue();
+    }
   }
 }
 

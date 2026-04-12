@@ -12,6 +12,7 @@ import {
 import { getPatternSyncConfig } from '../../config.js';
 import { logger } from '../../utils/logger.js';
 import { selectorHash } from '../../utils/selector-pattern.js';
+import { getContractsRegistry, upsertContractsRegistryBatch } from '../../db/contracts.js';
 
 interface RemotePatternRow {
   hash: string;
@@ -175,6 +176,58 @@ export function saveSeenContractReview(input: {
     bytecodeSize: entry.bytecodeSize ?? 0,
   });
   return hash;
+}
+
+export function saveContractReview(input: {
+  chain: string;
+  address: string;
+  label: string;
+  reviewText?: string;
+  exploitable?: boolean;
+  targetKind?: string;
+}): { hash: string | null; persistedOnly: boolean } {
+  const targetAddress = String(input.address || '').trim().toLowerCase();
+  const chain = String(input.chain || '').trim().toLowerCase();
+  const targetKind = input.targetKind ?? 'auto';
+  const label = String(input.label || '').trim();
+  const reviewText = input.reviewText ?? '';
+  const exploitable = Boolean(input.exploitable);
+
+  const entry = findReviewTarget(chain, targetAddress, targetKind);
+  if (entry) {
+    const hash = saveSeenContractReview({
+      chain,
+      address: targetAddress,
+      label,
+      reviewText,
+      exploitable,
+      targetKind,
+    });
+    return { hash, persistedOnly: false };
+  }
+
+  const registry = getContractsRegistry(chain, [targetAddress]).get(targetAddress);
+  upsertContractsRegistryBatch(chain, [{
+    contractAddr: targetAddress,
+    linkage: registry?.linkage ?? null,
+    linkType: registry?.linkType ?? null,
+    label,
+    review: reviewText,
+    selectorHash: registry?.selectorHash ?? null,
+    isExploitable: exploitable,
+    portfolio: registry?.portfolio ?? '{}',
+    deployedAt: registry?.deployedAt ?? null,
+    isAutoAudit: registry?.isAutoAudit ?? false,
+    isManualAudit: true,
+    whitelistPatterns: registry?.whitelistPatterns ?? [],
+    selectors: registry?.selectors ?? [],
+    codeSize: registry?.codeSize ?? 0,
+  }]);
+
+  return {
+    hash: registry?.selectorHash ?? null,
+    persistedOnly: true,
+  };
 }
 
 export async function pullPatterns(): Promise<{ pulled: number; lastPullAt: string | null }> {

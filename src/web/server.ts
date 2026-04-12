@@ -54,7 +54,7 @@ import {
   pullPatterns,
   pushPatterns,
   queueSeenContractReviewTarget,
-  saveSeenContractReview,
+  saveContractReview,
   subscribePatternSyncEvents,
   startAutoPatternSyncLoop,
   verifyPatterns,
@@ -890,7 +890,7 @@ export async function startWebServer(
           return;
         }
 
-        const hash = saveSeenContractReview({
+        const result = saveContractReview({
           chain,
           address,
           targetKind,
@@ -901,7 +901,8 @@ export async function startWebServer(
         const status = await getPatternSyncStatus();
         sendJson(res, 200, {
           ok: true,
-          hash,
+          hash: result.hash,
+          persisted_only: result.persistedOnly,
           status,
         });
         broadcastNamedEvent('review-updated', {
@@ -912,12 +913,13 @@ export async function startWebServer(
           targetKind,
           label,
           exploitable,
-          hash,
+          hash: result.hash,
+          persistedOnly: result.persistedOnly,
           ts: new Date().toISOString(),
         });
         broadcastNamedEvent('pattern-sync', {
           kind: 'review-save',
-          result: { hash, targetKind, action: 'save' },
+          result: { hash: result.hash, targetKind, action: 'save', persistedOnly: result.persistedOnly },
           status,
           ts: new Date().toISOString(),
         });

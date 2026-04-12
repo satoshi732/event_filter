@@ -264,6 +264,23 @@
     }
   }
 
+  function tokenHasManualReview(row) {
+    return Boolean(
+      row?.is_manual_audit
+      || String(row?.review || '').trim(),
+    );
+  }
+
+  function tokenToneClass(row) {
+    if (row?.is_exploitable) {
+      return 'contract-row-tone-exploitable';
+    }
+    if (tokenHasManualReview(row)) {
+      return 'contract-row-tone-reviewed';
+    }
+    return '';
+  }
+
   function contractPatternGroupKey(row) {
     const state = contractVisualState(row);
     if (state === 'seen') {
@@ -449,6 +466,7 @@
     autoAuditSeveritySummary,
     auditResultDisplay,
     contractToneClass,
+    tokenToneClass,
     buildPatternSections,
     prepareDashboardTokenRows,
     prepareDashboardContractRows,

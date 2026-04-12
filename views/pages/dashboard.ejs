@@ -923,7 +923,7 @@
                 <tr v-if="!filteredTokens.length">
                   <td colspan="10" class="muted">No token data</td>
                 </tr>
-                <tr v-for="token in paginatedFilteredTokens" :key="token.token">
+                <tr v-for="token in paginatedFilteredTokens" :key="token.token" :class="tokenToneClass(token)">
                   <td>
                     <div class="address-inline">
                       <button class="link-btn mono" @click="openToken(token.token)">{{ token.is_native ? 'native' : token.token }}</button>

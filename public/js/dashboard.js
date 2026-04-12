@@ -52,6 +52,7 @@
     autoAuditSeveritySummary,
     auditResultDisplay,
     contractToneClass,
+    tokenToneClass,
     buildPatternSections,
     prepareDashboardTokenRows,
     prepareDashboardContractRows,

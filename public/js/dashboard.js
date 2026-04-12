@@ -3002,6 +3002,7 @@
         copyAddress,
         isCopiedAddress,
         contractToneClass,
+        tokenToneClass,
         toggleGroupCollapse,
         selectReviewTarget,
         syncContractReviewModalForSelectedTarget,

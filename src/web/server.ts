@@ -785,6 +785,7 @@ export async function startWebServer(
     broadcastNamedEvent('auto-analysis', status);
   });
   const unsubscribeAiAudit = subscribeAiAuditEvents((event) => {
+    invalidateReadCaches(event.chain);
     broadcastNamedEvent('ai-audit', event);
   });
   const unsubscribePatternSync = subscribePatternSyncEvents((event) => {

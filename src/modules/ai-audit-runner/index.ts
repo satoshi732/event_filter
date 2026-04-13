@@ -636,8 +636,9 @@ function renderResult(result: unknown): string {
 
 function extractSeverityCounts(result: unknown): { critical: number; high: number; medium: number } {
   const text = renderResult(result);
+  const normalizedText = text.replace(/[*_`]/g, '');
   const counts = { critical: 0, high: 0, medium: 0 };
-  for (const match of text.matchAll(/Severity:\s*`?\s*(CRITICAL|HIGH|MEDIUM)\s*`?/gi)) {
+  for (const match of normalizedText.matchAll(/Severity\s*:\s*(CRITICAL|HIGH|MEDIUM)\b/gi)) {
     const severity = String(match[1] || '').toLowerCase();
     if (severity === 'critical') counts.critical += 1;
     if (severity === 'high') counts.high += 1;

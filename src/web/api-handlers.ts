@@ -737,6 +737,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         { key: 'auto_analysis.require_contract_selectors', value: coerceBoolean(autoAnalysis.require_contract_selectors, true) ? '1' : '0' },
         { key: 'auto_analysis.skip_seen_contracts', value: coerceBoolean(autoAnalysis.skip_seen_contracts, true) ? '1' : '0' },
         { key: 'auto_analysis.one_per_contract_pattern', value: coerceBoolean(autoAnalysis.one_per_contract_pattern, true) ? '1' : '0' },
+        { key: 'auto_analysis.retry_failed_audits', value: coerceBoolean(autoAnalysis.retry_failed_audits, true) ? '1' : '0' },
         { key: 'auto_analysis.exclude_audited_contracts', value: coerceBoolean(autoAnalysis.exclude_audited_contracts, true) ? '1' : '0' },
         { key: 'auto_analysis.exclude_audited_tokens', value: coerceBoolean(autoAnalysis.exclude_audited_tokens, true) ? '1' : '0' },
         { key: 'web_security.https_enabled', value: httpsEnabled ? '1' : '0' },

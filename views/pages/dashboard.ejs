@@ -532,6 +532,13 @@
                     </div>
                   </label>
                   <label class="auto-rule-item">
+                    <input v-model="settings.runtime_settings.auto_analysis.retry_failed_audits" type="checkbox">
+                    <div class="auto-rule-copy">
+                      <strong>Retry failed auto audits</strong>
+                      <p>Let auto mode re-queue candidates whose last auto audit ended in a failed state.</p>
+                    </div>
+                  </label>
+                  <label class="auto-rule-item">
                     <input v-model="settings.runtime_settings.auto_analysis.exclude_audited_contracts" type="checkbox">
                     <div class="auto-rule-copy">
                       <strong>Skip already audited contracts</strong>

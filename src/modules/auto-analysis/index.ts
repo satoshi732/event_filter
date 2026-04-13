@@ -87,6 +87,23 @@ function groupKeyForContract(row: ContractRegistryRow): string {
   return `contract:${row.contractAddr}`;
 }
 
+function hasNonRetryableAudit(audit: { status?: unknown } | undefined): boolean {
+  const status = String(audit?.status || '').trim().toLowerCase();
+  return status === 'requested' || status === 'running' || status === 'completed';
+}
+
+function shouldTreatAuditAsHandled(
+  audit: { status?: unknown } | undefined,
+  retryFailedAudits: boolean,
+): boolean {
+  if (hasNonRetryableAudit(audit)) return true;
+  if (!retryFailedAudits) {
+    const status = String(audit?.status || '').trim().toLowerCase();
+    if (status === 'failed') return true;
+  }
+  return false;
+}
+
 function persistState(): void {
   persistAutoAnalysisState({
     enabled: state.enabled,
@@ -167,8 +184,12 @@ function selectEligibleContracts(chain: string, limit: number): ContractRegistry
       return b.codeSize - a.codeSize;
     });
     const groupAlreadyHandled = config.excludeAuditedContracts
-      ? rows.some((row) => row.isAutoAudit || row.isManualAudit || auditMap.has(row.contractAddr))
-      : rows.some((row) => auditMap.has(row.contractAddr));
+      ? rows.some((row) => (
+        row.isAutoAudit
+        || row.isManualAudit
+        || shouldTreatAuditAsHandled(auditMap.get(row.contractAddr), config.retryFailedAudits)
+      ))
+      : rows.some((row) => shouldTreatAuditAsHandled(auditMap.get(row.contractAddr), config.retryFailedAudits));
     if (groupAlreadyHandled) continue;
     const representative = rows[0];
     const plan = getContractAiAuditPlan(chain, representative.contractAddr);
@@ -193,7 +214,14 @@ function selectEligibleTokens(chain: string, limit: number) {
   return tokens
     .filter((row) => row.tokenCallsSync === true || !config.requireTokenSync)
     .filter((row) => Number.isFinite(Number(row.priceUsd)) && Number(row.priceUsd) >= config.tokenMinPriceUsd)
-    .filter((row) => !config.excludeAuditedTokens || (!row.isAutoAudited && !row.isManualAudited && !audits.has(row.token)))
+    .filter((row) => (
+      !config.excludeAuditedTokens
+      || (
+        !row.isAutoAudited
+        && !row.isManualAudited
+        && !shouldTreatAuditAsHandled(audits.get(row.token), config.retryFailedAudits)
+      )
+    ))
     .sort((a, b) => {
       const priceDelta = (Number(b.priceUsd) || -1) - (Number(a.priceUsd) || -1);
       if (priceDelta !== 0) return priceDelta > 0 ? 1 : -1;

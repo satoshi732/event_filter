@@ -74,6 +74,7 @@ export interface AppConfig {
     require_contract_selectors?: boolean;
     skip_seen_contracts?: boolean;
     one_per_contract_pattern?: boolean;
+    retry_failed_audits?: boolean;
     exclude_audited_contracts?: boolean;
     exclude_audited_tokens?: boolean;
   };
@@ -514,6 +515,9 @@ function seedRuntimeConfigIfNeeded(): void {
     appEntries.push({ key: 'auto_analysis.exclude_audited_contracts', value: '1' });
     appEntries.push({ key: 'auto_analysis.exclude_audited_tokens', value: '1' });
   }
+  if (getAppSetting('auto_analysis.retry_failed_audits') == null) {
+    appEntries.push({ key: 'auto_analysis.retry_failed_audits', value: '1' });
+  }
   if (getAppSetting('web_security.auth_enabled') == null) {
     const discoveredTls = discoverTlsPairFromCertsDir();
     appEntries.push({ key: 'web_security.https_enabled', value: discoveredTls ? '1' : '0' });
@@ -642,6 +646,7 @@ function loadRuntimeConfigFromDb(): RuntimeConfigCache {
       require_contract_selectors: parseBool(getAppSetting('auto_analysis.require_contract_selectors'), true),
       skip_seen_contracts: parseBool(getAppSetting('auto_analysis.skip_seen_contracts'), true),
       one_per_contract_pattern: parseBool(getAppSetting('auto_analysis.one_per_contract_pattern'), true),
+      retry_failed_audits: parseBool(getAppSetting('auto_analysis.retry_failed_audits'), true),
       exclude_audited_contracts: parseBool(getAppSetting('auto_analysis.exclude_audited_contracts'), true),
       exclude_audited_tokens: parseBool(getAppSetting('auto_analysis.exclude_audited_tokens'), true),
     },
@@ -815,6 +820,7 @@ export function getAutoAnalysisConfig(): {
   requireContractSelectors: boolean;
   skipSeenContracts: boolean;
   onePerContractPattern: boolean;
+  retryFailedAudits: boolean;
   excludeAuditedContracts: boolean;
   excludeAuditedTokens: boolean;
 } {
@@ -832,6 +838,7 @@ export function getAutoAnalysisConfig(): {
     requireContractSelectors: Boolean(raw.require_contract_selectors ?? true),
     skipSeenContracts: Boolean(raw.skip_seen_contracts ?? true),
     onePerContractPattern: Boolean(raw.one_per_contract_pattern ?? true),
+    retryFailedAudits: Boolean(raw.retry_failed_audits ?? true),
     excludeAuditedContracts: Boolean(raw.exclude_audited_contracts ?? true),
     excludeAuditedTokens: Boolean(raw.exclude_audited_tokens ?? true),
   };

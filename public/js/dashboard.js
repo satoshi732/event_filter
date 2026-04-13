@@ -322,6 +322,7 @@
             require_contract_selectors: true,
             skip_seen_contracts: true,
             one_per_contract_pattern: true,
+            retry_failed_audits: true,
             exclude_audited_contracts: true,
             exclude_audited_tokens: true,
           },

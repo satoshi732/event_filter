@@ -925,9 +925,10 @@ export function startAiAuditWorker(): void {
   workerStarted = true;
   const pending = listPendingAiAudits();
   if (pending.length) {
-    logger.info(`[ai-audit] Restoring ${pending.length} pending audit request(s)`);
+    logger.warn(
+      `[ai-audit] Found ${pending.length} unresolved audit request(s); leaving them untouched until explicitly updated`,
+    );
   }
-  for (const job of pending) enqueueAudit(job);
 }
 
 export function getAiAuditWorkerStatus(): {

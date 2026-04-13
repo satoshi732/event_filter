@@ -388,6 +388,14 @@
                     <span>Contract Share</span>
                     <strong>{{ settings.runtime_settings.auto_analysis.contract_share_percent || 0 }}%</strong>
                   </div>
+                  <div class="auto-telemetry-card">
+                    <span>Audit Provider</span>
+                    <strong>{{ settings.runtime_settings.auto_analysis.provider || '--' }}</strong>
+                  </div>
+                  <div class="auto-telemetry-card">
+                    <span>Audit Model</span>
+                    <strong>{{ settings.runtime_settings.auto_analysis.model || '--' }}</strong>
+                  </div>
                 </div>
               </div>
             </section>
@@ -420,6 +428,18 @@
                   <label class="stack-label">
                     <span>Contract Share (%)</span>
                     <input v-model.number="settings.runtime_settings.auto_analysis.contract_share_percent" type="number" min="0" max="100">
+                  </label>
+                  <label class="stack-label">
+                    <span>Auto Audit Provider</span>
+                    <select v-model="settings.runtime_settings.auto_analysis.provider">
+                      <option v-for="provider in autoAnalysisProviderOptions" :key="`auto-provider-${provider}`" :value="provider">{{ provider }}</option>
+                    </select>
+                  </label>
+                  <label class="stack-label">
+                    <span>Auto Audit Model</span>
+                    <select v-model="settings.runtime_settings.auto_analysis.model">
+                      <option v-for="model in autoAnalysisModelOptions" :key="`auto-model-${model}`" :value="model">{{ model }}</option>
+                    </select>
                   </label>
                 </div>
               </div>

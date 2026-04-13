@@ -66,6 +66,8 @@ export interface AppConfig {
     queue_capacity?: number;
     token_share_percent?: number;
     contract_share_percent?: number;
+    provider?: string;
+    model?: string;
     contract_min_tvl_usd?: number;
     token_min_price_usd?: number;
     require_token_sync?: boolean;
@@ -363,6 +365,55 @@ function defaultAiModels(): Array<{ provider: string; model: string; enabled: bo
     })));
 }
 
+function getAiAuditProviderOptionsFromRows(rows: AiAuditProviderRow[]): string[] {
+  const enabled = rows
+    .filter((row) => row.enabled)
+    .sort((a, b) => a.position - b.position || a.provider.localeCompare(b.provider))
+    .map((row) => row.provider);
+  return enabled.length ? enabled : Object.keys(DEFAULT_AI_AUDIT_SEED);
+}
+
+function normalizeAiAuditProviderFromRows(
+  provider: string | null | undefined,
+  rows: AiAuditProviderRow[],
+): string {
+  const normalized = String(provider || '').trim().toLowerCase();
+  const allowed = getAiAuditProviderOptionsFromRows(rows);
+  return allowed.includes(normalized)
+    ? normalized
+    : (allowed[0] || 'claude');
+}
+
+function getAiAuditModelOptionsFromRows(
+  provider: string | null | undefined,
+  providers: AiAuditProviderRow[],
+  models: AiAuditModelRow[],
+): string[] {
+  const normalizedProvider = normalizeAiAuditProviderFromRows(provider, providers);
+  const enabled = models
+    .filter((row) => row.provider === normalizedProvider && row.enabled)
+    .sort((a, b) => {
+      if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
+      return a.position - b.position || a.model.localeCompare(b.model);
+    })
+    .map((row) => row.model);
+  return enabled.length ? enabled : [...(DEFAULT_AI_AUDIT_SEED[normalizedProvider] ?? [])];
+}
+
+function normalizeAiAuditModelFromRows(
+  provider: string | null | undefined,
+  model: string | null | undefined,
+  providers: AiAuditProviderRow[],
+  models: AiAuditModelRow[],
+): string {
+  const normalizedProvider = normalizeAiAuditProviderFromRows(provider, providers);
+  const normalizedModel = String(model || '').trim();
+  const allowed = getAiAuditModelOptionsFromRows(normalizedProvider, providers, models);
+  return allowed.includes(normalizedModel)
+    ? normalizedModel
+    : (allowed[0] || '');
+}
+
 function seedRuntimeConfigIfNeeded(): void {
   if (seeded) return;
   seeded = true;
@@ -469,10 +520,6 @@ function seedRuntimeConfigIfNeeded(): void {
     appEntries.push({ key: 'web_security.tls_cert_path', value: discoveredTls?.certPath ?? '' });
     appEntries.push({ key: 'web_security.tls_key_path', value: discoveredTls?.keyPath ?? '' });
   }
-  if (appEntries.length) {
-    setManyAppSettings(appEntries);
-  }
-
   if (!listAiAuditProviders().length) {
     replaceAiAuditProviders(defaultAiProviders());
   }
@@ -484,6 +531,25 @@ function seedRuntimeConfigIfNeeded(): void {
       isDefault: row.is_default,
       position: row.position,
     })));
+  }
+
+  const seededProviders = listAiAuditProviders();
+  const seededModels = listAiAuditModels();
+  if (getAppSetting('auto_analysis.provider') == null) {
+    appEntries.push({
+      key: 'auto_analysis.provider',
+      value: normalizeAiAuditProviderFromRows(null, seededProviders),
+    });
+  }
+  if (getAppSetting('auto_analysis.model') == null) {
+    const provider = normalizeAiAuditProviderFromRows(getAppSetting('auto_analysis.provider'), seededProviders);
+    appEntries.push({
+      key: 'auto_analysis.model',
+      value: normalizeAiAuditModelFromRows(provider, null, seededProviders, seededModels),
+    });
+  }
+  if (appEntries.length) {
+    setManyAppSettings(appEntries);
   }
 }
 
@@ -510,6 +576,13 @@ function loadRuntimeConfigFromDb(): RuntimeConfigCache {
   const chainRows = listChainSettings();
   const aiProviders = listAiAuditProviders();
   const aiModels = listAiAuditModels();
+  const autoAnalysisProvider = normalizeAiAuditProviderFromRows(getAppSetting('auto_analysis.provider'), aiProviders);
+  const autoAnalysisModel = normalizeAiAuditModelFromRows(
+    autoAnalysisProvider,
+    getAppSetting('auto_analysis.model'),
+    aiProviders,
+    aiModels,
+  );
   const chainConfigs = buildChainConfigs(chainRows);
   const monitorChains = parseStringList(getAppSetting('monitor_chains'), ['ethereum'])
     .map((value) => value.toLowerCase())
@@ -561,6 +634,8 @@ function loadRuntimeConfigFromDb(): RuntimeConfigCache {
       queue_capacity: parsePositiveInt(getAppSetting('auto_analysis.queue_capacity'), 10),
       token_share_percent: parsePositiveInt(getAppSetting('auto_analysis.token_share_percent'), 40),
       contract_share_percent: parsePositiveInt(getAppSetting('auto_analysis.contract_share_percent'), 60),
+      provider: autoAnalysisProvider,
+      model: autoAnalysisModel,
       contract_min_tvl_usd: parsePositiveFloat(getAppSetting('auto_analysis.contract_min_tvl_usd'), 10_000),
       token_min_price_usd: parsePositiveFloat(getAppSetting('auto_analysis.token_min_price_usd'), 0.001),
       require_token_sync: parseBool(getAppSetting('auto_analysis.require_token_sync'), true),
@@ -732,6 +807,8 @@ export function getAutoAnalysisConfig(): {
   queueCapacity: number;
   tokenSharePercent: number;
   contractSharePercent: number;
+  provider: string;
+  model: string;
   contractMinTvlUsd: number;
   tokenMinPriceUsd: number;
   requireTokenSync: boolean;
@@ -742,10 +819,13 @@ export function getAutoAnalysisConfig(): {
   excludeAuditedTokens: boolean;
 } {
   const raw = ensureRuntimeCache().appConfig.auto_analysis ?? {};
+  const provider = normalizeAiAuditProvider(raw.provider);
   return {
     queueCapacity: parsePositiveInt(raw.queue_capacity, 10),
     tokenSharePercent: parsePositiveInt(raw.token_share_percent, 40),
     contractSharePercent: parsePositiveInt(raw.contract_share_percent, 60),
+    provider,
+    model: normalizeAiAuditModel(provider, raw.model),
     contractMinTvlUsd: parsePositiveFloat(raw.contract_min_tvl_usd, 10_000),
     tokenMinPriceUsd: parsePositiveFloat(raw.token_min_price_usd, 0.001),
     requireTokenSync: Boolean(raw.require_token_sync ?? true),

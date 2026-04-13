@@ -1712,6 +1712,14 @@ export async function startWebServer(
           { key: 'auto_analysis.queue_capacity', value: String(coercePositiveInt(autoAnalysis.queue_capacity, 10)) },
           { key: 'auto_analysis.token_share_percent', value: String(coercePositiveInt(autoAnalysis.token_share_percent, 40)) },
           { key: 'auto_analysis.contract_share_percent', value: String(coercePositiveInt(autoAnalysis.contract_share_percent, 60)) },
+          { key: 'auto_analysis.provider', value: normalizeAiAuditProvider(String(autoAnalysis.provider || '').trim()) },
+          {
+            key: 'auto_analysis.model',
+            value: normalizeAiAuditModel(
+              normalizeAiAuditProvider(String(autoAnalysis.provider || '').trim()),
+              String(autoAnalysis.model || '').trim(),
+            ),
+          },
           { key: 'auto_analysis.contract_min_tvl_usd', value: String(Number.isFinite(Number(autoAnalysis.contract_min_tvl_usd)) ? Number(autoAnalysis.contract_min_tvl_usd) : 10000) },
           { key: 'auto_analysis.token_min_price_usd', value: String(Number.isFinite(Number(autoAnalysis.token_min_price_usd)) ? Number(autoAnalysis.token_min_price_usd) : 0.001) },
           { key: 'auto_analysis.require_token_sync', value: coerceBoolean(autoAnalysis.require_token_sync, true) ? '1' : '0' },

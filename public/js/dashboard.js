@@ -317,6 +317,8 @@
             queue_capacity: 10,
             token_share_percent: 40,
             contract_share_percent: 60,
+            provider: 'claude',
+            model: DEFAULT_AI_PROVIDER_MODELS.claude[0],
             contract_min_tvl_usd: 10000,
             token_min_price_usd: 0.001,
             require_token_sync: true,
@@ -661,6 +663,8 @@
       const aiProviderOptions = computed(() => getConfiguredAiProviders());
 
       const aiModelOptions = computed(() => getConfiguredAiModels(state.analysisForm.provider));
+      const autoAnalysisProviderOptions = computed(() => getConfiguredAiProviders());
+      const autoAnalysisModelOptions = computed(() => getConfiguredAiModels(state.settings.runtime_settings.auto_analysis.provider));
 
       const runMetaText = computed(() => {
         const active = state.latestRuns.find((row) => row.chain === state.selectedChain);
@@ -1775,6 +1779,11 @@
               ? data.runtime_settings.rpc_keys.join('\n')
               : String(data.runtime_settings?.rpc_keys || ''),
           };
+          state.settings.runtime_settings.auto_analysis.provider = normalizeAiProvider(state.settings.runtime_settings.auto_analysis.provider);
+          state.settings.runtime_settings.auto_analysis.model = normalizeAiModel(
+            state.settings.runtime_settings.auto_analysis.provider,
+            state.settings.runtime_settings.auto_analysis.model,
+          );
           state.settings.chain_configs = data.chain_configs || [];
           state.settings.ai_providers = data.ai_providers || [];
           state.settings.ai_models = data.ai_models || [];
@@ -1802,6 +1811,11 @@
               ? data.runtime_settings.rpc_keys.join('\n')
               : String(data.runtime_settings?.rpc_keys || ''),
           };
+          state.settings.runtime_settings.auto_analysis.provider = normalizeAiProvider(state.settings.runtime_settings.auto_analysis.provider);
+          state.settings.runtime_settings.auto_analysis.model = normalizeAiModel(
+            state.settings.runtime_settings.auto_analysis.provider,
+            state.settings.runtime_settings.auto_analysis.model,
+          );
           state.settings.chain_configs = data.chain_configs || [];
           state.settings.ai_providers = data.ai_providers || [];
           state.settings.ai_models = data.ai_models || [];
@@ -2637,6 +2651,11 @@
           .filter((row) => row.name && row.hex_pattern);
 
         try {
+          state.settings.runtime_settings.auto_analysis.provider = normalizeAiProvider(state.settings.runtime_settings.auto_analysis.provider);
+          state.settings.runtime_settings.auto_analysis.model = normalizeAiModel(
+            state.settings.runtime_settings.auto_analysis.provider,
+            state.settings.runtime_settings.auto_analysis.model,
+          );
           const data = await apiFetch('/api/settings', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -2659,6 +2678,11 @@
               ? data.settings.runtime_settings.rpc_keys.join('\n')
               : String(data.settings?.runtime_settings?.rpc_keys || state.settings.runtime_settings.rpc_keys || ''),
           };
+          state.settings.runtime_settings.auto_analysis.provider = normalizeAiProvider(state.settings.runtime_settings.auto_analysis.provider);
+          state.settings.runtime_settings.auto_analysis.model = normalizeAiModel(
+            state.settings.runtime_settings.auto_analysis.provider,
+            state.settings.runtime_settings.auto_analysis.model,
+          );
           state.settings.chain_configs = data.settings?.chain_configs || state.settings.chain_configs;
           state.settings.ai_providers = data.settings?.ai_providers || aiProviders;
           state.settings.ai_models = data.settings?.ai_models || aiModels;
@@ -2873,6 +2897,25 @@
         { immediate: true },
       );
 
+      watch(
+        () => state.settings.runtime_settings.auto_analysis.provider,
+        (provider) => {
+          const normalizedProvider = normalizeAiProvider(provider);
+          if (state.settings.runtime_settings.auto_analysis.provider !== normalizedProvider) {
+            state.settings.runtime_settings.auto_analysis.provider = normalizedProvider;
+            return;
+          }
+          const normalizedModel = normalizeAiModel(
+            normalizedProvider,
+            state.settings.runtime_settings.auto_analysis.model,
+          );
+          if (state.settings.runtime_settings.auto_analysis.model !== normalizedModel) {
+            state.settings.runtime_settings.auto_analysis.model = normalizedModel;
+          }
+        },
+        { immediate: true },
+      );
+
       return {
         chains: computed(() => state.chains),
         selectedChain: computed({
@@ -3040,6 +3083,8 @@
         logout,
         aiProviderOptions,
         aiModelOptions,
+        autoAnalysisProviderOptions,
+        autoAnalysisModelOptions,
       };
     },
   });

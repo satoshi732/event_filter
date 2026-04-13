@@ -231,6 +231,8 @@ async function fillAuditPool(chain: string): Promise<number> {
       chain,
       contractAddr: candidate.contractAddr,
       title: 'AI Auto Audit',
+      provider: config.provider,
+      model: config.model,
     });
     enqueueContractAiAudit(row);
     queuedContracts += 1;
@@ -241,6 +243,8 @@ async function fillAuditPool(chain: string): Promise<number> {
       chain,
       tokenAddr: candidate.token,
       title: 'AI Auto Audit',
+      provider: config.provider,
+      model: config.model,
     });
     enqueueTokenAiAudit(row);
     queuedTokens += 1;

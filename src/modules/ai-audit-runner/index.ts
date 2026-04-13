@@ -11,6 +11,7 @@ import {
   listPendingAiAudits,
   saveContractAiAuditResult,
   saveTokenAiAuditResult,
+  updateAiAuditLifecycleStatus,
 } from '../../db.js';
 import { getAiAuditBackendConfig } from '../../config.js';
 import { logger } from '../../utils/logger.js';
@@ -23,6 +24,7 @@ const MUCH_SMALLER_ABS_DELTA = 300;
 const VERIFICATION_RETRY_ATTEMPTS = 3;
 const VERIFICATION_RETRY_BACKOFF_MS = 1_500;
 const VERIFICATION_CACHE_TTL_MS = 30 * 60 * 1000;
+const MAX_VERIFICATION_CACHE_ENTRIES = 512;
 const AUDIT_START_STAGGER_MS = 400;
 
 type QueuedAuditJob = BaseAiAuditRow;
@@ -178,10 +180,17 @@ function getCachedVerificationStatus(chain: string, address: string): Verificati
 }
 
 function setCachedVerificationStatus(chain: string, address: string, status: VerificationStatus): VerificationStatus {
-  verificationStatusCache.set(verificationCacheKey(chain, address), {
+  const key = verificationCacheKey(chain, address);
+  if (verificationStatusCache.has(key)) verificationStatusCache.delete(key);
+  verificationStatusCache.set(key, {
     expiresAt: Date.now() + VERIFICATION_CACHE_TTL_MS,
     status,
   });
+  while (verificationStatusCache.size > MAX_VERIFICATION_CACHE_ENTRIES) {
+    const oldestKey = verificationStatusCache.keys().next().value;
+    if (oldestKey == null) break;
+    verificationStatusCache.delete(oldestKey);
+  }
   return status;
 }
 
@@ -810,6 +819,10 @@ async function executeAuditJob(job: QueuedAuditJob): Promise<void> {
   }
 
   logger.info(`[ai-audit] Starting ${job.targetType} audit ${job.chain}:${job.targetAddr} (${mode}) via ${job.provider}/${job.model}`);
+  updateAiAuditLifecycleStatus({
+    requestSession: job.requestSession,
+    status: 'running',
+  });
   publishAiAuditEvent(job, {
     kind: 'started',
     status: 'running',

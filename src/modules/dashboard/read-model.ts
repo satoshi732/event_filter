@@ -8,6 +8,7 @@ import {
   normalizeAiAuditModel,
   normalizeAiAuditProvider,
 } from '../../config.js';
+import { deriveAutoAuditSummaryStatus } from '../../db/audit-state.js';
 import { PipelineRunResult, TokenResult, TokenContractResult, TokenContractGroup, TokenCounterpartyFlow } from '../../pipeline.js';
 import {
   ContractAiAuditRow,
@@ -91,19 +92,6 @@ export interface DashboardContractSummary {
   whitelist_patterns: string[];
 }
 
-function deriveAutoAuditStatus(
-  registry: { isAutoAudit?: boolean } | { isAutoAudited?: boolean } | undefined,
-  audit: ContractAiAuditRow | TokenAiAuditRow | undefined,
-): 'yes' | 'no' | 'processing' | 'failed' {
-  if (audit?.isSuccess === false) return 'failed';
-  if (audit?.auditedAt == null && audit) return 'processing';
-  if (audit?.isSuccess === true) return 'yes';
-  const autoAudit = (registry as { isAutoAudit?: boolean } | undefined)?.isAutoAudit;
-  const autoAudited = (registry as { isAutoAudited?: boolean } | undefined)?.isAutoAudited;
-  if (autoAudit || autoAudited) return 'yes';
-  return 'no';
-}
-
 export function latestRunMeta(run: PipelineRunResult): LatestRunMeta {
   return {
     chain: run.chain,
@@ -125,7 +113,7 @@ export function tokenSummary(token: TokenResult, audit?: TokenAiAuditRow | null)
     token_price_usd: token.token_price_usd,
     token_created_at: token.token_created_at,
     token_calls_sync: token.token_calls_sync,
-    auto_audit_status: deriveAutoAuditStatus({ isAutoAudited: token.is_auto_audit }, audit ?? undefined),
+    auto_audit_status: deriveAutoAuditSummaryStatus({ isAutoAudited: token.is_auto_audit }, audit ?? undefined),
     auto_audit_critical: audit?.critical ?? null,
     auto_audit_high: audit?.high ?? null,
     auto_audit_medium: audit?.medium ?? null,
@@ -576,7 +564,9 @@ function applyLiveReviewsToToken(
     const seenLabel = selectorHash ? liveSeenLabelByHash.get(selectorHash) : undefined;
     const nextContract = {
       ...contract,
+      label: registry?.label || contract.seen_label || '',
       selector_hash: selectorHash,
+      deployed_at: registry?.deployedAt ?? contract.created_at ?? null,
       selectors: registry?.selectors ?? contract.selectors ?? [],
       whitelist_patterns: registry?.whitelistPatterns?.length
         ? registry.whitelistPatterns
@@ -587,7 +577,7 @@ function applyLiveReviewsToToken(
       is_exploitable: Boolean(registry?.isExploitable) || reviews.some((item) => item.exploitable),
       is_auto_audit: registry?.isAutoAudit ?? contract.is_auto_audit ?? false,
       is_manual_audit: registry?.isManualAudit ?? contract.is_manual_audit ?? false,
-      auto_audit_status: deriveAutoAuditStatus(registry, autoAnalysis),
+      auto_audit_status: deriveAutoAuditSummaryStatus(registry, autoAnalysis),
       auto_audit_critical: autoAnalysis?.critical ?? null,
       auto_audit_high: autoAnalysis?.high ?? null,
       auto_audit_medium: autoAnalysis?.medium ?? null,
@@ -755,7 +745,7 @@ export function buildDashboardContracts(chain: string, run: PipelineRunResult): 
       portfolio_usd: resolved.portfolio_usd,
       patterns: resolved.whitelist_patterns,
       deployed_at: resolved.deployed_at,
-      auto_audit_status: deriveAutoAuditStatus(registry, autoAnalysis),
+      auto_audit_status: deriveAutoAuditSummaryStatus(registry, autoAnalysis),
       auto_audit_critical: autoAnalysis?.critical ?? null,
       auto_audit_high: autoAnalysis?.high ?? null,
       auto_audit_medium: autoAnalysis?.medium ?? null,
@@ -925,16 +915,14 @@ export function buildContractDetail(chain: string, run: PipelineRunResult, contr
       title: autoAnalysis.title,
       provider: normalizeAiAuditProvider(autoAnalysis.provider),
       model: normalizeAiAuditModel(autoAnalysis.provider, autoAnalysis.model),
-      status: autoAnalysis.auditedAt
-        ? (autoAnalysis.isSuccess === false ? 'failed' : 'completed')
-        : 'requested',
+      status: autoAnalysis.status,
       requested_at: autoAnalysis.requestedAt,
       completed_at: autoAnalysis.auditedAt,
       critical: autoAnalysis.critical,
       high: autoAnalysis.high,
       medium: autoAnalysis.medium,
       report_path: autoAnalysis.resultPath,
-      error: autoAnalysis.isSuccess === false ? 'audit failed' : null,
+      error: autoAnalysis.status === 'failed' ? 'audit failed' : null,
     } : {
       request_session: null,
       title: 'AI Auto Audit',

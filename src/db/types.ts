@@ -198,6 +198,7 @@ export interface BaseAiAuditRow {
   chain: string;
   targetType: AiAuditTargetType;
   targetAddr: string;
+  status: 'requested' | 'running' | 'completed' | 'failed';
   title: string;
   provider: string;
   model: string;

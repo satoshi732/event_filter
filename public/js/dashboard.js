@@ -30,6 +30,14 @@
   const AUTH_ENABLED = document.body.dataset.authEnabled === '1';
   const CURRENT_USER = document.body.dataset.currentUser || '';
   const shared = window.EventFilterDashboardShared || {};
+  const runtime = window.EventFilterDashboardRuntime || {};
+  const scrollSyncRuntime = window.EventFilterDashboardScrollSync || {};
+  const loaderRuntime = window.EventFilterDashboardLoaders || {};
+  const actionRuntime = window.EventFilterDashboardActions || {};
+  const modalRuntime = window.EventFilterDashboardModals || {};
+  const routingRuntime = window.EventFilterDashboardRouting || {};
+  const tableStateRuntime = window.EventFilterDashboardTableState || {};
+  const viewStateRuntime = window.EventFilterDashboardViewState || {};
   const {
     toBigIntSafe,
     compareString,
@@ -59,49 +67,19 @@
     prepareTokenDetail,
     prepareContractDetail,
   } = shared;
-
-  function toRouteQueryObject(value) {
-    if (!value) return {};
-    if (typeof value === 'string') {
-      const params = new URLSearchParams(value.startsWith('?') ? value.slice(1) : value);
-      const result = {};
-      params.forEach((entry, key) => {
-        result[key] = entry;
-      });
-      return result;
-    }
-    return value;
-  }
-
-  function routeStorageKey(routeLike) {
-    const path = String(routeLike?.path || routeLike?.name || window.location.pathname || '/');
-    const queryObject = toRouteQueryObject(routeLike?.query || '');
-    const parts = Object.entries(queryObject)
-      .filter(([, value]) => value != null && value !== '')
-      .sort(([left], [right]) => compareString(left, right))
-      .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
-    return parts.length ? `${path}?${parts.join('&')}` : path;
-  }
-
-  function currentRelativeRoute() {
-    return routeStorageKey(router?.currentRoute?.value || { path: window.location.pathname, query: window.location.search });
-  }
-
-  function rememberCurrentRoute() {
-    try {
-      window.sessionStorage.setItem(PREV_ROUTE_STORAGE_KEY, currentRelativeRoute());
-    } catch {}
-  }
-
-  function rememberCurrentRouteScroll() {
-    try {
-      window.sessionStorage.setItem(
-        PREV_ROUTE_SCROLL_STORAGE_KEY,
-        String(window.scrollY || window.pageYOffset || 0),
-      );
-    } catch {}
-  }
-
+  const {
+    setBoundedMapEntry,
+    setTimedCacheEntry,
+    getFreshCacheEntry,
+    createToastController,
+  } = runtime;
+  const { createDashboardScrollSync } = scrollSyncRuntime;
+  const { createDashboardLoaders } = loaderRuntime;
+  const { createDashboardActions } = actionRuntime;
+  const { createDashboardModals } = modalRuntime;
+  const { createDashboardRouting } = routingRuntime;
+  const { createDashboardTableState } = tableStateRuntime;
+  const { installDashboardViewState } = viewStateRuntime;
 
   async function apiFetch(url, options) {
     const res = await fetch(url, options);
@@ -130,6 +108,20 @@
     tokenRelatedContracts: 30,
   };
   const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
+  const MAX_VIEW_CACHE_ENTRIES = {
+    dashboardContracts: 48,
+    dashboardTokens: 48,
+    tokenDetail: 32,
+    contractDetail: 48,
+    recentRunRefreshes: 16,
+  };
+  const VIEW_CACHE_TTL_MS = {
+    dashboardContracts: 20_000,
+    dashboardTokens: 20_000,
+    tokenDetail: 45_000,
+    contractDetail: 45_000,
+    settings: 30_000,
+  };
   const DEFAULT_AI_PROVIDER_MODELS = {
     claude: ['claude-sonnet', 'claude-opus'],
     codex: ['gpt-5-codex', 'gpt-5-codex-mini'],
@@ -257,6 +249,11 @@
           String(storedFilters.contractLinkType ?? query.get('cl') ?? ''),
           'all',
           ['all', 'plain', 'proxy', 'eip7702'],
+        ),
+        tokenRelatedSeen: routeValueOrDefault(
+          String(storedFilters.tokenRelatedSeen ?? ''),
+          'all',
+          ['all', 'seen', 'unseen'],
         ),
       },
       collapsedGroups: {
@@ -414,6 +411,7 @@
         count: 0,
         label: '',
       },
+      notifications: [],
     });
     return { state };
   });
@@ -431,6 +429,13 @@
       };
       const inFlightLoads = new Map();
       const recentRunRefreshes = new Map();
+      const {
+        dismissNotification,
+        pushNotification,
+      } = createToastController(state.notifications, {
+        maxVisible: 4,
+        defaultDurationMs: 3600,
+      });
 
       function assignDashboardContractsPayload(payload) {
         state.dashboard.run = payload.run || null;
@@ -454,6 +459,35 @@
         state.prepared.contractDetail = payload.preparedContractDetail || prepareContractDetail(payload.contract);
       }
 
+      function applySettingsPayload(data) {
+        if (!data) return;
+        state.settings.runtime_settings = {
+          ...state.settings.runtime_settings,
+          ...(data.runtime_settings || {}),
+          chainbase_keys: Array.isArray(data.runtime_settings?.chainbase_keys)
+            ? data.runtime_settings.chainbase_keys.join('\n')
+            : String(data.runtime_settings?.chainbase_keys || ''),
+          rpc_keys: Array.isArray(data.runtime_settings?.rpc_keys)
+            ? data.runtime_settings.rpc_keys.join('\n')
+            : String(data.runtime_settings?.rpc_keys || ''),
+        };
+        state.settings.runtime_settings.auto_analysis.provider = normalizeAiProvider(state.settings.runtime_settings.auto_analysis.provider);
+        state.settings.runtime_settings.auto_analysis.model = normalizeAiModel(
+          state.settings.runtime_settings.auto_analysis.provider,
+          state.settings.runtime_settings.auto_analysis.model,
+        );
+        state.settings.chain_configs = data.chain_configs || [];
+        state.settings.ai_providers = data.ai_providers || [];
+        state.settings.ai_models = data.ai_models || [];
+        state.settings.whitelist_patterns = data.whitelist_patterns || [];
+        state.aiConfig.providers = data.ai_providers || [];
+        state.aiConfig.models = data.ai_models || [];
+        state.aiConfig.default_provider = data.ai_providers?.find?.((row) => row.isDefault)?.provider || state.aiConfig.default_provider;
+        state.analysisForm.provider = normalizeAiProvider(state.analysisForm.provider);
+        state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, state.analysisForm.model);
+        if (state.contractDetail) hydrateReviewForm();
+      }
+
       function runSharedLoad(key, task) {
         const existing = inFlightLoads.get(key);
         if (existing) return existing;
@@ -472,7 +506,12 @@
         const normalizedChain = chainCacheKey(chain);
         const normalizedKey = String(refreshKey || '').trim();
         if (!normalizedChain || !normalizedKey) return;
-        recentRunRefreshes.set(normalizedChain, normalizedKey);
+        setBoundedMapEntry(
+          recentRunRefreshes,
+          normalizedChain,
+          normalizedKey,
+          MAX_VIEW_CACHE_ENTRIES.recentRunRefreshes,
+        );
       }
 
       function hasRecentRunRefresh(chain, refreshKey) {
@@ -482,13 +521,9 @@
         return recentRunRefreshes.get(normalizedChain) === normalizedKey;
       }
 
+      let hydrateReviewForm = () => {};
+      let hydrateTokenReviewForm = () => {};
       let copiedAddressTimer = null;
-      let stateEventSource = null;
-      let stateStreamReadyPromise = null;
-      let resolveStateStreamReady = null;
-      let stateStreamReady = false;
-      let pendingExplicitRestoreKey = '';
-      let pendingExplicitRestorePosition = 0;
       let collectionReloadTimer = null;
       const storedSorts = readJsonStorage(window.localStorage, SORT_STORAGE_KEY, {});
       Object.entries(storedSorts || {}).forEach(([tableId, sortState]) => {
@@ -622,6 +657,63 @@
         return 'dashboard';
       });
 
+      const tableState = createDashboardTableState({
+        state,
+        currentView,
+        TABLE_PAGE_SIZE,
+        PAGE_SIZE_OPTIONS,
+        sortStorageKey: SORT_STORAGE_KEY,
+        persistStoredPageSizes,
+        writeJsonStorage,
+        scheduleCollectionReload,
+        getTokenRelatedContractCount: () => sortedTokenContracts.value.length,
+      });
+
+      const {
+        getTableSort,
+        getTablePage,
+        toggleTableSort,
+        sortIndicator,
+        isActiveSort,
+        getTablePageSize,
+        paginateRows,
+        resetTablePage,
+        setTablePageSize,
+        getTablePaginationMeta,
+        canMoveTablePage,
+        moveTablePage,
+        goToTablePage,
+        getTablePageButtons,
+      } = tableState;
+
+      const scrollSync = createDashboardScrollSync({
+        router,
+        nextTick,
+        state,
+        currentView,
+        compareString,
+        readJsonStorage,
+        writeJsonStorage,
+        previousRouteStorageKey: PREV_ROUTE_STORAGE_KEY,
+        previousRouteScrollStorageKey: PREV_ROUTE_SCROLL_STORAGE_KEY,
+        scrollStorageKey: SCROLL_STORAGE_KEY,
+      });
+
+      const {
+        currentRelativeRoute,
+        rememberCurrentRouteContext,
+        persistCurrentScroll,
+        persistScrollForRoute,
+        restoreCurrentScroll,
+        restoreScrollPosition,
+        dashboardUrlParams,
+        updateUrl,
+        syncDashboardUrlState,
+        syncTokenUrlState,
+        consumePendingRestoreState,
+        goBackToPrevious,
+      } = scrollSync;
+
       function getConfiguredAiProviders() {
         const sourceProviders = (state.aiConfig.providers?.length ? state.aiConfig.providers : state.settings.ai_providers) || [];
         const configured = sourceProviders
@@ -720,155 +812,8 @@
         return 'ok';
       });
 
-      function getTableSort(tableId) {
-        return state.tableSorts[tableId] || { key: '', dir: 'asc' };
-      }
-
-      function persistTableSorts() {
-        writeJsonStorage(window.localStorage, SORT_STORAGE_KEY, state.tableSorts);
-      }
-
       function persistCollapsedGroups() {
         persistStoredCollapsedGroups(state.collapsedGroups);
-      }
-
-      function toggleTableSort(tableId, key) {
-        const current = getTableSort(tableId);
-        state.tableSorts[tableId] = {
-          key,
-          dir: current.key === key && current.dir === 'asc' ? 'desc' : 'asc',
-        };
-        if (Object.prototype.hasOwnProperty.call(state.tablePages, tableId)) {
-          state.tablePages[tableId] = 1;
-        }
-        persistTableSorts();
-      }
-
-      function sortIndicator(tableId, key) {
-        const current = getTableSort(tableId);
-        if (current.key !== key) return '';
-        return current.dir === 'asc' ? '▲' : '▼';
-      }
-
-      function isActiveSort(tableId, key) {
-        return getTableSort(tableId).key === key;
-      }
-
-      function getTablePageSize(tableId) {
-        return Math.max(1, Number(state.tablePageSizes?.[tableId] || TABLE_PAGE_SIZE[tableId] || 25));
-      }
-
-      function getTablePage(tableId) {
-        return Math.max(1, Number(state.tablePages?.[tableId] || 1));
-      }
-
-      function getTableRowCount(tableId) {
-        switch (tableId) {
-          case 'contractOverview':
-            return Number(state.listMeta.contractOverview?.totalRows || 0);
-          case 'tokenDirectory':
-            return Number(state.listMeta.tokenDirectory?.totalRows || 0);
-          case 'tokenRelatedContracts':
-            return sortedTokenContracts.value.length;
-          default:
-            return 0;
-        }
-      }
-
-      function getTableTotalPages(tableId, totalRowsOverride) {
-        const totalRows = Number(
-          totalRowsOverride == null ? getTableRowCount(tableId) : totalRowsOverride,
-        ) || 0;
-        return Math.max(1, Math.ceil(totalRows / getTablePageSize(tableId)));
-      }
-
-      function setTablePage(tableId, page) {
-        if (!Object.prototype.hasOwnProperty.call(state.tablePages, tableId)) return;
-        const totalPages = getTableTotalPages(tableId);
-        state.tablePages[tableId] = Math.max(1, Math.min(totalPages, Math.floor(Number(page) || 1)));
-      }
-
-      function resetTablePage(tableId) {
-        if (!Object.prototype.hasOwnProperty.call(state.tablePages, tableId)) return;
-        state.tablePages[tableId] = 1;
-      }
-
-      function setTablePageSize(tableId, size) {
-        if (!Object.prototype.hasOwnProperty.call(state.tablePageSizes, tableId)) return;
-        const normalizedSize = PAGE_SIZE_OPTIONS.includes(Number(size))
-          ? Number(size)
-          : (TABLE_PAGE_SIZE[tableId] || 25);
-        if (getTablePageSize(tableId) === normalizedSize) return;
-        state.tablePageSizes[tableId] = normalizedSize;
-        resetTablePage(tableId);
-        persistStoredPageSizes(state.tablePageSizes);
-        if (tableId === 'contractOverview' && currentView.value === 'dashboard' && state.dashboardTab === 'tokens') {
-          scheduleCollectionReload('contracts');
-        }
-        if (tableId === 'tokenDirectory' && currentView.value === 'token') {
-          scheduleCollectionReload('tokens');
-        }
-      }
-
-      function paginateRows(rows, tableId) {
-        const list = Array.isArray(rows) ? rows : [];
-        const totalPages = getTableTotalPages(tableId, list.length);
-        const page = Math.max(1, Math.min(getTablePage(tableId), totalPages));
-        if (page !== getTablePage(tableId) && Object.prototype.hasOwnProperty.call(state.tablePages, tableId)) {
-          state.tablePages[tableId] = page;
-        }
-        const pageSize = getTablePageSize(tableId);
-        const start = (page - 1) * pageSize;
-        return list.slice(start, start + pageSize);
-      }
-
-      function getTablePaginationMeta(tableId, totalRowsOverride) {
-        const totalRows = Number(
-          totalRowsOverride == null ? getTableRowCount(tableId) : totalRowsOverride,
-        ) || 0;
-        const totalPages = getTableTotalPages(tableId, totalRows);
-        const page = Math.max(1, Math.min(getTablePage(tableId), totalPages));
-        const pageSize = getTablePageSize(tableId);
-        const start = totalRows ? ((page - 1) * pageSize) + 1 : 0;
-        const end = totalRows ? Math.min(totalRows, page * pageSize) : 0;
-        return { page, totalPages, totalRows, start, end };
-      }
-
-      function canMoveTablePage(tableId, direction) {
-        const meta = getTablePaginationMeta(tableId);
-        return direction < 0 ? meta.page > 1 : meta.page < meta.totalPages;
-      }
-
-      function moveTablePage(tableId, direction) {
-        setTablePage(tableId, getTablePage(tableId) + direction);
-      }
-
-      function goToTablePage(tableId, page) {
-        setTablePage(tableId, page);
-      }
-
-      function getTablePageButtons(tableId, totalRowsOverride) {
-        const meta = getTablePaginationMeta(tableId, totalRowsOverride);
-        if (meta.totalPages <= 1) return [1];
-        const pages = new Set([1, meta.totalPages, meta.page - 1, meta.page, meta.page + 1]);
-        if (meta.page <= 3) {
-          pages.add(2);
-          pages.add(3);
-        }
-        if (meta.page >= meta.totalPages - 2) {
-          pages.add(meta.totalPages - 1);
-          pages.add(meta.totalPages - 2);
-        }
-        return [...pages]
-          .filter((page) => page >= 1 && page <= meta.totalPages)
-          .sort((left, right) => left - right)
-          .reduce((acc, page) => {
-            if (acc.length && typeof acc[acc.length - 1] === 'number' && page - acc[acc.length - 1] > 1) {
-              acc.push('ellipsis');
-            }
-            acc.push(page);
-            return acc;
-          }, []);
       }
 
       function sortRows(rows, tableId, compareFn) {
@@ -878,43 +823,6 @@
           const delta = compareFn(a, b);
           if (delta !== 0) return delta * direction;
           return 0;
-        });
-      }
-
-      function persistCurrentScroll() {
-        persistScrollForRoute(router.currentRoute.value);
-      }
-
-      function rememberCurrentRouteContext() {
-        rememberCurrentRoute();
-        rememberCurrentRouteScroll();
-        persistCurrentScroll();
-      }
-
-      function persistScrollForRoute(routeLike, position) {
-        const positions = readJsonStorage(window.sessionStorage, SCROLL_STORAGE_KEY, {});
-        positions[routeStorageKey(routeLike)] = Number.isFinite(Number(position))
-          ? Number(position)
-          : (window.scrollY || window.pageYOffset || 0);
-        writeJsonStorage(window.sessionStorage, SCROLL_STORAGE_KEY, positions);
-      }
-
-      async function restoreCurrentScroll(routeLike = router.currentRoute.value) {
-        await nextTick();
-        const positions = readJsonStorage(window.sessionStorage, SCROLL_STORAGE_KEY, {});
-        const target = Number(positions[routeStorageKey(routeLike)] || 0);
-        if (!Number.isFinite(target) || target <= 0) return;
-        restoreScrollPosition(target);
-      }
-
-      function restoreScrollPosition(target) {
-        const attempts = [0, 80, 180, 320];
-        attempts.forEach((delay) => {
-          window.setTimeout(() => {
-            window.requestAnimationFrame(() => {
-              window.scrollTo(0, target);
-            });
-          }, delay);
         });
       }
 
@@ -958,8 +866,17 @@
         return state.prepared.tokenDetail.contractsFlat || [];
       });
 
+      const filteredTokenContracts = computed(() => {
+        const mode = String(state.dashboardFilters.tokenRelatedSeen || 'all');
+        if (mode === 'all') return tokenContracts.value;
+        return tokenContracts.value.filter((row) => {
+          const isSeen = Boolean(row.is_seen_pattern || row.seen_label || row.group_kind === 'seen');
+          return mode === 'seen' ? isSeen : !isSeen;
+        });
+      });
+
       const sortedTokenContracts = computed(() => (
-        sortRows(tokenContracts.value, 'tokenRelatedContracts', (a, b) => {
+        sortRows(filteredTokenContracts.value, 'tokenRelatedContracts', (a, b) => {
           const sort = getTableSort('tokenRelatedContracts');
           switch (sort.key) {
             case 'contract':
@@ -967,13 +884,11 @@
             case 'group':
               return compareString(a.group_label || '', b.group_label || '');
             case 'label':
-              return compareString(a.seen_label || '', b.seen_label || '');
+              return compareString(a.label || a.seen_label || '', b.label || b.seen_label || '');
             case 'patterns':
               return compareString((a.whitelist_patterns || []).join(','), (b.whitelist_patterns || []).join(','));
-            case 'in':
-              return compareBigInt(a.transfer_in_amount, b.transfer_in_amount);
-            case 'out':
-              return compareBigInt(a.transfer_out_amount, b.transfer_out_amount);
+            case 'deployed':
+              return compareDate(a.deployed_at || a.created_at, b.deployed_at || b.created_at);
             case 'flow':
               return compareBigInt(a.total_token_flow, b.total_token_flow);
             case 'auto_audit_status':
@@ -1255,43 +1170,6 @@
         return `auto sync | pending ${pending} | prepared ${prepared} | failed ${failed} | ${pushed} | ${pulled}`;
       });
 
-      async function updateUrl(path, params = {}) {
-        const queryParams = {};
-        Object.entries(params).forEach(([key, value]) => {
-          if (value == null || value === '') return;
-          queryParams[key] = String(value);
-        });
-
-        const nextRouteKey = routeStorageKey({ path, query: queryParams });
-        const currentRouteKey = routeStorageKey(router.currentRoute.value);
-        if (nextRouteKey === currentRouteKey) return;
-
-        const currentScroll = window.scrollY || window.pageYOffset || 0;
-        persistScrollForRoute(router.currentRoute.value, currentScroll);
-        await router.replace({ path, query: queryParams }).catch(() => {});
-        persistScrollForRoute({ path, query: queryParams }, currentScroll);
-      }
-
-      function dashboardUrlParams() {
-        return {
-          chain: state.selectedChain,
-          tab: state.dashboardTab,
-          st: state.dashboardTab === 'settings' ? state.settingsSection : '',
-        };
-      }
-
-      function syncDashboardUrlState() {
-        if (currentView.value !== 'dashboard') return;
-        updateUrl('/', dashboardUrlParams());
-      }
-
-      function syncTokenUrlState() {
-        if (currentView.value !== 'token') return;
-        updateUrl('/token', {
-          chain: state.selectedChain,
-        });
-      }
-
       async function applyStatePayload(data) {
         const wasRunning = state.running;
         const previousRunningChain = state.runningChain;
@@ -1336,716 +1214,191 @@
         }
       }
 
-      function startStateStream() {
-        if (stateEventSource) return stateStreamReadyPromise || Promise.resolve();
-        try {
-          stateStreamReadyPromise = new Promise((resolve) => {
-            resolveStateStreamReady = resolve;
-          });
-          stateEventSource = new EventSource('/api/state/stream');
-          stateEventSource.addEventListener('state', (event) => {
-            try {
-              const payload = JSON.parse(event.data);
-              void applyStatePayload(payload);
-              if (!stateStreamReady) {
-                stateStreamReady = true;
-                resolveStateStreamReady?.();
-                resolveStateStreamReady = null;
-              }
-            } catch (err) {
-              console.error(err);
-            }
-          });
-          stateEventSource.addEventListener('ai-audit', (event) => {
-            try {
-              const payload = JSON.parse(event.data);
-              void handleAiAuditSse(payload);
-            } catch (err) {
-              console.error(err);
-            }
-          });
-          stateEventSource.addEventListener('auto-analysis', (event) => {
-            try {
-              const payload = JSON.parse(event.data);
-              handleAutoAnalysisSse(payload);
-            } catch (err) {
-              console.error(err);
-            }
-          });
-          stateEventSource.addEventListener('pattern-sync', (event) => {
-            try {
-              const payload = JSON.parse(event.data);
-              handlePatternSyncSse(payload);
-            } catch (err) {
-              console.error(err);
-            }
-          });
-          stateEventSource.addEventListener('review-updated', (event) => {
-            try {
-              const payload = JSON.parse(event.data);
-              void handleReviewUpdatedSse(payload);
-            } catch (err) {
-              console.error(err);
-            }
-          });
-          stateEventSource.addEventListener('data-refresh', (event) => {
-            try {
-              const payload = JSON.parse(event.data);
-              void handleDataRefreshSse(payload);
-            } catch (err) {
-              console.error(err);
-            }
-          });
-          stateEventSource.onerror = () => {
-            // EventSource reconnects automatically. Keep the stream open unless closed explicitly.
-          };
-        } catch (err) {
-          console.error(err);
-          stateStreamReadyPromise = Promise.resolve();
-        }
-        return stateStreamReadyPromise;
-      }
+      const loaders = createDashboardLoaders({
+        state,
+        currentView,
+        viewDataCache,
+        getFreshCacheEntry,
+        setTimedCacheEntry,
+        MAX_VIEW_CACHE_ENTRIES,
+        VIEW_CACHE_TTL_MS,
+        chainCacheKey,
+        contractsListParams,
+        tokensListParams,
+        toQueryString,
+        tokenCacheKey,
+        contractCacheKey,
+        getTablePageSize,
+        currentContractsCacheKey,
+        currentTokensCacheKey,
+        assignDashboardContractsPayload,
+        assignDashboardTokensPayload,
+        assignTokenDetailPayload,
+        assignContractDetailPayload,
+        prepareDashboardContractRows,
+        prepareDashboardTokenRows,
+        prepareTokenDetail,
+        prepareContractDetail,
+        normalizeAiProvider,
+        normalizeAiModel,
+        hydrateTokenReviewForm,
+        hydrateReviewForm,
+        applySettingsPayload,
+        apiFetch,
+        withPageLoading,
+        runSharedLoad,
+      });
 
-      async function handleAiAuditSse(payload) {
-        const chain = String(payload?.chain || '').toLowerCase();
-        const targetType = String(payload?.targetType || '').toLowerCase();
-        const targetAddr = String(payload?.targetAddr || '').toLowerCase();
-        if (!chain || !targetType || !targetAddr) return;
+      const {
+        loadDashboard,
+        loadDashboardContracts,
+        loadDashboardTokens,
+        loadTokenDetail,
+        loadContractDetail,
+        loadSettings,
+        refreshCurrent,
+        loadViewDataForCurrentRoute,
+        clearChainScopedData,
+      } = loaders;
 
-        invalidateChainCache(chain);
-        if (chain !== state.selectedChain) return;
+      const actions = createDashboardActions({
+        state,
+        currentView,
+        autoAnalysisEnabled,
+        contractAiAnalysis,
+        tokenAiAnalysis,
+        router,
+        apiFetch,
+        pushNotification,
+        writeClipboardText,
+        normalizeAiProvider,
+        normalizeAiModel,
+        autoAuditStatusLabel,
+        prepareTokenDetail,
+        prepareContractDetail,
+        loaders,
+        invalidateChainCache,
+        updateUrl,
+        dashboardUrlParams,
+        rememberCurrentRouteContext,
+        routeValueOrDefault,
+        applySettingsPayload,
+        tokenCacheKey,
+        contractCacheKey,
+        syncDashboardUrlState,
+        viewDataCache,
+        goBackToPrevious,
+      });
 
-        if (currentView.value === 'token-detail') {
-          const tokenAddr = String(state.route.token || '').toLowerCase();
-          if (targetType === 'token' && tokenAddr === targetAddr) {
-            await loadTokenDetail({ showLoading: false, force: true });
-            return;
-          }
-          if (targetType === 'contract') {
-            const hasContract = (state.prepared.tokenDetail?.contractsFlat || []).some(
-              (row) => String(row?.contract || '').toLowerCase() === targetAddr,
-            );
-            if (hasContract) {
-              await loadTokenDetail({ showLoading: false, force: true });
-              return;
-            }
-          }
-        }
+      const {
+        handleChainChanged,
+        runScan,
+        toggleAutoAnalysis,
+        navigateDashboard,
+        navigateToken,
+        navigateContract,
+        openDashboardMain,
+        openAutoMode,
+        openSettings,
+        openToken,
+        openContract,
+        canRequestOverviewAutoAudit,
+        canRequestTokenAutoAudit,
+        requestOverviewAutoAudit,
+        requestTokenAutoAudit,
+        requestContractAnalysis,
+        requestTokenAnalysis,
+        openAiReport,
+        openTokenAiReport,
+        addAiProviderRow,
+        removeAiProviderRow,
+        addAiModelRow,
+        removeAiModelRow,
+        addWhitelistPatternRow,
+        removeWhitelistPatternRow,
+        saveSettings,
+        saveReview,
+        saveTokenReview,
+        logout,
+      } = actions;
 
-        if (currentView.value === 'contract') {
-          const contractAddr = String(state.route.contract || '').toLowerCase();
-          if (targetType === 'contract' && contractAddr === targetAddr) {
-            await loadContractDetail({ showLoading: false, force: true });
-            return;
-          }
-        }
+      const modals = createDashboardModals({
+        state,
+        currentView,
+        apiFetch,
+        invalidateChainCache,
+        loadDashboardContracts,
+        loadDashboardTokens,
+        loadTokenDetail,
+        loadContractDetail,
+        normalizeAiProvider,
+        normalizeAiModel,
+        contractReviewTargetOptions,
+      });
 
-        if (currentView.value === 'token' && targetType === 'token') {
-          await loadDashboardTokens({ showLoading: false, force: true });
-          return;
-        }
+      ({
+        hydrateReviewForm,
+        hydrateTokenReviewForm,
+        toggleTokenReviewEditor,
+        selectReviewTarget,
+        buildContractReviewTargets,
+        syncContractReviewModalForSelectedTarget,
+        openContractReviewModal,
+        closeContractReviewModal,
+        openTokenReviewModal,
+        closeTokenReviewModal,
+        saveContractReviewModal,
+        saveTokenReviewModal,
+      } = modals);
 
-        if (currentView.value === 'dashboard' && state.dashboardTab === 'tokens' && targetType === 'contract') {
-          await loadDashboardContracts({ showLoading: false, force: true });
-        }
-      }
+      const routing = createDashboardRouting({
+        state,
+        router,
+        currentView,
+        startStateFetch: () => apiFetch('/api/state'),
+        loadSettings,
+        loadDashboardContracts,
+        loadDashboardTokens,
+        loadTokenDetail,
+        loadContractDetail,
+        loadViewDataForCurrentRoute,
+        restoreCurrentScroll,
+        applyStatePayload,
+        rememberRunRefresh,
+        hasRecentRunRefresh,
+        invalidateChainCollectionCache,
+        invalidateChainCache,
+        pushNotification,
+      });
 
-      function handleAutoAnalysisSse(payload) {
-        if (!payload || typeof payload !== 'object') return;
-        state.autoAnalysis = payload;
-      }
+      const { bootstrap } = routing;
 
-      function handlePatternSyncSse(payload) {
-        const status = payload?.status;
-        if (status && typeof status === 'object') {
-          state.syncStatus = status;
-        }
-      }
-
-      async function handleReviewUpdatedSse(payload) {
-        const chain = String(payload?.chain || '').toLowerCase();
-        const targetType = String(payload?.targetType || '').toLowerCase();
-        const targetAddr = String(payload?.targetAddr || '').toLowerCase();
-        if (!chain || !targetType || !targetAddr) return;
-
-        invalidateChainCache(chain);
-        if (chain !== state.selectedChain) return;
-
-        if (currentView.value === 'token-detail') {
-          const tokenAddr = String(state.route.token || '').toLowerCase();
-          if (targetType === 'token' && tokenAddr === targetAddr) {
-            await loadTokenDetail({ showLoading: false, force: true });
-            return;
-          }
-          if (targetType === 'contract') {
-            const hasContract = (state.prepared.tokenDetail?.contractsFlat || []).some(
-              (row) => String(row?.contract || '').toLowerCase() === targetAddr,
-            );
-            if (hasContract) {
-              await loadTokenDetail({ showLoading: false, force: true });
-              return;
-            }
-          }
-        }
-
-        if (currentView.value === 'contract') {
-          const contractAddr = String(state.route.contract || '').toLowerCase();
-          if (targetType === 'contract' && contractAddr === targetAddr) {
-            await loadContractDetail({ showLoading: false, force: true });
-            return;
-          }
-        }
-
-        if (currentView.value === 'token' && targetType === 'token') {
-          await loadDashboardTokens({ showLoading: false, force: true });
-          return;
-        }
-
-        if (currentView.value === 'dashboard' && state.dashboardTab === 'tokens' && targetType === 'contract') {
-          await loadDashboardContracts({ showLoading: false, force: true });
-        }
-      }
-
-      async function handleDataRefreshSse(payload) {
-        const chain = String(payload?.chain || '').toLowerCase();
-        const kind = String(payload?.kind || '').toLowerCase();
-        if (!chain || chain !== state.selectedChain || kind !== 'run-completed') return;
-
-        rememberRunRefresh(chain, payload?.run?.generated_at || payload?.ts || '');
-        invalidateChainCollectionCache(chain);
-        if (currentView.value === 'dashboard') {
-          if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
-            await loadSettings({ showLoading: false, force: true });
-          } else {
-            await loadDashboardContracts({ showLoading: false, force: true });
-          }
-          return;
-        }
-        if (currentView.value === 'token') {
-          await loadDashboardTokens({ showLoading: false, force: true });
-          return;
-        }
-      }
-
-      async function loadDashboard(options = {}) {
-        if (!state.selectedChain) return;
-        try {
-          const data = options.showLoading === false
-            ? await apiFetch(`/api/dashboard?chain=${encodeURIComponent(state.selectedChain)}`)
-            : await withPageLoading(
-              'Loading dashboard',
-              () => apiFetch(`/api/dashboard?chain=${encodeURIComponent(state.selectedChain)}`),
-            );
-          state.dashboard.run = data.run || null;
-          state.dashboard.tokens = data.tokens || [];
-          state.dashboard.contracts = data.contracts || [];
-          if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
-            await loadSettings({ showLoading: false });
-          }
-        } catch {
-          state.dashboard.run = null;
-          state.dashboard.tokens = [];
-          state.dashboard.contracts = [];
-        }
-      }
-
-      async function loadDashboardContracts(options = {}) {
-        if (!state.selectedChain) return;
-        const requestChain = chainCacheKey(state.selectedChain);
-        const queryParams = contractsListParams(requestChain);
-        const queryString = toQueryString(queryParams);
-        const cacheKey = `${requestChain}?${queryString}`;
-        if (options.force !== true) {
-          const cached = viewDataCache.dashboardContracts.get(cacheKey);
-          if (cached) {
-            assignDashboardContractsPayload(cached);
-            state.listMeta.contractOverview = {
-              totalRows: Number(cached.totalRows || 0),
-              pageSize: Number(cached.pageSize || getTablePageSize('contractOverview')),
-            };
-            return;
-          }
-        }
-        await runSharedLoad(`dashboard-contracts:${cacheKey}`, async () => {
-          try {
-            const data = options.showLoading === false
-              ? await apiFetch(`/api/contracts?${queryString}`)
-              : await withPageLoading(
-                'Loading contracts',
-                () => apiFetch(`/api/contracts?${queryString}`),
-              );
-            const payload = {
-              run: data.run || null,
-              contracts: data.contracts || [],
-              preparedContracts: prepareDashboardContractRows(data.contracts || []),
-              totalRows: Number(data.total_rows || 0),
-              pageSize: Number(data.page_size || getTablePageSize('contractOverview')),
-            };
-            viewDataCache.dashboardContracts.set(cacheKey, payload);
-            if (currentContractsCacheKey() !== cacheKey) return;
-            state.listMeta.contractOverview = {
-              totalRows: payload.totalRows,
-              pageSize: payload.pageSize,
-            };
-            assignDashboardContractsPayload(payload);
-          } catch {
-            if (chainCacheKey(state.selectedChain) !== requestChain) return;
-            state.listMeta.contractOverview = {
-              totalRows: 0,
-              pageSize: getTablePageSize('contractOverview'),
-            };
-            assignDashboardContractsPayload({ run: null, contracts: [], preparedContracts: [] });
-          }
-        });
-      }
-
-      async function loadDashboardTokens(options = {}) {
-        if (!state.selectedChain) return;
-        const requestChain = chainCacheKey(state.selectedChain);
-        const queryParams = tokensListParams(requestChain);
-        const queryString = toQueryString(queryParams);
-        const cacheKey = `${requestChain}?${queryString}`;
-        if (options.force !== true) {
-          const cached = viewDataCache.dashboardTokens.get(cacheKey);
-          if (cached) {
-            assignDashboardTokensPayload(cached);
-            state.listMeta.tokenDirectory = {
-              totalRows: Number(cached.totalRows || 0),
-              pageSize: Number(cached.pageSize || getTablePageSize('tokenDirectory')),
-            };
-            return;
-          }
-        }
-        await runSharedLoad(`dashboard-tokens:${cacheKey}`, async () => {
-          try {
-            const data = options.showLoading === false
-              ? await apiFetch(`/api/tokens?${queryString}`)
-              : await withPageLoading(
-                'Loading tokens',
-                () => apiFetch(`/api/tokens?${queryString}`),
-              );
-            const payload = {
-              run: data.run || null,
-              tokens: data.tokens || [],
-              preparedTokens: prepareDashboardTokenRows(data.tokens || []),
-              totalRows: Number(data.total_rows || 0),
-              pageSize: Number(data.page_size || getTablePageSize('tokenDirectory')),
-            };
-            viewDataCache.dashboardTokens.set(cacheKey, payload);
-            if (currentTokensCacheKey() !== cacheKey) return;
-            state.listMeta.tokenDirectory = {
-              totalRows: payload.totalRows,
-              pageSize: payload.pageSize,
-            };
-            assignDashboardTokensPayload(payload);
-          } catch {
-            if (chainCacheKey(state.selectedChain) !== requestChain) return;
-            state.listMeta.tokenDirectory = {
-              totalRows: 0,
-              pageSize: getTablePageSize('tokenDirectory'),
-            };
-            assignDashboardTokensPayload({ run: null, tokens: [], preparedTokens: [] });
-          }
-        });
-      }
-
-      async function loadTokenDetail(options = {}) {
-        if (!state.selectedChain || !state.route.token) return;
-        const requestChain = chainCacheKey(state.selectedChain);
-        const requestToken = String(state.route.token || '').toLowerCase();
-        const cacheKey = tokenCacheKey(requestChain, requestToken);
-        if (options.force !== true) {
-          const cached = viewDataCache.tokenDetail.get(cacheKey);
-          if (cached) {
-            assignTokenDetailPayload(cached);
-            state.aiConfig.providers = cached.aiProviders || [];
-            state.aiConfig.models = cached.aiModels || [];
-            state.aiConfig.default_provider = cached.defaultProvider || state.aiConfig.default_provider;
-            state.aiConfig.default_model = cached.defaultModel || state.aiConfig.default_model;
-            state.analysisForm.title = state.tokenDetail?.auto_analysis?.title || 'AI Auto Audit';
-            state.analysisForm.provider = normalizeAiProvider(state.tokenDetail?.auto_analysis?.provider);
-            state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, state.tokenDetail?.auto_analysis?.model);
-            hydrateTokenReviewForm();
-            return;
-          }
-        }
-        await runSharedLoad(`token-detail:${cacheKey}`, async () => {
-          try {
-            const data = options.showLoading === false
-              ? await apiFetch(`/api/token?chain=${encodeURIComponent(requestChain)}&token=${encodeURIComponent(requestToken)}`)
-              : await withPageLoading(
-                'Loading token details',
-                () => apiFetch(`/api/token?chain=${encodeURIComponent(requestChain)}&token=${encodeURIComponent(requestToken)}`),
-              );
-            const payload = {
-              token: data.token || null,
-              preparedTokenDetail: prepareTokenDetail(data.token || null),
-              aiProviders: data.ai_config?.ai_providers || [],
-              aiModels: data.ai_config?.ai_models || [],
-              defaultProvider: data.ai_config?.default_provider || state.aiConfig.default_provider,
-              defaultModel: data.ai_config?.default_model || state.aiConfig.default_model,
-            };
-            viewDataCache.tokenDetail.set(cacheKey, payload);
-            if (tokenCacheKey(state.selectedChain, state.route.token) !== cacheKey) return;
-            assignTokenDetailPayload(payload);
-            state.aiConfig.providers = payload.aiProviders;
-            state.aiConfig.models = payload.aiModels;
-            state.aiConfig.default_provider = payload.defaultProvider;
-            state.aiConfig.default_model = payload.defaultModel;
-            state.analysisForm.title = state.tokenDetail?.auto_analysis?.title || 'AI Auto Audit';
-            state.analysisForm.provider = normalizeAiProvider(state.tokenDetail?.auto_analysis?.provider);
-            state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, state.tokenDetail?.auto_analysis?.model);
-            hydrateTokenReviewForm();
-          } catch {
-            if (tokenCacheKey(state.selectedChain, state.route.token) !== cacheKey) return;
-            assignTokenDetailPayload({ token: null, preparedTokenDetail: prepareTokenDetail(null) });
-          }
-        });
-      }
-
-      async function loadContractDetail(options = {}) {
-        if (!state.selectedChain || !state.route.contract) return;
-        const requestChain = chainCacheKey(state.selectedChain);
-        const requestContract = String(state.route.contract || '').toLowerCase();
-        const cacheKey = contractCacheKey(requestChain, requestContract);
-        if (options.force !== true) {
-          const cached = viewDataCache.contractDetail.get(cacheKey);
-          if (cached) {
-            assignContractDetailPayload(cached);
-            state.aiConfig.providers = cached.aiProviders || [];
-            state.aiConfig.models = cached.aiModels || [];
-            state.aiConfig.default_provider = cached.defaultProvider || state.aiConfig.default_provider;
-            state.aiConfig.default_model = cached.defaultModel || state.aiConfig.default_model;
-            const availableTokens = state.contractDetail?.tokens || [];
-            const selected = state.selectedContractFlowToken?.toLowerCase();
-            if (!availableTokens.length) {
-              state.selectedContractFlowToken = '';
-            } else if (!selected || !availableTokens.some((row) => row.token?.token?.toLowerCase() === selected)) {
-              state.selectedContractFlowToken = availableTokens[0]?.token?.token || '';
-            }
-            hydrateReviewForm();
-            return;
-          }
-        }
-        await runSharedLoad(`contract-detail:${cacheKey}`, async () => {
-          try {
-            const data = options.showLoading === false
-              ? await apiFetch(`/api/contract?chain=${encodeURIComponent(requestChain)}&contract=${encodeURIComponent(requestContract)}`)
-              : await withPageLoading(
-                'Loading contract details',
-                () => apiFetch(`/api/contract?chain=${encodeURIComponent(requestChain)}&contract=${encodeURIComponent(requestContract)}`),
-              );
-            const payload = {
-              contract: data.contract || null,
-              preparedContractDetail: prepareContractDetail(data.contract || null),
-              aiProviders: data.ai_config?.ai_providers || [],
-              aiModels: data.ai_config?.ai_models || [],
-              defaultProvider: data.ai_config?.default_provider || state.aiConfig.default_provider,
-              defaultModel: data.ai_config?.default_model || state.aiConfig.default_model,
-            };
-            viewDataCache.contractDetail.set(cacheKey, payload);
-            if (contractCacheKey(state.selectedChain, state.route.contract) !== cacheKey) return;
-            assignContractDetailPayload(payload);
-            state.aiConfig.providers = payload.aiProviders;
-            state.aiConfig.models = payload.aiModels;
-            state.aiConfig.default_provider = payload.defaultProvider;
-            state.aiConfig.default_model = payload.defaultModel;
-            const availableTokens = state.contractDetail?.tokens || [];
-            const selected = state.selectedContractFlowToken?.toLowerCase();
-            if (!availableTokens.length) {
-              state.selectedContractFlowToken = '';
-            } else if (!selected || !availableTokens.some((row) => row.token?.token?.toLowerCase() === selected)) {
-              state.selectedContractFlowToken = availableTokens[0]?.token?.token || '';
-            }
-            hydrateReviewForm();
-          } catch {
-            if (contractCacheKey(state.selectedChain, state.route.contract) !== cacheKey) return;
-            assignContractDetailPayload({ contract: null, preparedContractDetail: prepareContractDetail(null) });
-            state.selectedContractFlowToken = '';
-          }
-        });
-      }
-
-      async function loadSettings(options = {}) {
-        if (options.force !== true && viewDataCache.settings) {
-          const data = viewDataCache.settings;
-          state.settings.runtime_settings = {
-            ...state.settings.runtime_settings,
-            ...(data.runtime_settings || {}),
-            chainbase_keys: Array.isArray(data.runtime_settings?.chainbase_keys)
-              ? data.runtime_settings.chainbase_keys.join('\n')
-              : String(data.runtime_settings?.chainbase_keys || ''),
-            rpc_keys: Array.isArray(data.runtime_settings?.rpc_keys)
-              ? data.runtime_settings.rpc_keys.join('\n')
-              : String(data.runtime_settings?.rpc_keys || ''),
-          };
-          state.settings.runtime_settings.auto_analysis.provider = normalizeAiProvider(state.settings.runtime_settings.auto_analysis.provider);
-          state.settings.runtime_settings.auto_analysis.model = normalizeAiModel(
-            state.settings.runtime_settings.auto_analysis.provider,
-            state.settings.runtime_settings.auto_analysis.model,
-          );
-          state.settings.chain_configs = data.chain_configs || [];
-          state.settings.ai_providers = data.ai_providers || [];
-          state.settings.ai_models = data.ai_models || [];
-          state.settings.whitelist_patterns = data.whitelist_patterns || [];
-          state.aiConfig.providers = data.ai_providers || [];
-          state.aiConfig.models = data.ai_models || [];
-          state.aiConfig.default_provider = data.ai_providers?.find?.((row) => row.isDefault)?.provider || state.aiConfig.default_provider;
-          state.analysisForm.provider = normalizeAiProvider(state.analysisForm.provider);
-          state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, state.analysisForm.model);
-          if (state.contractDetail) hydrateReviewForm();
-          return;
-        }
-        await runSharedLoad('settings', async () => {
-          const data = options.showLoading === false
-            ? await apiFetch('/api/settings')
-            : await withPageLoading('Loading settings', () => apiFetch('/api/settings'));
-          viewDataCache.settings = data;
-          state.settings.runtime_settings = {
-            ...state.settings.runtime_settings,
-            ...(data.runtime_settings || {}),
-            chainbase_keys: Array.isArray(data.runtime_settings?.chainbase_keys)
-              ? data.runtime_settings.chainbase_keys.join('\n')
-              : String(data.runtime_settings?.chainbase_keys || ''),
-            rpc_keys: Array.isArray(data.runtime_settings?.rpc_keys)
-              ? data.runtime_settings.rpc_keys.join('\n')
-              : String(data.runtime_settings?.rpc_keys || ''),
-          };
-          state.settings.runtime_settings.auto_analysis.provider = normalizeAiProvider(state.settings.runtime_settings.auto_analysis.provider);
-          state.settings.runtime_settings.auto_analysis.model = normalizeAiModel(
-            state.settings.runtime_settings.auto_analysis.provider,
-            state.settings.runtime_settings.auto_analysis.model,
-          );
-          state.settings.chain_configs = data.chain_configs || [];
-          state.settings.ai_providers = data.ai_providers || [];
-          state.settings.ai_models = data.ai_models || [];
-          state.settings.whitelist_patterns = data.whitelist_patterns || [];
-          state.aiConfig.providers = data.ai_providers || [];
-          state.aiConfig.models = data.ai_models || [];
-          state.aiConfig.default_provider = data.ai_providers?.find?.((row) => row.isDefault)?.provider || state.aiConfig.default_provider;
-          state.analysisForm.provider = normalizeAiProvider(state.analysisForm.provider);
-          state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, state.analysisForm.model);
-          if (state.contractDetail) hydrateReviewForm();
-        });
-      }
-
-      async function refreshCurrent(options = {}) {
-        const nextOptions = { force: true, ...options };
-        if (currentView.value === 'dashboard') {
-          if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
-            await loadSettings(nextOptions);
-            return;
-          }
-          await loadDashboardContracts(nextOptions);
-        } else if (currentView.value === 'token') {
-          await loadDashboardTokens(nextOptions);
-        } else if (currentView.value === 'token-detail') {
-          await loadTokenDetail(nextOptions);
-        } else {
-          await loadContractDetail(nextOptions);
-        }
-      }
-
-      async function loadViewDataForCurrentRoute(options = {}) {
-        if (currentView.value === 'dashboard') {
-          if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
-            await loadSettings(options);
-            return;
-          }
-          await loadDashboardContracts(options);
-          return;
-        }
-        if (currentView.value === 'token') {
-          await loadDashboardTokens(options);
-          return;
-        }
-        if (currentView.value === 'token-detail') {
-          await loadTokenDetail(options);
-          return;
-        }
-        await loadContractDetail(options);
-      }
-
-      function clearChainScopedData() {
-        state.dashboard.run = null;
-        state.dashboard.tokens = [];
-        state.dashboard.contracts = [];
-        state.listMeta.contractOverview = { totalRows: 0, pageSize: getTablePageSize('contractOverview') };
-        state.listMeta.tokenDirectory = { totalRows: 0, pageSize: getTablePageSize('tokenDirectory') };
-        state.prepared.dashboardTokens = [];
-        state.prepared.dashboardContracts = [];
-        state.tokenDetail = null;
-        state.contractDetail = null;
-        state.prepared.tokenDetail = prepareTokenDetail(null);
-        state.prepared.contractDetail = prepareContractDetail(null);
-        state.selectedContractFlowToken = '';
-      }
-
-      async function handleChainChanged() {
-        clearChainScopedData();
-        if (currentView.value === 'dashboard') {
-          await updateUrl('/', dashboardUrlParams());
-          if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
-            await loadSettings();
-            return;
-          }
-          await refreshCurrent();
-          return;
-        }
-        if (currentView.value === 'token') {
-          await updateUrl('/token', {
-            chain: state.selectedChain,
-          });
-          await loadDashboardTokens();
-          return;
-        }
-        if (currentView.value === 'token-detail') {
-          await updateUrl('/token-detail', { chain: state.selectedChain, token: state.route.token });
-          await refreshCurrent();
-          return;
-        }
-        await updateUrl('/contract', { chain: state.selectedChain, contract: state.route.contract });
-        await refreshCurrent();
-      }
-
-      async function runScan() {
-        if (!state.selectedChain || state.running) return;
-        state.running = true;
-        state.runningChain = state.selectedChain;
-        state.progress = {
-          chain: state.selectedChain,
-          stage: 'boot',
-          label: 'Starting pipeline round',
-          percent: 1,
-          updated_at: new Date().toISOString(),
-        };
-        try {
-          await apiFetch('/api/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chain: state.selectedChain }),
-          });
-          await refreshCurrent();
-        } catch (err) {
-          window.alert(err instanceof Error ? err.message : String(err));
-        } finally {
-          state.running = false;
-        }
-      }
-
-      async function toggleAutoAnalysis() {
-        if (!state.selectedChain && !autoAnalysisEnabled.value) return;
-        try {
-          const data = autoAnalysisEnabled.value
-            ? await apiFetch('/api/auto-analysis/stop', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({}),
-            })
-            : await apiFetch('/api/auto-analysis/start', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ chain: state.selectedChain }),
-            });
-          state.autoAnalysis = data.status || state.autoAnalysis;
-        } catch (err) {
-          window.alert(err instanceof Error ? err.message : String(err));
-        }
-      }
-
-      function navigateDashboard() {
-        rememberCurrentRouteContext();
-        router.push({ path: '/', query: dashboardUrlParams() }).catch(() => {});
-      }
-
-      function navigateToken() {
-        rememberCurrentRouteContext();
-        router.push({
-          path: '/token',
-          query: {
-            chain: state.selectedChain,
-          },
-        }).catch(() => {});
-      }
-
-      function navigateContract() {
-        rememberCurrentRouteContext();
-        if (state.route.contract) {
-          router.push({
-            path: '/contract',
-            query: { chain: state.selectedChain, contract: state.route.contract },
-          }).catch(() => {});
-        } else if (state.dashboard.contracts[0]?.contract) {
-          openContract(state.dashboard.contracts[0].contract);
-        }
-      }
-
-      function openDashboardMain() {
-        state.dashboardTab = 'tokens';
-        navigateDashboard();
-      }
-
-      function openAutoMode() {
-        state.dashboardTab = 'auto';
-        if (currentView.value === 'dashboard') {
-          syncDashboardUrlState();
-          return;
-        }
-        navigateDashboard();
-      }
-
-      function openSettings(section = 'keys') {
-        state.dashboardTab = 'settings';
-        state.settingsSection = section;
-        if (currentView.value === 'dashboard') {
-          syncDashboardUrlState();
-          return;
-        }
-        navigateDashboard();
-      }
-
-      function openToken(token) {
-        rememberCurrentRouteContext();
-        router.push({
-          path: '/token-detail',
-          query: { chain: state.selectedChain, token: String(token || '').toLowerCase() },
-        }).catch(() => {});
-      }
-
-      function openContract(contract) {
-        rememberCurrentRouteContext();
-        router.push({
-          path: '/contract',
-          query: { chain: state.selectedChain, contract: String(contract || '').toLowerCase() },
-        }).catch(() => {});
-      }
-
-      function goBackToPrevious(fallbackView = 'dashboard') {
-        persistCurrentScroll();
-        try {
-          const previous = window.sessionStorage.getItem(PREV_ROUTE_STORAGE_KEY);
-          const previousScroll = Number(window.sessionStorage.getItem(PREV_ROUTE_SCROLL_STORAGE_KEY) || 0);
-          if (previous && previous !== currentRelativeRoute()) {
-            pendingExplicitRestoreKey = previous;
-            pendingExplicitRestorePosition = Number.isFinite(previousScroll) ? previousScroll : 0;
-            router.push(previous).catch(() => {});
-            return;
-          }
-        } catch {}
-
-        if (fallbackView === 'token') {
-          router.push({
-            path: '/token',
-            query: { chain: state.selectedChain },
-          }).catch(() => {});
-          return;
-        }
-
-        router.push({
-          path: '/',
-          query: { chain: state.selectedChain },
-        }).catch(() => {});
-      }
+      installDashboardViewState({
+        onMounted,
+        watch,
+        router,
+        state,
+        currentView,
+        routeToken,
+        syncStateFromRoute,
+        loadViewDataForCurrentRoute,
+        restoreCurrentScroll,
+        currentRelativeRoute,
+        restoreScrollPosition,
+        consumePendingRestoreState: () => {
+          return consumePendingRestoreState();
+        },
+        persistCurrentScroll,
+        persistScrollForRoute,
+        syncDashboardUrlState,
+        syncTokenUrlState,
+        persistStoredFilters,
+        resetTablePage,
+        scheduleCollectionReload,
+        normalizeAiProvider,
+        normalizeAiModel,
+        bootstrap,
+      });
 
       function isCopiedAddress(value) {
         return Boolean(value) && state.copiedAddress === String(value).toLowerCase();
@@ -2065,215 +1418,7 @@
             copiedAddressTimer = null;
           }, 1000);
         } catch (err) {
-          window.alert(err instanceof Error ? err.message : 'Copy failed');
-        }
-      }
-
-      function hydrateReviewForm() {
-        const detail = state.contractDetail;
-        const firstTarget = detail?.pattern_targets?.[0]?.kind;
-        state.reviewForm.target_kind = firstTarget || 'contract';
-        state.reviewForm.label = detail?.label || '';
-        state.reviewForm.review_text = detail?.review || '';
-        state.reviewForm.exploitable = Boolean(detail?.is_exploitable);
-        state.analysisForm.title = detail?.auto_analysis?.title || 'AI Auto Audit';
-        state.analysisForm.provider = normalizeAiProvider(detail?.auto_analysis?.provider);
-        state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, detail?.auto_analysis?.model);
-      }
-
-      function hydrateTokenReviewForm() {
-        const detail = state.tokenDetail;
-        state.tokenReviewForm.review_text = detail?.review || '';
-        state.tokenReviewForm.exploitable = Boolean(detail?.is_exploitable);
-        state.tokenReviewExpanded = false;
-      }
-
-      function toggleTokenReviewEditor(force) {
-        if (typeof force === 'boolean') {
-          state.tokenReviewExpanded = force;
-          return;
-        }
-        state.tokenReviewExpanded = !state.tokenReviewExpanded;
-      }
-
-      function selectReviewTarget(target) {
-        state.reviewForm.target_kind = target?.kind || 'contract';
-        if (!state.reviewForm.label.trim()) {
-          state.reviewForm.label = target?.seen_label || state.contractDetail?.label || '';
-        }
-      }
-
-      function buildContractReviewTargets(row) {
-        const options = [];
-        const seen = new Set();
-
-        function pushTarget(kind, address, patternHash = '') {
-          const normalizedKind = String(kind || '').trim().toLowerCase();
-          const normalizedAddress = String(address || '').trim().toLowerCase();
-          if (!normalizedKind || !normalizedAddress) return;
-          const key = `${normalizedKind}:${normalizedAddress}`;
-          if (seen.has(key)) return;
-          seen.add(key);
-          options.push({
-            kind: normalizedKind,
-            address: normalizedAddress,
-            pattern_hash: patternHash ? String(patternHash) : '',
-          });
-        }
-
-        if (Array.isArray(row?.pattern_targets) && row.pattern_targets.length) {
-          row.pattern_targets.forEach((target) => {
-            pushTarget(target.kind, target.address, target.pattern_hash);
-          });
-        } else {
-          pushTarget('contract', row?.contract || row?.address);
-          if (row?.proxy_impl || (row?.link_type === 'proxy' && row?.linkage)) {
-            pushTarget('implementation', row?.proxy_impl || row?.linkage);
-          }
-          if (row?.eip7702_delegate || (row?.link_type === 'eip7702' && row?.linkage)) {
-            pushTarget('delegate', row?.eip7702_delegate || row?.linkage);
-          }
-        }
-
-        if (!options.length) {
-          pushTarget('contract', row?.contract || row?.address);
-        }
-
-        return options;
-      }
-
-      function syncContractReviewModalForSelectedTarget() {
-        const row = state.contractReviewModal.row;
-        const selectedTarget = buildContractReviewTargets(row).find(
-          (target) => target.kind === state.contractReviewModal.target_kind,
-        ) || contractReviewTargetOptions.value[0] || null;
-        const existingReview = (row?.reviews || []).find((review) => {
-          if (selectedTarget?.pattern_hash && review.pattern_hash === selectedTarget.pattern_hash) return true;
-          if (selectedTarget?.address && review.pattern_address === selectedTarget.address) return true;
-          return selectedTarget?.kind && review.pattern_kind === selectedTarget.kind;
-        });
-
-        state.contractReviewModal.label = String(
-          existingReview?.label
-          || row?.label
-          || row?.seen_label
-          || state.contractDetail?.label
-          || '',
-        ).trim();
-        state.contractReviewModal.review_text = String(existingReview?.review_text || '').trim();
-        state.contractReviewModal.exploitable = existingReview
-          ? Boolean(existingReview.exploitable)
-          : Boolean(row?.is_exploitable);
-      }
-
-      function openContractReviewModal(row, source = 'table') {
-        if (!row?.contract) return;
-        const targetOptions = buildContractReviewTargets(row);
-        state.contractReviewModal.open = true;
-        state.contractReviewModal.address = String(row.contract || '').toLowerCase();
-        state.contractReviewModal.target_options = targetOptions;
-        state.contractReviewModal.target_kind = targetOptions[0]?.kind || 'contract';
-        state.contractReviewModal.label = '';
-        state.contractReviewModal.review_text = '';
-        state.contractReviewModal.exploitable = Boolean(row.is_exploitable);
-        state.contractReviewModal.row = row;
-        state.contractReviewModal.source = source;
-        state.contractReviewModal.saving = false;
-        state.contractReviewModal.error = '';
-        syncContractReviewModalForSelectedTarget();
-      }
-
-      function closeContractReviewModal() {
-        state.contractReviewModal.open = false;
-        state.contractReviewModal.row = null;
-        state.contractReviewModal.target_options = [];
-        state.contractReviewModal.saving = false;
-        state.contractReviewModal.error = '';
-      }
-
-      function openTokenReviewModal(row) {
-        if (!row?.token) return;
-        state.tokenReviewModal.open = true;
-        state.tokenReviewModal.address = String(row.token || '').toLowerCase();
-        state.tokenReviewModal.name = String(row.token_name || '').trim();
-        state.tokenReviewModal.symbol = String(row.token_symbol || '').trim();
-        state.tokenReviewModal.review_text = String(row.review || '').trim();
-        state.tokenReviewModal.exploitable = Boolean(row.is_exploitable);
-        state.tokenReviewModal.saving = false;
-        state.tokenReviewModal.error = '';
-      }
-
-      function closeTokenReviewModal() {
-        state.tokenReviewModal.open = false;
-        state.tokenReviewModal.saving = false;
-        state.tokenReviewModal.error = '';
-      }
-
-      async function saveContractReviewModal() {
-        if (!state.contractReviewModal.address) return;
-        if (!state.contractReviewModal.label.trim()) {
-          state.contractReviewModal.error = 'Label is required.';
-          return;
-        }
-        state.contractReviewModal.saving = true;
-        state.contractReviewModal.error = '';
-        try {
-          await apiFetch('/api/review', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chain: state.selectedChain,
-              address: state.contractReviewModal.address,
-              target_kind: state.contractReviewModal.target_kind,
-              label: state.contractReviewModal.label.trim(),
-              review_text: state.contractReviewModal.review_text,
-              exploitable: state.contractReviewModal.exploitable,
-            }),
-          });
-          invalidateChainCache(state.selectedChain);
-          if (currentView.value === 'token-detail') {
-            await loadTokenDetail({ force: true });
-          } else {
-            await loadDashboardContracts({ showLoading: false, force: true });
-          }
-          if (state.contractDetail?.address === state.contractReviewModal.address) {
-            await loadContractDetail({ force: true });
-          }
-          closeContractReviewModal();
-        } catch (err) {
-          state.contractReviewModal.error = err instanceof Error ? err.message : String(err);
-        } finally {
-          state.contractReviewModal.saving = false;
-        }
-      }
-
-      async function saveTokenReviewModal() {
-        if (!state.tokenReviewModal.address) return;
-        state.tokenReviewModal.saving = true;
-        state.tokenReviewModal.error = '';
-        try {
-          await apiFetch('/api/token-review', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chain: state.selectedChain,
-              token: state.tokenReviewModal.address,
-              review_text: state.tokenReviewModal.review_text,
-              exploitable: state.tokenReviewModal.exploitable,
-            }),
-          });
-          invalidateChainCache(state.selectedChain);
-          if (currentView.value === 'token') {
-            await loadDashboardTokens({ showLoading: false, force: true });
-          }
-          if (state.tokenDetail?.token === state.tokenReviewModal.address) {
-            await loadTokenDetail({ force: true });
-          }
-          closeTokenReviewModal();
-        } catch (err) {
-          state.tokenReviewModal.error = err instanceof Error ? err.message : String(err);
-        } finally {
-          state.tokenReviewModal.saving = false;
+          pushNotification(err instanceof Error ? err.message : 'Copy failed', 'error', 3200);
         }
       }
 
@@ -2343,579 +1488,6 @@
         return 'Request AI Analysis';
       }
 
-      function buildPendingAutoAnalysis(analysis, fallback = {}) {
-        return {
-          request_session: analysis?.requestSession || fallback.request_session || null,
-          title: analysis?.title || fallback.title || 'AI Auto Audit',
-          provider: analysis?.provider || fallback.provider || state.analysisForm.provider,
-          model: analysis?.model || fallback.model || state.analysisForm.model,
-          status: 'requested',
-          requested_at: analysis?.requestedAt || new Date().toISOString(),
-          completed_at: null,
-          critical: null,
-          high: null,
-          medium: null,
-          report_path: null,
-          error: null,
-        };
-      }
-
-      function markContractPendingAudit(contractAddress, analysis) {
-        const normalized = String(contractAddress || '').toLowerCase();
-        if (!normalized) return;
-
-        if (Array.isArray(state.dashboard.contracts)) {
-          state.dashboard.contracts = state.dashboard.contracts.map((row) => (
-            String(row?.contract || '').toLowerCase() === normalized
-              ? {
-                ...row,
-                auto_audit_status: 'processing',
-                auto_audit_critical: null,
-                auto_audit_high: null,
-                auto_audit_medium: null,
-              }
-              : row
-          ));
-        }
-
-        if (Array.isArray(state.prepared.dashboardContracts)) {
-          state.prepared.dashboardContracts = state.prepared.dashboardContracts.map((row) => (
-            String(row?.contract || '').toLowerCase() === normalized
-              ? {
-                ...row,
-                auto_audit_status: 'processing',
-                auto_audit_critical: null,
-                auto_audit_high: null,
-                auto_audit_medium: null,
-              }
-              : row
-          ));
-        }
-
-        if (state.tokenDetail?.groups?.length) {
-          const nextGroups = state.tokenDetail.groups.map((group) => ({
-            ...group,
-            contracts: (group.contracts || []).map((row) => (
-              String(row?.contract || '').toLowerCase() === normalized
-                ? {
-                  ...row,
-                  auto_audit_status: 'processing',
-                  auto_audit_critical: null,
-                  auto_audit_high: null,
-                  auto_audit_medium: null,
-                }
-                : row
-            )),
-          }));
-          state.tokenDetail = { ...state.tokenDetail, groups: nextGroups };
-          state.prepared.tokenDetail = prepareTokenDetail(state.tokenDetail);
-        }
-
-        if (String(state.contractDetail?.address || '').toLowerCase() === normalized) {
-          state.contractDetail = {
-            ...state.contractDetail,
-            auto_analysis: buildPendingAutoAnalysis(analysis, state.contractDetail?.auto_analysis),
-          };
-        }
-      }
-
-      function markTokenPendingAudit(tokenAddress, analysis) {
-        const normalized = String(tokenAddress || '').toLowerCase();
-        if (!normalized) return;
-
-        if (Array.isArray(state.dashboard.tokens)) {
-          state.dashboard.tokens = state.dashboard.tokens.map((row) => (
-            String(row?.token || '').toLowerCase() === normalized
-              ? {
-                ...row,
-                auto_audit_status: 'processing',
-                auto_audit_critical: null,
-                auto_audit_high: null,
-                auto_audit_medium: null,
-              }
-              : row
-          ));
-        }
-
-        if (Array.isArray(state.prepared.dashboardTokens)) {
-          state.prepared.dashboardTokens = state.prepared.dashboardTokens.map((row) => (
-            String(row?.token || '').toLowerCase() === normalized
-              ? {
-                ...row,
-                auto_audit_status: 'processing',
-                auto_audit_critical: null,
-                auto_audit_high: null,
-                auto_audit_medium: null,
-              }
-              : row
-          ));
-        }
-
-        if (String(state.tokenDetail?.token || '').toLowerCase() === normalized) {
-          state.tokenDetail = {
-            ...state.tokenDetail,
-            auto_analysis: buildPendingAutoAnalysis(analysis, state.tokenDetail?.auto_analysis),
-          };
-        }
-      }
-
-      function canRequestOverviewAutoAudit(row) {
-        const status = autoAuditStatusLabel(row?.auto_audit_status);
-        return status !== 'processing';
-      }
-
-      function canRequestTokenAutoAudit(row) {
-        const status = autoAuditStatusLabel(row?.auto_audit_status);
-        return status !== 'processing';
-      }
-
-      async function requestOverviewAutoAudit(row) {
-        if (!row?.contract || !canRequestOverviewAutoAudit(row)) return;
-        try {
-          const data = await apiFetch('/api/contract-analysis/request', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chain: state.selectedChain,
-              contract: row.contract,
-            }),
-          });
-          markContractPendingAudit(row.contract, data.analysis);
-          invalidateChainCache(state.selectedChain);
-          await loadDashboardContracts({ showLoading: false, force: true });
-          if (state.contractDetail?.address === row.contract) {
-            await loadContractDetail({ force: true });
-          }
-        } catch (err) {
-          window.alert(err instanceof Error ? err.message : String(err));
-        }
-      }
-
-      async function requestTokenAutoAudit(row) {
-        if (!row?.token || !canRequestTokenAutoAudit(row)) return;
-        try {
-          const data = await apiFetch('/api/token-analysis/request', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chain: state.selectedChain,
-              token: row.token,
-            }),
-          });
-          markTokenPendingAudit(row.token, data.analysis);
-          invalidateChainCache(state.selectedChain);
-          await loadDashboardTokens({ showLoading: false, force: true });
-          if (state.tokenDetail?.token === row.token) {
-            await loadTokenDetail({ force: true });
-          }
-        } catch (err) {
-          window.alert(err instanceof Error ? err.message : String(err));
-        }
-      }
-
-      async function requestContractAnalysis() {
-        if (!state.contractDetail?.address || !canRequestContractAnalysis()) return;
-        try {
-          const data = await apiFetch('/api/contract-analysis/request', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chain: state.selectedChain,
-              contract: state.contractDetail.address,
-              title: state.analysisForm.title,
-              provider: state.analysisForm.provider,
-              model: state.analysisForm.model,
-            }),
-          });
-          markContractPendingAudit(state.contractDetail.address, data.analysis);
-          invalidateChainCache(state.selectedChain);
-          await loadContractDetail({ force: true });
-          window.alert('AI analysis requested');
-        } catch (err) {
-          window.alert(err instanceof Error ? err.message : String(err));
-        }
-      }
-
-      async function requestTokenAnalysis() {
-        if (!state.tokenDetail?.token || !canRequestTokenAnalysis()) return;
-        try {
-          const data = await apiFetch('/api/token-analysis/request', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chain: state.selectedChain,
-              token: state.tokenDetail.token,
-              title: state.analysisForm.title,
-              provider: state.analysisForm.provider,
-              model: state.analysisForm.model,
-            }),
-          });
-          markTokenPendingAudit(state.tokenDetail.token, data.analysis);
-          invalidateChainCache(state.selectedChain);
-          await loadTokenDetail({ force: true });
-          window.alert('AI analysis requested');
-        } catch (err) {
-          window.alert(err instanceof Error ? err.message : String(err));
-        }
-      }
-
-      function openAiReport() {
-        if (!state.contractDetail?.address || !contractAiAnalysis.value?.report_path) return;
-        const targetUrl = `/api/contract-analysis/report?chain=${encodeURIComponent(state.selectedChain || '')}&contract=${encodeURIComponent(state.contractDetail.address)}`;
-        window.open(targetUrl, '_blank', 'noopener');
-      }
-
-      function openTokenAiReport() {
-        if (!state.tokenDetail?.token || !tokenAiAnalysis.value?.report_path) return;
-        const targetUrl = `/api/token-analysis/report?chain=${encodeURIComponent(state.selectedChain || '')}&token=${encodeURIComponent(state.tokenDetail.token)}`;
-        window.open(targetUrl, '_blank', 'noopener');
-      }
-
-      function addAiProviderRow() {
-        const nextIndex = (state.settings.ai_providers || []).length;
-        state.settings.ai_providers.push({
-          provider: '',
-          enabled: true,
-          position: nextIndex,
-        });
-      }
-
-      function removeAiProviderRow(index) {
-        const row = state.settings.ai_providers[index];
-        if (!row) return;
-        const provider = String(row.provider || '').trim().toLowerCase();
-        state.settings.ai_providers.splice(index, 1);
-        if (provider) {
-          state.settings.ai_models = state.settings.ai_models.filter((model) => String(model.provider || '').trim().toLowerCase() !== provider);
-        }
-      }
-
-      function addAiModelRow() {
-        const provider = normalizeAiProvider(state.analysisForm.provider);
-        state.settings.ai_models.push({
-          id: Date.now(),
-          provider,
-          model: '',
-          enabled: true,
-          is_default: false,
-          position: (state.settings.ai_models || []).filter((row) => String(row.provider || '').trim().toLowerCase() === provider).length,
-        });
-      }
-
-      function removeAiModelRow(index) {
-        state.settings.ai_models.splice(index, 1);
-      }
-
-      function addWhitelistPatternRow() {
-        state.settings.whitelist_patterns.push({
-          id: Date.now(),
-          name: '',
-          hex_pattern: '',
-          pattern_type: 'selector',
-          score: 1,
-          description: '',
-        });
-      }
-
-      function removeWhitelistPatternRow(index) {
-        state.settings.whitelist_patterns.splice(index, 1);
-      }
-
-      async function saveSettings() {
-        const aiProviders = (state.settings.ai_providers || [])
-          .map((row, index) => ({
-            provider: String(row.provider || '').trim().toLowerCase(),
-            enabled: row.enabled !== false,
-            position: Number.isFinite(Number(row.position)) ? Number(row.position) : index,
-          }))
-          .filter((row) => row.provider);
-
-        const aiModels = (state.settings.ai_models || [])
-          .map((row, index) => ({
-            provider: String(row.provider || '').trim().toLowerCase(),
-            model: String(row.model || '').trim(),
-            enabled: row.enabled !== false,
-            is_default: Boolean(row.is_default),
-            position: Number.isFinite(Number(row.position)) ? Number(row.position) : index,
-          }))
-          .filter((row) => row.provider && row.model);
-
-        const whitelistPatterns = (state.settings.whitelist_patterns || [])
-          .map((row, index) => ({
-            name: String(row.name || '').trim(),
-            hex_pattern: String(row.hex_pattern || '').trim().toLowerCase().replace(/^0x/, ''),
-            pattern_type: String(row.pattern_type || 'selector').trim().toLowerCase() || 'selector',
-            score: Number.isFinite(Number(row.score)) ? Number(row.score) : (index + 1),
-            description: String(row.description || '').trim(),
-          }))
-          .filter((row) => row.name && row.hex_pattern);
-
-        try {
-          state.settings.runtime_settings.auto_analysis.provider = normalizeAiProvider(state.settings.runtime_settings.auto_analysis.provider);
-          state.settings.runtime_settings.auto_analysis.model = normalizeAiModel(
-            state.settings.runtime_settings.auto_analysis.provider,
-            state.settings.runtime_settings.auto_analysis.model,
-          );
-          const data = await apiFetch('/api/settings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              runtime_settings: state.settings.runtime_settings,
-              chain_configs: state.settings.chain_configs,
-              ai_providers: aiProviders,
-              ai_models: aiModels,
-              whitelist_patterns: whitelistPatterns,
-            }),
-          });
-          state.settings.runtime_settings = data.settings?.runtime_settings || state.settings.runtime_settings;
-          state.settings.runtime_settings = {
-            ...state.settings.runtime_settings,
-            ...(data.settings?.runtime_settings || {}),
-            chainbase_keys: Array.isArray(data.settings?.runtime_settings?.chainbase_keys)
-              ? data.settings.runtime_settings.chainbase_keys.join('\n')
-              : String(data.settings?.runtime_settings?.chainbase_keys || state.settings.runtime_settings.chainbase_keys || ''),
-            rpc_keys: Array.isArray(data.settings?.runtime_settings?.rpc_keys)
-              ? data.settings.runtime_settings.rpc_keys.join('\n')
-              : String(data.settings?.runtime_settings?.rpc_keys || state.settings.runtime_settings.rpc_keys || ''),
-          };
-          state.settings.runtime_settings.auto_analysis.provider = normalizeAiProvider(state.settings.runtime_settings.auto_analysis.provider);
-          state.settings.runtime_settings.auto_analysis.model = normalizeAiModel(
-            state.settings.runtime_settings.auto_analysis.provider,
-            state.settings.runtime_settings.auto_analysis.model,
-          );
-          state.settings.chain_configs = data.settings?.chain_configs || state.settings.chain_configs;
-          state.settings.ai_providers = data.settings?.ai_providers || aiProviders;
-          state.settings.ai_models = data.settings?.ai_models || aiModels;
-          state.settings.whitelist_patterns = data.settings?.whitelist_patterns || whitelistPatterns;
-          viewDataCache.settings = data.settings || data;
-          state.analysisForm.provider = normalizeAiProvider(state.analysisForm.provider);
-          state.analysisForm.model = normalizeAiModel(state.analysisForm.provider, state.analysisForm.model);
-          window.alert('Settings saved and hot-applied');
-        } catch (err) {
-          window.alert(err instanceof Error ? err.message : String(err));
-        }
-      }
-
-      async function saveReview() {
-        if (!state.contractDetail?.address) return;
-        if (!state.reviewForm.label.trim()) {
-          window.alert('Label is required');
-          return;
-        }
-        try {
-          await apiFetch('/api/review', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chain: state.selectedChain,
-              address: state.contractDetail.address,
-              target_kind: state.reviewForm.target_kind,
-              label: state.reviewForm.label,
-              review_text: state.reviewForm.review_text,
-              exploitable: state.reviewForm.exploitable,
-            }),
-          });
-          state.reviewForm.review_text = '';
-          invalidateChainCache(state.selectedChain);
-          await loadContractDetail({ force: true });
-          window.alert('Review saved');
-        } catch (err) {
-          window.alert(err instanceof Error ? err.message : String(err));
-        }
-      }
-
-      async function saveTokenReview() {
-        if (!state.tokenDetail?.token) return;
-        try {
-          await apiFetch('/api/token-review', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chain: state.selectedChain,
-              token: state.tokenDetail.token,
-              review_text: state.tokenReviewForm.review_text,
-              exploitable: state.tokenReviewForm.exploitable,
-            }),
-          });
-          invalidateChainCache(state.selectedChain);
-          await loadTokenDetail({ force: true });
-          state.tokenReviewExpanded = false;
-          window.alert('Token review saved');
-        } catch (err) {
-          window.alert(err instanceof Error ? err.message : String(err));
-        }
-      }
-
-      async function logout() {
-        try {
-          await fetch('/api/logout', { method: 'POST' });
-        } finally {
-          window.location.assign('/login');
-        }
-      }
-
-      onMounted(async () => {
-        try {
-          await router.isReady();
-          syncStateFromRoute();
-          await Promise.race([
-            startStateStream(),
-            new Promise((resolve) => window.setTimeout(resolve, 1200)),
-          ]);
-          if (!state.chains.length) {
-            const data = await apiFetch('/api/state');
-            await applyStatePayload(data);
-          }
-          if (currentView.value === 'dashboard' && (state.dashboardTab === 'settings' || state.dashboardTab === 'auto')) {
-            await loadSettings({ showLoading: false });
-          }
-          await loadViewDataForCurrentRoute();
-          await restoreCurrentScroll();
-        } catch (err) {
-          window.alert(err instanceof Error ? err.message : String(err));
-        }
-
-        window.addEventListener('scroll', persistCurrentScroll, { passive: true });
-        window.addEventListener('beforeunload', persistCurrentScroll);
-      });
-
-      router.beforeEach((to, from, next) => {
-        persistScrollForRoute(from);
-        next();
-      });
-
-      watch(
-        () => router.currentRoute.value.fullPath,
-        async () => {
-          syncStateFromRoute();
-          await loadViewDataForCurrentRoute();
-          await restoreCurrentScroll();
-          if (pendingExplicitRestoreKey && pendingExplicitRestoreKey === currentRelativeRoute()) {
-            if (pendingExplicitRestorePosition > 0) {
-              restoreScrollPosition(pendingExplicitRestorePosition);
-            }
-            pendingExplicitRestoreKey = '';
-            pendingExplicitRestorePosition = 0;
-          }
-        },
-      );
-
-      watch(
-        () => [
-          currentView.value,
-          state.selectedChain,
-          state.dashboardTab,
-          state.settingsSection,
-        ],
-        () => {
-          syncDashboardUrlState();
-          syncTokenUrlState();
-        },
-      );
-
-      watch(
-        () => ({
-          tokenQuery: state.dashboardFilters.tokenQuery,
-          contractQuery: state.dashboardFilters.contractQuery,
-          contractRisk: state.dashboardFilters.contractRisk,
-          contractLinkType: state.dashboardFilters.contractLinkType,
-        }),
-        (filters) => {
-          persistStoredFilters(filters);
-          if (currentView.value === 'token') {
-            resetTablePage('tokenDirectory');
-            scheduleCollectionReload('tokens');
-          }
-          if (currentView.value === 'dashboard' && state.dashboardTab === 'tokens') {
-            resetTablePage('contractOverview');
-            scheduleCollectionReload('contracts');
-          }
-        },
-        { deep: true },
-      );
-
-      watch(
-        () => ({
-          key: state.tableSorts.contractOverview.key,
-          dir: state.tableSorts.contractOverview.dir,
-          page: state.tablePages.contractOverview,
-        }),
-        () => {
-          if (currentView.value === 'dashboard' && state.dashboardTab === 'tokens') {
-            scheduleCollectionReload('contracts');
-          }
-        },
-        { deep: true },
-      );
-
-      watch(
-        () => ({
-          key: state.tableSorts.tokenDirectory.key,
-          dir: state.tableSorts.tokenDirectory.dir,
-          page: state.tablePages.tokenDirectory,
-        }),
-        () => {
-          if (currentView.value === 'token') {
-            scheduleCollectionReload('tokens');
-          }
-        },
-        { deep: true },
-      );
-
-      watch(
-        () => routeToken.value,
-        () => {
-          resetTablePage('tokenRelatedContracts');
-        },
-      );
-
-      watch(
-        () => routeContract.value,
-        () => {
-        },
-      );
-
-      watch(
-        () => state.selectedContractFlowToken,
-        () => {
-        },
-      );
-
-      watch(
-        () => state.analysisForm.provider,
-        (provider) => {
-          const normalizedProvider = normalizeAiProvider(provider);
-          if (state.analysisForm.provider !== normalizedProvider) {
-            state.analysisForm.provider = normalizedProvider;
-            return;
-          }
-          const normalizedModel = normalizeAiModel(normalizedProvider, state.analysisForm.model);
-          if (state.analysisForm.model !== normalizedModel) {
-            state.analysisForm.model = normalizedModel;
-          }
-        },
-        { immediate: true },
-      );
-
-      watch(
-        () => state.settings.runtime_settings.auto_analysis.provider,
-        (provider) => {
-          const normalizedProvider = normalizeAiProvider(provider);
-          if (state.settings.runtime_settings.auto_analysis.provider !== normalizedProvider) {
-            state.settings.runtime_settings.auto_analysis.provider = normalizedProvider;
-            return;
-          }
-          const normalizedModel = normalizeAiModel(
-            normalizedProvider,
-            state.settings.runtime_settings.auto_analysis.model,
-          );
-          if (state.settings.runtime_settings.auto_analysis.model !== normalizedModel) {
-            state.settings.runtime_settings.auto_analysis.model = normalizedModel;
-          }
-        },
-        { immediate: true },
-      );
-
       return {
         chains: computed(() => state.chains),
         selectedChain: computed({
@@ -2982,12 +1554,14 @@
         setTablePageSize,
         pageLoading: computed(() => state.pageLoading.count > 0),
         pageLoadingLabel: computed(() => state.pageLoading.label || 'Loading'),
+        notifications: computed(() => state.notifications),
         filteredTokens,
         paginatedFilteredTokens,
         filteredContracts,
         paginatedFilteredContracts,
         contractOverviewSections,
         tokenContracts,
+        filteredTokenContracts,
         sortedTokenContracts,
         paginatedTokenContracts,
         tokenContractSections,
@@ -3080,6 +1654,7 @@
         removeWhitelistPatternRow,
         saveReview,
         saveTokenReview,
+        dismissNotification,
         logout,
         aiProviderOptions,
         aiModelOptions,

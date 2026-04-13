@@ -9,6 +9,20 @@
     data-current-user="<%= currentUser || '' %>"
   >
     <div id="app" class="app-shell" v-cloak>
+      <div v-if="notifications.length" class="toast-stack" aria-live="polite" aria-atomic="true">
+        <div v-for="toast in notifications" :key="toast.id" class="toast-card" :class="`toast-${toast.tone || 'info'}`">
+          <div class="toast-copy">
+            <strong class="toast-title">{{ toast.tone === 'error' ? 'Error' : toast.tone === 'warning' ? 'Notice' : 'Update' }}</strong>
+            <span>{{ toast.message }}</span>
+          </div>
+          <button class="toast-close" type="button" @click="dismissNotification(toast.id)" aria-label="Dismiss notification" title="Dismiss">
+            <svg viewBox="0 0 16 16" class="icon-svg" aria-hidden="true">
+              <path d="m4.2 4.2 7.6 7.6-1 1-7.6-7.6z" fill="currentColor"></path>
+              <path d="m11.8 4.2-7.6 7.6-1-1 7.6-7.6z" fill="currentColor"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
       <header class="hero">
         <div class="hero-top">
           <div>
@@ -1311,7 +1325,35 @@
         <section class="card card-wide">
           <div class="card-head">
             <h2>Related Contracts</h2>
-            <span class="muted">{{ tokenContracts.length }} rows</span>
+            <div class="card-head-inline">
+              <div class="segmented-filter" role="group" aria-label="Related contracts seen filter">
+                <button
+                  class="segmented-filter-btn"
+                  :class="{ active: dashboardFilters.tokenRelatedSeen === 'all' }"
+                  type="button"
+                  @click="dashboardFilters.tokenRelatedSeen = 'all'"
+                >
+                  All
+                </button>
+                <button
+                  class="segmented-filter-btn"
+                  :class="{ active: dashboardFilters.tokenRelatedSeen === 'seen' }"
+                  type="button"
+                  @click="dashboardFilters.tokenRelatedSeen = 'seen'"
+                >
+                  Seen
+                </button>
+                <button
+                  class="segmented-filter-btn"
+                  :class="{ active: dashboardFilters.tokenRelatedSeen === 'unseen' }"
+                  type="button"
+                  @click="dashboardFilters.tokenRelatedSeen = 'unseen'"
+                >
+                  Unseen
+                </button>
+              </div>
+              <span class="chip small plain related-contracts-count">{{ filteredTokenContracts.length }} rows</span>
+            </div>
           </div>
           <div class="table-wrap">
             <table class="table-token-related-contracts">
@@ -1320,8 +1362,7 @@
                 <col class="col-label-wide">
                 <col class="col-patterns">
                 <col class="col-amount">
-                <col class="col-amount">
-                <col class="col-amount">
+                <col class="col-short">
                 <col class="col-amount">
                 <col class="col-short">
                 <col class="col-short">
@@ -1333,8 +1374,7 @@
                   <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'label') }" @click="toggleTableSort('tokenRelatedContracts', 'label')">Label <span>{{ sortIndicator('tokenRelatedContracts', 'label') }}</span></button></th>
                   <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'patterns') }" @click="toggleTableSort('tokenRelatedContracts', 'patterns')">Patterns <span>{{ sortIndicator('tokenRelatedContracts', 'patterns') }}</span></button></th>
                   <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'balance') }" @click="toggleTableSort('tokenRelatedContracts', 'balance')">Balance <span>{{ sortIndicator('tokenRelatedContracts', 'balance') }}</span></button></th>
-                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'in') }" @click="toggleTableSort('tokenRelatedContracts', 'in')">In <span>{{ sortIndicator('tokenRelatedContracts', 'in') }}</span></button></th>
-                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'out') }" @click="toggleTableSort('tokenRelatedContracts', 'out')">Out <span>{{ sortIndicator('tokenRelatedContracts', 'out') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'deployed') }" @click="toggleTableSort('tokenRelatedContracts', 'deployed')">Deployed <span>{{ sortIndicator('tokenRelatedContracts', 'deployed') }}</span></button></th>
                   <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'flow') }" @click="toggleTableSort('tokenRelatedContracts', 'flow')">Total Flow <span>{{ sortIndicator('tokenRelatedContracts', 'flow') }}</span></button></th>
                   <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'auto_audit_status') }" @click="toggleTableSort('tokenRelatedContracts', 'auto_audit_status')">Auto Audit <span>{{ sortIndicator('tokenRelatedContracts', 'auto_audit_status') }}</span></button></th>
                   <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenRelatedContracts', 'audit_result') }" @click="toggleTableSort('tokenRelatedContracts', 'audit_result')">Audit Result <span>{{ sortIndicator('tokenRelatedContracts', 'audit_result') }}</span></button></th>
@@ -1342,7 +1382,7 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-if="!tokenContracts.length">
+                <tr v-if="!filteredTokenContracts.length">
                   <td colspan="10" class="muted">No contracts in this token</td>
                 </tr>
                 <template v-for="section in tokenContractSections" :key="section.key">
@@ -1379,7 +1419,7 @@
                       </button>
                     </div>
                   </td>
-                  <td>{{ row.seen_label || '--' }}</td>
+                  <td>{{ row.label || row.seen_label || '--' }}</td>
                   <td>
                     <div v-if="row.whitelist_patterns?.length" class="pattern-chip-list">
                       <span v-for="pattern in row.whitelist_patterns" :key="`${row.contract}:${pattern}`" class="chip small pattern-chip">
@@ -1389,8 +1429,7 @@
                     <span v-else class="muted">--</span>
                   </td>
                   <td class="mono">{{ formatTokenAmount(row.current_balance, tokenDetail.decimals) }}</td>
-                  <td class="mono">{{ formatTokenAmount(row.transfer_in_amount, tokenDetail.decimals) }}</td>
-                  <td class="mono">{{ formatTokenAmount(row.transfer_out_amount, tokenDetail.decimals) }}</td>
+                  <td :title="formatDateTime(row.deployed_at || row.created_at)">{{ formatRelativeTime(row.deployed_at || row.created_at) }}</td>
                   <td class="mono">{{ formatTokenAmount(row.total_token_flow, tokenDetail.decimals) }}</td>
                   <td>
                     <span class="chip small" :class="autoAuditStatusTone(autoAuditStatusLabel(row.auto_audit_status))">
@@ -2063,6 +2102,14 @@
     <script src="/vendor/vue-router.global.prod.js"></script>
     <script src="/vendor/pinia.iife.prod.js"></script>
     <script src="/js/dashboard-shared.js"></script>
+    <script src="/js/dashboard-runtime.js"></script>
+    <script src="/js/dashboard-scroll-sync.js"></script>
+    <script src="/js/dashboard-table-state.js"></script>
+    <script src="/js/dashboard-view-state.js"></script>
+    <script src="/js/dashboard-loaders.js"></script>
+    <script src="/js/dashboard-actions.js"></script>
+    <script src="/js/dashboard-modals.js"></script>
+    <script src="/js/dashboard-routing.js"></script>
     <script src="/js/dashboard.js" defer></script>
   </body>
 </html>

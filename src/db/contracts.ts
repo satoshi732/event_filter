@@ -6,6 +6,8 @@ import {
   normalizeAiAuditModel,
   normalizeAiAuditProvider,
 } from '../config.js';
+import { deriveAiAuditLifecycleStatus, normalizeAiAuditLifecycleStatus } from './audit-state.js';
+import { logger } from '../utils/logger.js';
 
 export function getKnownContractAddresses(chain: string): Set<string> {
   const rows = getDb().prepare(`
@@ -241,6 +243,7 @@ function mapBaseAiAuditRow(row: {
   chain: string;
   target_type: string;
   target_addr: string;
+  status: string | null;
   title: string;
   provider: string;
   model: string;
@@ -257,6 +260,11 @@ function mapBaseAiAuditRow(row: {
     chain: row.chain.toLowerCase(),
     targetType: (row.target_type === 'token' ? 'token' : 'contract') as AiAuditTargetType,
     targetAddr: row.target_addr.toLowerCase(),
+    status: deriveAiAuditLifecycleStatus({
+      status: row.status,
+      isSuccess: row.is_success == null ? null : Boolean(row.is_success),
+      auditedAt: row.audited_at ?? null,
+    }),
     title: row.title ?? '',
     provider: row.provider ?? '',
     model: row.model ?? '',
@@ -308,7 +316,7 @@ function getLatestAiAudits(
   const placeholders = normalized.map(() => '?').join(', ');
   const rows = getDb().prepare(`
     SELECT
-      request_session, chain, target_type, target_addr, title, provider, model, result_path,
+      request_session, chain, target_type, target_addr, status, title, provider, model, result_path,
       critical, high, medium, is_success, requested_at, audited_at
     FROM ai_audits
     WHERE chain = ?
@@ -320,6 +328,7 @@ function getLatestAiAudits(
     chain: string;
     target_type: string;
     target_addr: string;
+    status: string | null;
     title: string;
     provider: string;
     model: string;
@@ -375,16 +384,17 @@ export function getSingleTokenAiAudit(
 export function listPendingAiAudits(): BaseAiAuditRow[] {
   const rows = getDb().prepare(`
     SELECT
-      request_session, chain, target_type, target_addr, title, provider, model, result_path,
+      request_session, chain, target_type, target_addr, status, title, provider, model, result_path,
       critical, high, medium, is_success, requested_at, audited_at
     FROM ai_audits
-    WHERE audited_at IS NULL
+    WHERE status IN ('requested', 'running')
     ORDER BY requested_at ASC, request_session ASC
   `).all() as Array<{
     request_session: string;
     chain: string;
     target_type: string;
     target_addr: string;
+    status: string | null;
     title: string;
     provider: string;
     model: string;
@@ -414,15 +424,18 @@ function requestAiAudit(input: {
   const provider = normalizeAiAuditProvider(input.provider);
   const model = normalizeAiAuditModel(provider, input.model);
   const latest = getLatestAiAudits(input.targetType, chainName, [address]).get(address);
-  if (latest && latest.auditedAt === null) {
+  if (latest && (latest.status === 'requested' || latest.status === 'running')) {
+    logger.info(
+      `[ai-audit][state] ${input.targetType} ${chainName}:${address} session=${latest.requestSession} ${latest.status} -> ${latest.status} (reuse active request)`,
+    );
     return latest;
   }
 
   const requestSession = v2Id('ai-audit', `${input.targetType}:${chainName}:${address}:${Date.now()}`);
   getDb().prepare(`
     INSERT INTO ai_audits (
-      request_session, chain, target_type, target_addr, title, provider, model, requested_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      request_session, chain, target_type, target_addr, status, title, provider, model, requested_at
+    ) VALUES (?, ?, ?, ?, 'requested', ?, ?, ?, datetime('now'))
   `).run(
     requestSession,
     chainName,
@@ -433,11 +446,16 @@ function requestAiAudit(input: {
     model,
   );
 
+  logger.info(
+    `[ai-audit][state] ${input.targetType} ${chainName}:${address} session=${requestSession} idle -> requested`,
+  );
+
   return getLatestAiAudits(input.targetType, chainName, [address]).get(address) ?? {
     requestSession,
     chain: chainName,
     targetType: input.targetType,
     targetAddr: address,
+    status: 'requested',
     title,
     provider,
     model,
@@ -485,6 +503,65 @@ export function requestTokenAiAudit(input: {
   }));
 }
 
+export function updateAiAuditLifecycleStatus(input: {
+  requestSession: string;
+  status: 'requested' | 'running' | 'completed' | 'failed';
+}): BaseAiAuditRow | null {
+  const normalizedStatus = normalizeAiAuditLifecycleStatus(input.status) || 'requested';
+  const previous = getDb().prepare(`
+    SELECT request_session, chain, target_type, target_addr, status
+    FROM ai_audits
+    WHERE request_session = ?
+    LIMIT 1
+  `).get(input.requestSession) as {
+    request_session: string;
+    chain: string;
+    target_type: string;
+    target_addr: string;
+    status: string | null;
+  } | undefined;
+
+  getDb().prepare(`
+    UPDATE ai_audits
+    SET status = ?
+    WHERE request_session = ?
+  `).run(normalizedStatus, input.requestSession);
+
+  const row = getDb().prepare(`
+    SELECT
+      request_session, chain, target_type, target_addr, status, title, provider, model, result_path,
+      critical, high, medium, is_success, requested_at, audited_at
+    FROM ai_audits
+    WHERE request_session = ?
+    LIMIT 1
+  `).get(input.requestSession) as {
+    request_session: string;
+    chain: string;
+    target_type: string;
+    target_addr: string;
+    status: string | null;
+    title: string;
+    provider: string;
+    model: string;
+    result_path: string | null;
+    critical: number | null;
+    high: number | null;
+    medium: number | null;
+    is_success: number | null;
+    requested_at: string;
+    audited_at: string | null;
+  } | undefined;
+
+  if (row) {
+    const previousStatus = normalizeAiAuditLifecycleStatus(previous?.status) || 'idle';
+    logger.info(
+      `[ai-audit][state] ${row.target_type} ${row.chain}:${row.target_addr} session=${row.request_session} ${previousStatus} -> ${row.status || normalizedStatus}`,
+    );
+  }
+
+  return row ? mapBaseAiAuditRow(row) : null;
+}
+
 function saveAiAuditResult(input: {
   targetType: AiAuditTargetType;
   chain: string;
@@ -504,7 +581,7 @@ function saveAiAuditResult(input: {
   const address = input.targetAddr.toLowerCase();
   const existing = input.requestSession
     ? getDb().prepare(`
-      SELECT request_session, chain, target_type, target_addr, title, provider, model, result_path,
+      SELECT request_session, chain, target_type, target_addr, status, title, provider, model, result_path,
              critical, high, medium, is_success, requested_at, audited_at
       FROM ai_audits
       WHERE request_session = ?
@@ -514,6 +591,7 @@ function saveAiAuditResult(input: {
       chain: string;
       target_type: string;
       target_addr: string;
+      status: string | null;
       title: string;
       provider: string;
       model: string;
@@ -532,13 +610,17 @@ function saveAiAuditResult(input: {
   const provider = normalizeAiAuditProvider(input.provider || latest?.provider || getDefaultAiAuditProvider());
   const model = normalizeAiAuditModel(provider, input.model || latest?.model || getDefaultAiAuditModel(provider));
   const title = resolveAiAuditTitle(input.title || latest?.title, chainName, address);
+  const nextStatus = input.isSuccess == null
+    ? (latest?.status === 'running' ? 'running' : 'requested')
+    : (input.isSuccess ? 'completed' : 'failed');
 
   getDb().prepare(`
     INSERT INTO ai_audits (
-      request_session, chain, target_type, target_addr, title, provider, model, result_path,
+      request_session, chain, target_type, target_addr, status, title, provider, model, result_path,
       critical, high, medium, is_success, requested_at, audited_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
     ON CONFLICT(request_session) DO UPDATE SET
+      status = excluded.status,
       title = excluded.title,
       provider = excluded.provider,
       model = excluded.model,
@@ -553,6 +635,7 @@ function saveAiAuditResult(input: {
     chainName,
     input.targetType,
     address,
+    nextStatus,
     title,
     provider,
     model,
@@ -564,11 +647,16 @@ function saveAiAuditResult(input: {
     input.auditedAt ?? new Date().toISOString(),
   );
 
+  logger.info(
+    `[ai-audit][state] ${input.targetType} ${chainName}:${address} session=${requestSession} ${latest?.status || 'idle'} -> ${nextStatus}`,
+  );
+
   return getLatestAiAudits(input.targetType, chainName, [address]).get(address) ?? {
     requestSession,
     chain: chainName,
     targetType: input.targetType,
     targetAddr: address,
+    status: nextStatus,
     title,
     provider,
     model,

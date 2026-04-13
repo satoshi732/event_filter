@@ -1,10 +1,8 @@
 import {
-  getAppSetting,
   getLatestContractAiAudits,
   getLatestTokenAiAudits,
   requestContractAiAudit,
   requestTokenAiAudit,
-  setManyAppSettings,
   type ContractRegistryRow,
 } from '../../db.js';
 import { getAutoAnalysisConfig } from '../../config.js';
@@ -21,11 +19,10 @@ import {
   listDashboardSeenSelectors,
   listDashboardStoredTokens,
 } from '../dashboard/repository.js';
+import { loadPersistedAutoAnalysisState, persistAutoAnalysisState, type AutoAnalysisPhase } from './state.js';
 
 const LOOP_INTERVAL_MS = 2_500;
 const FAILURE_BACKOFF_MS = 10_000;
-
-type AutoAnalysisPhase = 'idle' | 'screening' | 'auditing' | 'round' | 'draining';
 
 export interface AutoAnalysisStatus {
   enabled: boolean;
@@ -49,16 +46,18 @@ type AutoAnalysisListener = (status: AutoAnalysisStatus) => void | Promise<void>
 
 const listeners = new Set<AutoAnalysisListener>();
 
+const persistedState = loadPersistedAutoAnalysisState();
+
 const state: AutoAnalysisStatus = {
-  enabled: false,
-  stopping: false,
-  chain: null,
-  phase: 'idle',
+  enabled: persistedState.enabled,
+  stopping: persistedState.stopping,
+  chain: persistedState.chain,
+  phase: persistedState.phase,
   queued: 0,
   active: 0,
   capacity: getAiAuditWorkerStatus().capacity,
-  cycle: 0,
-  lastAction: 'Auto analysis is idle',
+  cycle: persistedState.cycle,
+  lastAction: persistedState.lastAction,
   updatedAt: new Date().toISOString(),
 };
 
@@ -89,10 +88,14 @@ function groupKeyForContract(row: ContractRegistryRow): string {
 }
 
 function persistState(): void {
-  setManyAppSettings([
-    { key: 'auto_analysis.enabled', value: state.enabled ? '1' : '0' },
-    { key: 'auto_analysis.chain', value: state.chain ?? '' },
-  ]);
+  persistAutoAnalysisState({
+    enabled: state.enabled,
+    stopping: state.stopping,
+    chain: state.chain,
+    phase: state.phase,
+    cycle: state.cycle,
+    lastAction: state.lastAction,
+  });
 }
 
 function refreshWorkerStatus(): void {
@@ -116,6 +119,7 @@ function publish(): void {
 
 function setStatus(patch: Partial<AutoAnalysisStatus>): void {
   Object.assign(state, patch);
+  persistState();
   publish();
 }
 
@@ -410,14 +414,12 @@ export function stopAutoAnalysis(): AutoAnalysisStatus {
 }
 
 export function startAutoAnalysisEngine(): void {
-  const enabled = getAppSetting('auto_analysis.enabled') === '1';
-  const chain = String(getAppSetting('auto_analysis.chain') || '').trim().toLowerCase();
   const config = getAutoAnalysisConfig();
   setAiAuditWorkerCapacity(config.queueCapacity);
   refreshWorkerStatus();
   publish();
-  if (enabled && chain) {
-    logger.info(`[auto-analysis] Restoring auto analysis mode for ${chain}`);
-    startAutoAnalysis(chain);
+  if (state.enabled && state.chain) {
+    logger.info(`[auto-analysis] Restoring auto analysis mode for ${state.chain}`);
+    startAutoAnalysis(state.chain);
   }
 }

@@ -193,6 +193,7 @@ function initSchema(db: Database.Database): void {
       chain             TEXT NOT NULL,
       target_type       TEXT NOT NULL,
       target_addr       TEXT NOT NULL,
+      status            TEXT NOT NULL DEFAULT 'requested',
       title             TEXT NOT NULL DEFAULT '',
       provider          TEXT NOT NULL DEFAULT '',
       model             TEXT NOT NULL DEFAULT '',
@@ -333,6 +334,7 @@ function ensureAiAuditSchema(db: Database.Database): void {
         chain             TEXT NOT NULL,
         target_type       TEXT NOT NULL,
         target_addr       TEXT NOT NULL,
+        status            TEXT NOT NULL DEFAULT 'requested',
         title             TEXT NOT NULL DEFAULT '',
         provider          TEXT NOT NULL DEFAULT '',
         model             TEXT NOT NULL DEFAULT '',
@@ -352,6 +354,9 @@ function ensureAiAuditSchema(db: Database.Database): void {
   }
   if (!cols.some((col) => col.name === 'target_addr')) {
     db.exec(`ALTER TABLE ai_audits ADD COLUMN target_addr TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!cols.some((col) => col.name === 'status')) {
+    db.exec(`ALTER TABLE ai_audits ADD COLUMN status TEXT NOT NULL DEFAULT 'requested';`);
   }
   if (!cols.some((col) => col.name === 'title')) {
     db.exec(`ALTER TABLE ai_audits ADD COLUMN title TEXT NOT NULL DEFAULT '';`);
@@ -398,7 +403,7 @@ function migrateLegacyContractAiAudits(db: Database.Database): void {
 
   db.exec(`
     INSERT OR IGNORE INTO ai_audits (
-      request_session, chain, target_type, target_addr, title, provider, model, result_path,
+      request_session, chain, target_type, target_addr, status, title, provider, model, result_path,
       critical, high, medium, is_success, requested_at, audited_at
     )
     SELECT
@@ -406,6 +411,11 @@ function migrateLegacyContractAiAudits(db: Database.Database): void {
       chain,
       'contract' AS target_type,
       contract_addr AS target_addr,
+      CASE
+        WHEN audited_at IS NULL THEN 'requested'
+        WHEN is_success = 0 THEN 'failed'
+        ELSE 'completed'
+      END AS status,
       title,
       provider,
       model,

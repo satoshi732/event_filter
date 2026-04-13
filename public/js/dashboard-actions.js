@@ -25,6 +25,7 @@
       tokenCacheKey,
       contractCacheKey,
       syncDashboardUrlState,
+      viewDataCache,
       goBackToPrevious,
     } = deps;
 

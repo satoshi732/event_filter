@@ -570,6 +570,8 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
           ...tokenWithReviews,
           review: tokenRegistry?.review ?? tokenWithReviews.review ?? '',
           is_exploitable: tokenRegistry?.isExploitable ?? Boolean(tokenWithReviews.is_exploitable),
+          is_auto_audit: tokenRegistry?.isAutoAudited ?? Boolean(tokenWithReviews.is_auto_audit),
+          is_manual_audit: tokenRegistry?.isManualAudited ?? Boolean(tokenWithReviews.is_manual_audit),
           auto_analysis: analysis ? {
             request_session: analysis.requestSession,
             title: analysis.title,

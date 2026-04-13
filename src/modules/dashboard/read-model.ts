@@ -126,8 +126,21 @@ export function tokenSummary(token: TokenResult, audit?: TokenAiAuditRow | null)
 }
 
 export function buildDashboardTokens(chain: string, run: PipelineRunResult): DashboardTokenSummary[] {
+  const tokenRegistryMap = new Map(
+    listDashboardStoredTokens(chain).map((token) => [token.token.toLowerCase(), token] as const),
+  );
   const auditMap = getDashboardTokenAutoAnalysis(chain, run.tokens.map((token) => token.token));
-  return run.tokens.map((token) => tokenSummary(token, auditMap.get(token.token.toLowerCase()) ?? null));
+  return run.tokens.map((token) => {
+    const registry = tokenRegistryMap.get(token.token.toLowerCase());
+    const resolvedToken = registry ? {
+      ...token,
+      review: registry.review,
+      is_exploitable: registry.isExploitable,
+      is_auto_audit: registry.isAutoAudited,
+      is_manual_audit: registry.isManualAudited,
+    } : token;
+    return tokenSummary(resolvedToken, auditMap.get(token.token.toLowerCase()) ?? null);
+  });
 }
 
 function mapSeenContractReview(row: SeenContractRow) {

@@ -137,16 +137,21 @@ function renderReportHtml(title: string, label: string, value: string, chain: st
 </html>`;
 }
 
-function normalizeTimeOfDayInput(value: unknown): string {
+function normalizeDateTimeLocalInput(value: unknown): string {
   const normalized = String(value || '').trim();
   if (!normalized) return '';
-  const match = normalized.match(/^(\d{1,2}):(\d{2})$/);
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
   if (!match) return '';
-  const hour = Number(match[1]);
-  const minute = Number(match[2]);
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return '';
+  if (month < 1 || month > 12 || day < 1 || day > 31) return '';
   if (!Number.isInteger(hour) || !Number.isInteger(minute)) return '';
   if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return '';
-  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
 function coerceAutoAnalysisRuntimeConfig(input: unknown) {
@@ -170,7 +175,7 @@ function coerceAutoAnalysisRuntimeConfig(input: unknown) {
     queueCapacity: toPositiveInt(source.queue_capacity, 10),
     roundAuditLimit: toPositiveInt(source.round_audit_limit, 5),
     roundRestSeconds: toPositiveInt(source.round_rest_seconds, 60),
-    stopAtTime: normalizeTimeOfDayInput(source.stop_at_time) || null,
+    stopAtDateTime: normalizeDateTimeLocalInput(source.stop_at_datetime ?? source.stop_at_time) || null,
     tokenSharePercent: toPositiveInt(source.token_share_percent, 40),
     contractSharePercent: toPositiveInt(source.contract_share_percent, 60),
     provider,

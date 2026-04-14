@@ -53,16 +53,21 @@ function parseBoolean(value: unknown, fallback: boolean): boolean {
   return fallback;
 }
 
-function normalizeTimeOfDay(value: unknown): string | null {
+function normalizeDateTimeLocal(value: unknown): string | null {
   const normalized = String(value || '').trim();
   if (!normalized) return null;
-  const match = normalized.match(/^(\d{1,2}):(\d{2})$/);
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
   if (!match) return null;
-  const hour = Number(match[1]);
-  const minute = Number(match[2]);
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
   if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
   if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
-  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
 export interface AutoAnalysisStatus {
@@ -82,7 +87,7 @@ export interface AutoAnalysisRuntimeConfig {
   queueCapacity: number;
   roundAuditLimit: number;
   roundRestSeconds: number;
-  stopAtTime: string | null;
+  stopAtDateTime: string | null;
   tokenSharePercent: number;
   contractSharePercent: number;
   provider: string;
@@ -111,7 +116,7 @@ const DEFAULT_AUTO_ANALYSIS_CONFIG: AutoAnalysisRuntimeConfig = {
   queueCapacity: 10,
   roundAuditLimit: 5,
   roundRestSeconds: 60,
-  stopAtTime: null,
+  stopAtDateTime: null,
   tokenSharePercent: 40,
   contractSharePercent: 60,
   provider: DEFAULT_AUTO_ANALYSIS_PROVIDER,
@@ -230,7 +235,7 @@ function normalizeRuntimeConfig(input: Partial<AutoAnalysisRuntimeConfig> | null
     queueCapacity: parsePositiveInt(merged.queueCapacity, DEFAULT_AUTO_ANALYSIS_CONFIG.queueCapacity),
     roundAuditLimit: parsePositiveInt(merged.roundAuditLimit, DEFAULT_AUTO_ANALYSIS_CONFIG.roundAuditLimit),
     roundRestSeconds: parsePositiveInt(merged.roundRestSeconds, DEFAULT_AUTO_ANALYSIS_CONFIG.roundRestSeconds),
-    stopAtTime: normalizeTimeOfDay(merged.stopAtTime),
+    stopAtDateTime: normalizeDateTimeLocal(merged.stopAtDateTime),
     tokenSharePercent: parsePositiveInt(merged.tokenSharePercent, DEFAULT_AUTO_ANALYSIS_CONFIG.tokenSharePercent),
     contractSharePercent: parsePositiveInt(merged.contractSharePercent, DEFAULT_AUTO_ANALYSIS_CONFIG.contractSharePercent),
     provider,
@@ -275,29 +280,33 @@ function resetRoundWindow(): void {
   roundRestUntilMs = 0;
 }
 
-function parseTimeOfDay(value: string | null | undefined): { hour: number; minute: number; label: string } | null {
+function parseDateTimeLocal(value: string | null | undefined): { timestamp: number; label: string } | null {
   const normalized = String(value || '').trim();
   if (!normalized) return null;
-  const match = normalized.match(/^(\d{1,2}):(\d{2})$/);
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
   if (!match) return null;
-  const hour = Number(match[1]);
-  const minute = Number(match[2]);
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
   if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
   if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  const deadline = new Date(year, month - 1, day, hour, minute, 0, 0);
+  if (Number.isNaN(deadline.getTime())) return null;
   return {
-    hour,
-    minute,
-    label: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`,
+    timestamp: deadline.getTime(),
+    label: `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')} ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`,
   };
 }
 
-function hasReachedConfiguredStopTime(stopAtTime: string | null | undefined, now = new Date()): { reached: boolean; label: string | null } {
-  const parsed = parseTimeOfDay(stopAtTime);
+function hasReachedConfiguredStopTime(stopAtDateTime: string | null | undefined, now = new Date()): { reached: boolean; label: string | null } {
+  const parsed = parseDateTimeLocal(stopAtDateTime);
   if (!parsed) return { reached: false, label: null };
-  const deadline = new Date(now);
-  deadline.setHours(parsed.hour, parsed.minute, 0, 0);
   return {
-    reached: now.getTime() >= deadline.getTime(),
+    reached: now.getTime() >= parsed.timestamp,
     label: parsed.label,
   };
 }
@@ -492,7 +501,7 @@ async function runLoop(): Promise<void> {
         continue;
       }
 
-      const stopTimeState = hasReachedConfiguredStopTime(getRuntimeConfig().stopAtTime);
+      const stopTimeState = hasReachedConfiguredStopTime(getRuntimeConfig().stopAtDateTime);
       if (stopTimeState.reached) {
         stopAutoAnalysis(`Auto analysis stop time ${stopTimeState.label || 'configured cutoff'} reached on ${chain.toUpperCase()}`);
         await sleep(LOOP_INTERVAL_MS);

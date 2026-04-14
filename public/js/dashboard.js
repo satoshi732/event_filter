@@ -314,7 +314,7 @@
             queue_capacity: 10,
             round_audit_limit: 5,
             round_rest_seconds: 60,
-            stop_at_time: '',
+            stop_at_datetime: '',
             token_share_percent: 40,
             contract_share_percent: 60,
             provider: 'claude',

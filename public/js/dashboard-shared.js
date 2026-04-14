@@ -137,17 +137,11 @@
     const minute = 60 * 1000;
     const hour = 60 * minute;
     const day = 24 * hour;
-    const week = 7 * day;
-    const month = 30 * day;
-    const year = 365 * day;
 
     if (diffMs < minute) return 'just now';
     if (diffMs < hour) return `${Math.floor(diffMs / minute)} min`;
     if (diffMs < day) return `${Math.floor(diffMs / hour)} hr`;
-    if (diffMs < week) return `${Math.floor(diffMs / day)} days`;
-    if (diffMs < month) return `${Math.floor(diffMs / week)} weeks`;
-    if (diffMs < year) return `${Math.floor(diffMs / month)} months`;
-    return `${Math.floor(diffMs / year)} years`;
+    return `${Math.floor(diffMs / day)} days`;
   }
 
   function shortAddress(value, head = 8, tail = 6) {

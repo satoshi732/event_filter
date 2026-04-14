@@ -296,6 +296,9 @@ function applyDashboardTokenQuery(
       case 'manual_audit':
         delta = compareNumberLike(a.is_manual_audit ? 1 : 0, b.is_manual_audit ? 1 : 0);
         break;
+      case 'deployed':
+        delta = compareStringLike(a.token_created_at || '', b.token_created_at || '');
+        break;
       case 'price':
         delta = compareNumberLike(a.token_price_usd, b.token_price_usd);
         break;

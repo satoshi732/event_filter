@@ -955,7 +955,7 @@
                   <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'auto_audit_status') }" @click="toggleTableSort('tokenDirectory', 'auto_audit_status')">Auto Audit <span>{{ sortIndicator('tokenDirectory', 'auto_audit_status') }}</span></button></th>
                   <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'audit_result') }" @click="toggleTableSort('tokenDirectory', 'audit_result')">Audit Result <span>{{ sortIndicator('tokenDirectory', 'audit_result') }}</span></button></th>
                   <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'manual_audit') }" @click="toggleTableSort('tokenDirectory', 'manual_audit')">Manual Audit <span>{{ sortIndicator('tokenDirectory', 'manual_audit') }}</span></button></th>
-                  <th>Deployed</th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'deployed') }" @click="toggleTableSort('tokenDirectory', 'deployed')">Deployed <span>{{ sortIndicator('tokenDirectory', 'deployed') }}</span></button></th>
                   <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'price') }" @click="toggleTableSort('tokenDirectory', 'price')">Price <span>{{ sortIndicator('tokenDirectory', 'price') }}</span></button></th>
                   <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'contracts') }" @click="toggleTableSort('tokenDirectory', 'contracts')">Contracts <span>{{ sortIndicator('tokenDirectory', 'contracts') }}</span></button></th>
                   <th>Action</th>

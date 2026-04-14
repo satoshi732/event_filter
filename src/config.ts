@@ -64,6 +64,9 @@ export interface AppConfig {
   };
   auto_analysis?: {
     queue_capacity?: number;
+    round_audit_limit?: number;
+    round_rest_seconds?: number;
+    stop_at_time?: string;
     token_share_percent?: number;
     contract_share_percent?: number;
     provider?: string;
@@ -220,6 +223,18 @@ function parseBool(value: string | null | undefined, fallback: boolean): boolean
   if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
   if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
   return fallback;
+}
+
+function normalizeTimeOfDay(value: unknown): string {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '';
+  const match = normalized.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return '';
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return '';
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return '';
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
 function parseStringList(value: string | null | undefined, fallback: string[] = []): string[] {
@@ -515,6 +530,12 @@ function seedRuntimeConfigIfNeeded(): void {
     appEntries.push({ key: 'auto_analysis.exclude_audited_contracts', value: '1' });
     appEntries.push({ key: 'auto_analysis.exclude_audited_tokens', value: '1' });
   }
+  if (getAppSetting('auto_analysis.round_audit_limit') == null) {
+    appEntries.push({ key: 'auto_analysis.round_audit_limit', value: '5' });
+  }
+  if (getAppSetting('auto_analysis.round_rest_seconds') == null) {
+    appEntries.push({ key: 'auto_analysis.round_rest_seconds', value: '60' });
+  }
   if (getAppSetting('auto_analysis.retry_failed_audits') == null) {
     appEntries.push({ key: 'auto_analysis.retry_failed_audits', value: '1' });
   }
@@ -636,6 +657,9 @@ function loadRuntimeConfigFromDb(): RuntimeConfigCache {
     },
     auto_analysis: {
       queue_capacity: parsePositiveInt(getAppSetting('auto_analysis.queue_capacity'), 10),
+      round_audit_limit: parsePositiveInt(getAppSetting('auto_analysis.round_audit_limit'), 5),
+      round_rest_seconds: parsePositiveInt(getAppSetting('auto_analysis.round_rest_seconds'), 60),
+      stop_at_time: normalizeTimeOfDay(getAppSetting('auto_analysis.stop_at_time')),
       token_share_percent: parsePositiveInt(getAppSetting('auto_analysis.token_share_percent'), 40),
       contract_share_percent: parsePositiveInt(getAppSetting('auto_analysis.contract_share_percent'), 60),
       provider: autoAnalysisProvider,
@@ -810,6 +834,9 @@ export function getAiAuditBackendConfig(): {
 
 export function getAutoAnalysisConfig(): {
   queueCapacity: number;
+  roundAuditLimit: number;
+  roundRestSeconds: number;
+  stopAtTime: string | null;
   tokenSharePercent: number;
   contractSharePercent: number;
   provider: string;
@@ -828,6 +855,9 @@ export function getAutoAnalysisConfig(): {
   const provider = normalizeAiAuditProvider(raw.provider);
   return {
     queueCapacity: parsePositiveInt(raw.queue_capacity, 10),
+    roundAuditLimit: parsePositiveInt(raw.round_audit_limit, 5),
+    roundRestSeconds: parsePositiveInt(raw.round_rest_seconds, 60),
+    stopAtTime: normalizeTimeOfDay(raw.stop_at_time) || null,
     tokenSharePercent: parsePositiveInt(raw.token_share_percent, 40),
     contractSharePercent: parsePositiveInt(raw.contract_share_percent, 60),
     provider,

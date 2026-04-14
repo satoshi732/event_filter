@@ -436,6 +436,18 @@
                     <input v-model.number="settings.runtime_settings.auto_analysis.queue_capacity" type="number" min="1" max="50">
                   </label>
                   <label class="stack-label">
+                    <span>Round Audit Limit</span>
+                    <input v-model.number="settings.runtime_settings.auto_analysis.round_audit_limit" type="number" min="1" max="200">
+                  </label>
+                  <label class="stack-label">
+                    <span>Round Rest (sec)</span>
+                    <input v-model.number="settings.runtime_settings.auto_analysis.round_rest_seconds" type="number" min="1" max="3600">
+                  </label>
+                  <label class="stack-label">
+                    <span>Stop At (local)</span>
+                    <input v-model="settings.runtime_settings.auto_analysis.stop_at_time" type="time">
+                  </label>
+                  <label class="stack-label">
                     <span>Token Share (%)</span>
                     <input v-model.number="settings.runtime_settings.auto_analysis.token_share_percent" type="number" min="0" max="100">
                   </label>

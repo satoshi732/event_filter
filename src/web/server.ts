@@ -80,10 +80,12 @@ import {
   enqueueTokenAiAudit,
   getContractAiAuditPlan,
   subscribeAiAuditEvents,
+  type AiAuditEvent,
   startAiAuditWorker,
 } from '../modules/ai-audit-runner/index.js';
 import {
   configureAutoAnalysisEngine,
+  getAutoAnalysisRuntimeConfig,
   getAutoAnalysisStatus,
   startAutoAnalysis,
   startAutoAnalysisEngine,
@@ -179,6 +181,39 @@ function compareNumberLike(a: number | null | undefined, b: number | null | unde
 
 function compareStringLike(a: string | null | undefined, b: string | null | undefined): number {
   return String(a || '').localeCompare(String(b || ''));
+}
+
+function isAiAuditRateLimitFailure(event: AiAuditEvent): boolean {
+  if (event.kind !== 'failed' || event.status !== 'failed') return false;
+  const message = String(event.error || '').trim().toLowerCase();
+  if (!message) return false;
+  return /rate[\s-]?limit/.test(message)
+    || /too many requests/.test(message)
+    || /\b429\b/.test(message)
+    || /quota exceeded/.test(message);
+}
+
+function serializeAutoAnalysisRuntimeConfig() {
+  const config = getAutoAnalysisRuntimeConfig();
+  return {
+    queue_capacity: config.queueCapacity,
+    round_audit_limit: config.roundAuditLimit,
+    round_rest_seconds: config.roundRestSeconds,
+    stop_at_time: config.stopAtTime || '',
+    token_share_percent: config.tokenSharePercent,
+    contract_share_percent: config.contractSharePercent,
+    provider: config.provider,
+    model: config.model,
+    contract_min_tvl_usd: config.contractMinTvlUsd,
+    token_min_price_usd: config.tokenMinPriceUsd,
+    require_token_sync: config.requireTokenSync,
+    require_contract_selectors: config.requireContractSelectors,
+    skip_seen_contracts: config.skipSeenContracts,
+    one_per_contract_pattern: config.onePerContractPattern,
+    retry_failed_audits: config.retryFailedAudits,
+    exclude_audited_contracts: config.excludeAuditedContracts,
+    exclude_audited_tokens: config.excludeAuditedTokens,
+  };
 }
 
 function applyDashboardContractQuery(
@@ -341,7 +376,7 @@ async function buildSettingsPayload() {
       pattern_sync: snapshot.pattern_sync ?? null,
       pancakeswap_price: snapshot.pancakeswap_price ?? { max_req_per_second: 2, max_req_per_minute: 90 },
       ai_audit_backend: snapshot.ai_audit_backend ?? getAiAuditBackendConfig(),
-      auto_analysis: snapshot.auto_analysis ?? null,
+      auto_analysis: serializeAutoAnalysisRuntimeConfig(),
       access: {
         auth_enabled: userAuth.authEnabled,
         username: userAuth.username,
@@ -664,6 +699,15 @@ export async function startWebServer(
   });
   const unsubscribeAiAudit = subscribeAiAuditEvents((event) => {
     invalidateReadCaches(event.chain);
+    if (isAiAuditRateLimitFailure(event)) {
+      const autoStatus = getAutoAnalysisStatus();
+      if (autoStatus.enabled) {
+        const detail = String(event.error || '').trim();
+        const reason = `Auto analysis stopped after AI backend rate limit on ${event.provider}/${event.model} for ${event.targetType} ${event.chain}:${event.targetAddr}`;
+        stopAutoAnalysis(detail ? `${reason}: ${detail}` : reason);
+        void broadcastStateSnapshot();
+      }
+    }
     broadcastNamedEvent('ai-audit', event);
   });
   const unsubscribePatternSync = subscribePatternSyncEvents((event) => {

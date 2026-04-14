@@ -134,6 +134,17 @@ class HttpError extends Error {
   }
 }
 
+function describeAuditError(error: unknown): string {
+  if (error instanceof HttpError) {
+    const body = String(error.body || '').trim();
+    return body ? `${error.message}: ${body}` : error.message;
+  }
+  if (error instanceof Error) {
+    return error.message || error.toString();
+  }
+  return String(error);
+}
+
 const CHAIN_SPECS: ChainSpec[] = [
   { canonical: 'ethereum', dedaubChain: 'ethereum', etherscanChainId: '1', explorerUrl: 'https://etherscan.io', aliases: ['eth', 'ethereum', 'mainnet'] },
   { canonical: 'arbitrum', dedaubChain: 'arbitrum', etherscanChainId: '42161', explorerUrl: 'https://arbiscan.io', aliases: ['arb', 'arbitrum'] },
@@ -741,6 +752,7 @@ ${resultText}
 function persistFailure(
   job: QueuedAuditJob,
   sessions: { dedaubJobId?: string | null; analysisSessionId?: string | null } = {},
+  errorMessage?: string | null,
 ): void {
   const payload = {
     chain: job.chain,
@@ -767,7 +779,7 @@ function persistFailure(
   publishAiAuditEvent(job, {
     kind: 'failed',
     status: 'failed',
-    error: 'audit failed',
+    error: String(errorMessage || '').trim() || 'audit failed',
   });
 }
 
@@ -930,7 +942,7 @@ async function continueAuditJob(
     logger.info(`[ai-audit] Completed ${job.targetType} audit ${job.chain}:${job.targetAddr} -> c:${report.critical} h:${report.high} m:${report.medium}`);
   } catch (error) {
     logger.error(`[ai-audit] Audit failed for ${job.targetType} ${job.chain}:${job.targetAddr}`, error);
-    persistFailure(job, { dedaubJobId, analysisSessionId });
+    persistFailure(job, { dedaubJobId, analysisSessionId }, describeAuditError(error));
   }
 }
 
@@ -942,7 +954,7 @@ async function executeAuditJob(job: QueuedAuditJob): Promise<void> {
     persistFailure(job, {
       dedaubJobId: job.dedaubJobId ?? null,
       analysisSessionId: job.analysisSessionId ?? null,
-    });
+    }, describeAuditError(error));
   }
 }
 
@@ -1033,7 +1045,7 @@ export function startAiAuditWorker(): void {
     logger.warn(
       `[ai-audit] Marking ${job.targetType} ${job.chain}:${job.targetAddr} session=${job.requestSession} as failed; backend session ids were not persisted`,
     );
-    persistFailure(job);
+    persistFailure(job, {}, 'backend session ids were not persisted');
   }
 }
 

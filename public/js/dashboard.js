@@ -312,6 +312,9 @@
           },
           auto_analysis: {
             queue_capacity: 10,
+            round_audit_limit: 5,
+            round_rest_seconds: 60,
+            stop_at_time: '',
             token_share_percent: 40,
             contract_share_percent: 60,
             provider: 'claude',

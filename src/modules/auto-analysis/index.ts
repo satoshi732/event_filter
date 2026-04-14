@@ -5,7 +5,12 @@ import {
   requestTokenAiAudit,
   type ContractRegistryRow,
 } from '../../db.js';
-import { getAutoAnalysisConfig } from '../../config.js';
+import {
+  getDefaultAiAuditModel,
+  getDefaultAiAuditProvider,
+  normalizeAiAuditModel,
+  normalizeAiAuditProvider,
+} from '../../config.js';
 import { logger } from '../../utils/logger.js';
 import {
   enqueueContractAiAudit,
@@ -23,6 +28,42 @@ import { loadPersistedAutoAnalysisState, persistAutoAnalysisState, type AutoAnal
 
 const LOOP_INTERVAL_MS = 2_500;
 const FAILURE_BACKOFF_MS = 10_000;
+const DEFAULT_AUTO_ANALYSIS_PROVIDER = getDefaultAiAuditProvider();
+
+function parsePositiveInt(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
+function parsePositiveFloat(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+function parseBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
+function normalizeTimeOfDay(value: unknown): string | null {
+  const normalized = String(value || '').trim();
+  if (!normalized) return null;
+  const match = normalized.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
 
 export interface AutoAnalysisStatus {
   enabled: boolean;
@@ -37,6 +78,26 @@ export interface AutoAnalysisStatus {
   updatedAt: string;
 }
 
+export interface AutoAnalysisRuntimeConfig {
+  queueCapacity: number;
+  roundAuditLimit: number;
+  roundRestSeconds: number;
+  stopAtTime: string | null;
+  tokenSharePercent: number;
+  contractSharePercent: number;
+  provider: string;
+  model: string;
+  contractMinTvlUsd: number;
+  tokenMinPriceUsd: number;
+  requireTokenSync: boolean;
+  requireContractSelectors: boolean;
+  skipSeenContracts: boolean;
+  onePerContractPattern: boolean;
+  retryFailedAudits: boolean;
+  excludeAuditedContracts: boolean;
+  excludeAuditedTokens: boolean;
+}
+
 interface AutoAnalysisControls {
   runRound: (chain: string) => Promise<unknown>;
   isRoundRunning: () => boolean;
@@ -45,6 +106,28 @@ interface AutoAnalysisControls {
 type AutoAnalysisListener = (status: AutoAnalysisStatus) => void | Promise<void>;
 
 const listeners = new Set<AutoAnalysisListener>();
+
+const DEFAULT_AUTO_ANALYSIS_CONFIG: AutoAnalysisRuntimeConfig = {
+  queueCapacity: 10,
+  roundAuditLimit: 5,
+  roundRestSeconds: 60,
+  stopAtTime: null,
+  tokenSharePercent: 40,
+  contractSharePercent: 60,
+  provider: DEFAULT_AUTO_ANALYSIS_PROVIDER,
+  model: getDefaultAiAuditModel(DEFAULT_AUTO_ANALYSIS_PROVIDER),
+  contractMinTvlUsd: 10_000,
+  tokenMinPriceUsd: 0.001,
+  requireTokenSync: true,
+  requireContractSelectors: true,
+  skipSeenContracts: true,
+  onePerContractPattern: true,
+  retryFailedAudits: true,
+  excludeAuditedContracts: true,
+  excludeAuditedTokens: true,
+};
+
+let runtimeConfig: AutoAnalysisRuntimeConfig = { ...DEFAULT_AUTO_ANALYSIS_CONFIG };
 
 const persistedState = loadPersistedAutoAnalysisState();
 
@@ -63,6 +146,8 @@ const state: AutoAnalysisStatus = {
 
 let controls: AutoAnalysisControls | null = null;
 let loopPromise: Promise<void> | null = null;
+let roundQueuedSinceRest = 0;
+let roundRestUntilMs = 0;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -134,6 +219,38 @@ function publish(): void {
   }
 }
 
+function normalizeRuntimeConfig(input: Partial<AutoAnalysisRuntimeConfig> | null | undefined): AutoAnalysisRuntimeConfig {
+  const merged = {
+    ...DEFAULT_AUTO_ANALYSIS_CONFIG,
+    ...runtimeConfig,
+    ...(input || {}),
+  };
+  const provider = normalizeAiAuditProvider(merged.provider);
+  return {
+    queueCapacity: parsePositiveInt(merged.queueCapacity, DEFAULT_AUTO_ANALYSIS_CONFIG.queueCapacity),
+    roundAuditLimit: parsePositiveInt(merged.roundAuditLimit, DEFAULT_AUTO_ANALYSIS_CONFIG.roundAuditLimit),
+    roundRestSeconds: parsePositiveInt(merged.roundRestSeconds, DEFAULT_AUTO_ANALYSIS_CONFIG.roundRestSeconds),
+    stopAtTime: normalizeTimeOfDay(merged.stopAtTime),
+    tokenSharePercent: parsePositiveInt(merged.tokenSharePercent, DEFAULT_AUTO_ANALYSIS_CONFIG.tokenSharePercent),
+    contractSharePercent: parsePositiveInt(merged.contractSharePercent, DEFAULT_AUTO_ANALYSIS_CONFIG.contractSharePercent),
+    provider,
+    model: normalizeAiAuditModel(provider, merged.model),
+    contractMinTvlUsd: parsePositiveFloat(merged.contractMinTvlUsd, DEFAULT_AUTO_ANALYSIS_CONFIG.contractMinTvlUsd),
+    tokenMinPriceUsd: parsePositiveFloat(merged.tokenMinPriceUsd, DEFAULT_AUTO_ANALYSIS_CONFIG.tokenMinPriceUsd),
+    requireTokenSync: parseBoolean(merged.requireTokenSync, DEFAULT_AUTO_ANALYSIS_CONFIG.requireTokenSync),
+    requireContractSelectors: parseBoolean(merged.requireContractSelectors, DEFAULT_AUTO_ANALYSIS_CONFIG.requireContractSelectors),
+    skipSeenContracts: parseBoolean(merged.skipSeenContracts, DEFAULT_AUTO_ANALYSIS_CONFIG.skipSeenContracts),
+    onePerContractPattern: parseBoolean(merged.onePerContractPattern, DEFAULT_AUTO_ANALYSIS_CONFIG.onePerContractPattern),
+    retryFailedAudits: parseBoolean(merged.retryFailedAudits, DEFAULT_AUTO_ANALYSIS_CONFIG.retryFailedAudits),
+    excludeAuditedContracts: parseBoolean(merged.excludeAuditedContracts, DEFAULT_AUTO_ANALYSIS_CONFIG.excludeAuditedContracts),
+    excludeAuditedTokens: parseBoolean(merged.excludeAuditedTokens, DEFAULT_AUTO_ANALYSIS_CONFIG.excludeAuditedTokens),
+  };
+}
+
+function getRuntimeConfig(): AutoAnalysisRuntimeConfig {
+  return runtimeConfig;
+}
+
 function setStatus(patch: Partial<AutoAnalysisStatus>): void {
   Object.assign(state, patch);
   persistState();
@@ -153,8 +270,40 @@ function currentWorkerStatus() {
   return worker;
 }
 
+function resetRoundWindow(): void {
+  roundQueuedSinceRest = 0;
+  roundRestUntilMs = 0;
+}
+
+function parseTimeOfDay(value: string | null | undefined): { hour: number; minute: number; label: string } | null {
+  const normalized = String(value || '').trim();
+  if (!normalized) return null;
+  const match = normalized.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return {
+    hour,
+    minute,
+    label: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`,
+  };
+}
+
+function hasReachedConfiguredStopTime(stopAtTime: string | null | undefined, now = new Date()): { reached: boolean; label: string | null } {
+  const parsed = parseTimeOfDay(stopAtTime);
+  if (!parsed) return { reached: false, label: null };
+  const deadline = new Date(now);
+  deadline.setHours(parsed.hour, parsed.minute, 0, 0);
+  return {
+    reached: now.getTime() >= deadline.getTime(),
+    label: parsed.label,
+  };
+}
+
 function selectEligibleContracts(chain: string, limit: number): ContractRegistryRow[] {
-  const config = getAutoAnalysisConfig();
+  const config = getRuntimeConfig();
   const contracts = listDashboardContractsRegistry(chain);
   if (!contracts.length) return [];
 
@@ -207,7 +356,7 @@ function selectEligibleContracts(chain: string, limit: number): ContractRegistry
 }
 
 function selectEligibleTokens(chain: string, limit: number) {
-  const config = getAutoAnalysisConfig();
+  const config = getRuntimeConfig();
   const tokens = listDashboardStoredTokens(chain);
   if (!tokens.length) return [];
   const audits = getLatestTokenAiAudits(chain, tokens.map((row) => row.token));
@@ -231,7 +380,7 @@ function selectEligibleTokens(chain: string, limit: number) {
 }
 
 function computeTargetSlots(capacity: number) {
-  const config = getAutoAnalysisConfig();
+  const config = getRuntimeConfig();
   const safeCapacity = Math.max(1, capacity);
   const tokenShare = Math.max(0, config.tokenSharePercent);
   const contractShare = Math.max(0, config.contractSharePercent);
@@ -242,15 +391,20 @@ function computeTargetSlots(capacity: number) {
 }
 
 async function fillAuditPool(chain: string): Promise<number> {
-  const config = getAutoAnalysisConfig();
+  const config = getRuntimeConfig();
   setAiAuditWorkerCapacity(config.queueCapacity);
   const worker = currentWorkerStatus();
   const availableSlots = Math.max(0, worker.capacity - (worker.queued + worker.active));
   if (!availableSlots) return 0;
+  const roundLimit = Math.max(1, config.roundAuditLimit);
+  const roundRemaining = Math.max(0, roundLimit - roundQueuedSinceRest);
+  if (!roundRemaining) return 0;
+  const queueableSlots = Math.min(availableSlots, roundRemaining);
+  if (!queueableSlots) return 0;
 
-  const targets = computeTargetSlots(worker.capacity);
-  const contractNeed = Math.max(0, targets.contractSlots - (worker.queuedContracts + worker.activeContracts));
-  const tokenNeed = Math.max(0, targets.tokenSlots - (worker.queuedTokens + worker.activeTokens));
+  const targets = computeTargetSlots(queueableSlots);
+  const contractNeed = Math.max(0, Math.min(queueableSlots, targets.contractSlots));
+  const tokenNeed = Math.max(0, Math.min(queueableSlots - contractNeed, targets.tokenSlots));
 
   const contractCandidates = selectEligibleContracts(chain, contractNeed);
   const tokenCandidates = selectEligibleTokens(chain, tokenNeed);
@@ -284,10 +438,15 @@ async function fillAuditPool(chain: string): Promise<number> {
 
   const used = queuedContracts + queuedTokens;
   if (!used) return 0;
+  roundQueuedSinceRest = Math.min(roundLimit, roundQueuedSinceRest + used);
+  const shouldRestAfterBatch = roundQueuedSinceRest >= roundLimit;
+  if (shouldRestAfterBatch) {
+    roundRestUntilMs = Date.now() + (Math.max(1, config.roundRestSeconds) * 1000);
+  }
 
   setStatus({
     phase: 'auditing',
-    lastAction: `Queued ${queuedContracts} contract / ${queuedTokens} token audit${used === 1 ? '' : 's'} on ${chain.toUpperCase()}`,
+    lastAction: `Queued ${queuedContracts} contract / ${queuedTokens} token audit${used === 1 ? '' : 's'} on ${chain.toUpperCase()}${shouldRestAfterBatch ? `. Cooling down for ${Math.max(1, config.roundRestSeconds)}s after this batch` : ''}`,
   });
   return used;
 }
@@ -333,6 +492,13 @@ async function runLoop(): Promise<void> {
         continue;
       }
 
+      const stopTimeState = hasReachedConfiguredStopTime(getRuntimeConfig().stopAtTime);
+      if (stopTimeState.reached) {
+        stopAutoAnalysis(`Auto analysis stop time ${stopTimeState.label || 'configured cutoff'} reached on ${chain.toUpperCase()}`);
+        await sleep(LOOP_INTERVAL_MS);
+        continue;
+      }
+
       if (controls.isRoundRunning()) {
         setStatus({
           phase: 'round',
@@ -340,6 +506,20 @@ async function runLoop(): Promise<void> {
         });
         await sleep(LOOP_INTERVAL_MS);
         continue;
+      }
+
+      const now = Date.now();
+      if (roundRestUntilMs > now) {
+        const remainingSeconds = Math.max(1, Math.ceil((roundRestUntilMs - now) / 1000));
+        setStatus({
+          phase: 'resting',
+          lastAction: `Cooling down for ${remainingSeconds}s before the next auto-analysis batch on ${chain.toUpperCase()}`,
+        });
+        await sleep(Math.min(LOOP_INTERVAL_MS, roundRestUntilMs - now));
+        continue;
+      }
+      if (roundRestUntilMs > 0) {
+        resetRoundWindow();
       }
 
       setStatus({
@@ -396,6 +576,18 @@ export function configureAutoAnalysisEngine(nextControls: AutoAnalysisControls):
   controls = nextControls;
 }
 
+export function getAutoAnalysisRuntimeConfig(): AutoAnalysisRuntimeConfig {
+  return { ...runtimeConfig };
+}
+
+export function setAutoAnalysisRuntimeConfig(input: Partial<AutoAnalysisRuntimeConfig> | null | undefined): AutoAnalysisRuntimeConfig {
+  runtimeConfig = normalizeRuntimeConfig(input);
+  setAiAuditWorkerCapacity(runtimeConfig.queueCapacity);
+  refreshWorkerStatus();
+  publish();
+  return getAutoAnalysisRuntimeConfig();
+}
+
 export function getAutoAnalysisStatus(): AutoAnalysisStatus {
   refreshWorkerStatus();
   return { ...state };
@@ -414,6 +606,7 @@ export function startAutoAnalysis(chain: string): AutoAnalysisStatus {
   if (!normalizedChain) {
     throw new Error('Auto analysis requires a chain');
   }
+  resetRoundWindow();
   setStatus({
     enabled: true,
     stopping: false,
@@ -426,15 +619,21 @@ export function startAutoAnalysis(chain: string): AutoAnalysisStatus {
   return getAutoAnalysisStatus();
 }
 
-export function stopAutoAnalysis(): AutoAnalysisStatus {
+export function stopAutoAnalysis(reason?: string): AutoAnalysisStatus {
   const inflight = totalInFlight();
+  resetRoundWindow();
+  const message = reason
+    ? (inflight > 0
+      ? `${reason}. Letting ${inflight} in-flight audit${inflight === 1 ? '' : 's'} finish`
+      : reason)
+    : (inflight > 0
+      ? `Stop requested. Letting ${inflight} in-flight audit${inflight === 1 ? '' : 's'} finish`
+      : 'Auto analysis stopped');
   setStatus({
     enabled: false,
     stopping: inflight > 0,
     phase: inflight > 0 ? 'draining' : 'idle',
-    lastAction: inflight > 0
-      ? `Stop requested. Letting ${inflight} in-flight audit${inflight === 1 ? '' : 's'} finish`
-      : 'Auto analysis stopped',
+    lastAction: message,
   });
   persistState();
   if (inflight > 0) ensureLoop();
@@ -442,12 +641,9 @@ export function stopAutoAnalysis(): AutoAnalysisStatus {
 }
 
 export function startAutoAnalysisEngine(): void {
-  const config = getAutoAnalysisConfig();
+  runtimeConfig = normalizeRuntimeConfig(runtimeConfig);
+  const config = getRuntimeConfig();
   setAiAuditWorkerCapacity(config.queueCapacity);
   refreshWorkerStatus();
   publish();
-  if (state.enabled && state.chain) {
-    logger.info(`[auto-analysis] Restoring auto analysis mode for ${state.chain}`);
-    startAutoAnalysis(state.chain);
-  }
 }

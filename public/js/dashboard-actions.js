@@ -95,7 +95,10 @@
           : await apiFetch('/api/auto-analysis/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chain: state.selectedChain }),
+            body: JSON.stringify({
+              chain: state.selectedChain,
+              config: state.settings.runtime_settings.auto_analysis,
+            }),
           });
         state.autoAnalysis = data.status || state.autoAnalysis;
         pushNotification(
@@ -500,6 +503,9 @@
         .filter((row) => row.name && row.hex_pattern);
 
       try {
+        const autoAnalysisDraft = {
+          ...state.settings.runtime_settings.auto_analysis,
+        };
         state.settings.runtime_settings.auto_analysis.provider = normalizeAiProvider(state.settings.runtime_settings.auto_analysis.provider);
         state.settings.runtime_settings.auto_analysis.model = normalizeAiModel(
           state.settings.runtime_settings.auto_analysis.provider,
@@ -522,6 +528,15 @@
           ai_models: data.settings?.ai_models || aiModels,
           whitelist_patterns: data.settings?.whitelist_patterns || whitelistPatterns,
         });
+        state.settings.runtime_settings.auto_analysis = {
+          ...state.settings.runtime_settings.auto_analysis,
+          ...autoAnalysisDraft,
+        };
+        state.settings.runtime_settings.auto_analysis.provider = normalizeAiProvider(state.settings.runtime_settings.auto_analysis.provider);
+        state.settings.runtime_settings.auto_analysis.model = normalizeAiModel(
+          state.settings.runtime_settings.auto_analysis.provider,
+          state.settings.runtime_settings.auto_analysis.model,
+        );
         viewDataCache.settings = {
           payload: data.settings || data,
           cachedAt: Date.now(),

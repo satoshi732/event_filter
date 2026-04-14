@@ -39,6 +39,7 @@ import {
 } from '../modules/ai-audit-runner/index.js';
 import {
   getAutoAnalysisStatus,
+  setAutoAnalysisRuntimeConfig,
   startAutoAnalysis,
   stopAutoAnalysis,
 } from '../modules/auto-analysis/index.js';
@@ -136,6 +137,56 @@ function renderReportHtml(title: string, label: string, value: string, chain: st
 </html>`;
 }
 
+function normalizeTimeOfDayInput(value: unknown): string {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '';
+  const match = normalized.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return '';
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return '';
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return '';
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+function coerceAutoAnalysisRuntimeConfig(input: unknown) {
+  const source = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+  const toPositiveInt = (value: unknown, fallback: number) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+  };
+  const toBoolean = (value: unknown, fallback: boolean) => {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+      if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    }
+    return fallback;
+  };
+  const provider = normalizeAiAuditProvider(String(source.provider || '').trim());
+  return {
+    queueCapacity: toPositiveInt(source.queue_capacity, 10),
+    roundAuditLimit: toPositiveInt(source.round_audit_limit, 5),
+    roundRestSeconds: toPositiveInt(source.round_rest_seconds, 60),
+    stopAtTime: normalizeTimeOfDayInput(source.stop_at_time) || null,
+    tokenSharePercent: toPositiveInt(source.token_share_percent, 40),
+    contractSharePercent: toPositiveInt(source.contract_share_percent, 60),
+    provider,
+    model: normalizeAiAuditModel(provider, String(source.model || '').trim()),
+    contractMinTvlUsd: Number.isFinite(Number(source.contract_min_tvl_usd)) ? Number(source.contract_min_tvl_usd) : 10000,
+    tokenMinPriceUsd: Number.isFinite(Number(source.token_min_price_usd)) ? Number(source.token_min_price_usd) : 0.001,
+    requireTokenSync: toBoolean(source.require_token_sync, true),
+    requireContractSelectors: toBoolean(source.require_contract_selectors, true),
+    skipSeenContracts: toBoolean(source.skip_seen_contracts, true),
+    onePerContractPattern: toBoolean(source.one_per_contract_pattern, true),
+    retryFailedAudits: toBoolean(source.retry_failed_audits, true),
+    excludeAuditedContracts: toBoolean(source.exclude_audited_contracts, true),
+    excludeAuditedTokens: toBoolean(source.exclude_audited_tokens, true),
+  };
+}
+
 export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
   return async function handleApiRoute(
     req: IncomingMessage,
@@ -196,9 +247,10 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         sendJson(res, 400, { error: 'Unknown chain' });
         return true;
       }
+      const config = setAutoAnalysisRuntimeConfig(coerceAutoAnalysisRuntimeConfig(body.config));
       const status = startAutoAnalysis(chain);
       await broadcastStateSnapshot();
-      sendJson(res, 200, { ok: true, status });
+      sendJson(res, 200, { ok: true, status, config });
       return true;
     }
 
@@ -660,7 +712,6 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       const patternSync = (typeof runtime.pattern_sync === 'object' && runtime.pattern_sync) ? runtime.pattern_sync as Record<string, unknown> : {};
       const pancakePrice = (typeof runtime.pancakeswap_price === 'object' && runtime.pancakeswap_price) ? runtime.pancakeswap_price as Record<string, unknown> : {};
       const aiAuditBackend = (typeof runtime.ai_audit_backend === 'object' && runtime.ai_audit_backend) ? runtime.ai_audit_backend as Record<string, unknown> : {};
-      const autoAnalysis = (typeof runtime.auto_analysis === 'object' && runtime.auto_analysis) ? runtime.auto_analysis as Record<string, unknown> : {};
       const access = (typeof runtime.access === 'object' && runtime.access) ? runtime.access as Record<string, unknown> : {};
 
       const chainConfigs = Array.isArray(body.chain_configs) ? body.chain_configs as Array<Record<string, unknown>> : [];
@@ -726,20 +777,6 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         { key: 'ai_audit_backend.poll_interval_ms', value: String(coercePositiveInt(aiAuditBackend.poll_interval_ms, 10_000)) },
         { key: 'ai_audit_backend.dedaub_wait_seconds', value: String(coercePositiveInt(aiAuditBackend.dedaub_wait_seconds, 15)) },
         { key: 'ai_audit_backend.insecure_tls', value: coerceBoolean(aiAuditBackend.insecure_tls, true) ? '1' : '0' },
-        { key: 'auto_analysis.queue_capacity', value: String(coercePositiveInt(autoAnalysis.queue_capacity, 10)) },
-        { key: 'auto_analysis.token_share_percent', value: String(coercePositiveInt(autoAnalysis.token_share_percent, 40)) },
-        { key: 'auto_analysis.contract_share_percent', value: String(coercePositiveInt(autoAnalysis.contract_share_percent, 60)) },
-        { key: 'auto_analysis.provider', value: normalizeAiAuditProvider(String(autoAnalysis.provider || '').trim()) },
-        { key: 'auto_analysis.model', value: normalizeAiAuditModel(normalizeAiAuditProvider(String(autoAnalysis.provider || '').trim()), String(autoAnalysis.model || '').trim()) },
-        { key: 'auto_analysis.contract_min_tvl_usd', value: String(Number.isFinite(Number(autoAnalysis.contract_min_tvl_usd)) ? Number(autoAnalysis.contract_min_tvl_usd) : 10000) },
-        { key: 'auto_analysis.token_min_price_usd', value: String(Number.isFinite(Number(autoAnalysis.token_min_price_usd)) ? Number(autoAnalysis.token_min_price_usd) : 0.001) },
-        { key: 'auto_analysis.require_token_sync', value: coerceBoolean(autoAnalysis.require_token_sync, true) ? '1' : '0' },
-        { key: 'auto_analysis.require_contract_selectors', value: coerceBoolean(autoAnalysis.require_contract_selectors, true) ? '1' : '0' },
-        { key: 'auto_analysis.skip_seen_contracts', value: coerceBoolean(autoAnalysis.skip_seen_contracts, true) ? '1' : '0' },
-        { key: 'auto_analysis.one_per_contract_pattern', value: coerceBoolean(autoAnalysis.one_per_contract_pattern, true) ? '1' : '0' },
-        { key: 'auto_analysis.retry_failed_audits', value: coerceBoolean(autoAnalysis.retry_failed_audits, true) ? '1' : '0' },
-        { key: 'auto_analysis.exclude_audited_contracts', value: coerceBoolean(autoAnalysis.exclude_audited_contracts, true) ? '1' : '0' },
-        { key: 'auto_analysis.exclude_audited_tokens', value: coerceBoolean(autoAnalysis.exclude_audited_tokens, true) ? '1' : '0' },
         { key: 'web_security.https_enabled', value: httpsEnabled ? '1' : '0' },
         { key: 'web_security.tls_cert_path', value: tlsCertPath },
         { key: 'web_security.tls_key_path', value: tlsKeyPath },

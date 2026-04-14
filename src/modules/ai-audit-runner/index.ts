@@ -9,8 +9,10 @@ import {
   type ContractRegistryRow,
   getContractsRegistry,
   listPendingAiAudits,
+  reconcileTerminalAiAuditRows,
   saveContractAiAuditResult,
   saveTokenAiAuditResult,
+  updateAiAuditBackendSessionIds,
   updateAiAuditLifecycleStatus,
 } from '../../db.js';
 import { getAiAuditBackendConfig } from '../../config.js';
@@ -569,6 +571,14 @@ async function waitForDedaubFile(
     throw new Error('Dedaub request did not return a session id');
   }
 
+  const filePath = await waitForDedaubFileByJobId(backend, jobId);
+  return { jobId, filePath };
+}
+
+async function waitForDedaubFileByJobId(
+  backend: ReturnType<typeof getAiAuditBackendConfig>,
+  jobId: string,
+): Promise<string> {
   while (true) {
     await sleep(backend.pollIntervalMs);
     const status = await postJson<DedaubStatusResponse>(
@@ -583,7 +593,7 @@ async function waitForDedaubFile(
     if (state === 'completed') {
       const filePath = String(status.analysis?.filePath || '').trim();
       if (!filePath) throw new Error('Dedaub completed without filePath');
-      return { jobId, filePath };
+      return filePath;
     }
     if (state === 'stopped') {
       throw new Error(`Dedaub failed: ${String(status.analysis?.error || 'unknown error')}`);
@@ -728,13 +738,18 @@ ${resultText}
   };
 }
 
-function persistFailure(job: QueuedAuditJob): void {
+function persistFailure(
+  job: QueuedAuditJob,
+  sessions: { dedaubJobId?: string | null; analysisSessionId?: string | null } = {},
+): void {
   const payload = {
     chain: job.chain,
     requestSession: job.requestSession,
     title: job.title,
     provider: job.provider,
     model: job.model,
+    dedaubJobId: sessions.dedaubJobId ?? job.dedaubJobId ?? null,
+    analysisSessionId: sessions.analysisSessionId ?? job.analysisSessionId ?? null,
     resultPath: null,
     critical: null,
     high: null,
@@ -756,13 +771,19 @@ function persistFailure(job: QueuedAuditJob): void {
   });
 }
 
-function persistSuccess(job: QueuedAuditJob, report: ParsedAuditReport): void {
+function persistSuccess(
+  job: QueuedAuditJob,
+  report: ParsedAuditReport,
+  sessions: { dedaubJobId?: string | null; analysisSessionId?: string | null } = {},
+): void {
   const payload = {
     chain: job.chain,
     requestSession: job.requestSession,
     title: job.title,
     provider: job.provider,
     model: job.model,
+    dedaubJobId: sessions.dedaubJobId ?? job.dedaubJobId ?? null,
+    analysisSessionId: sessions.analysisSessionId ?? job.analysisSessionId ?? null,
     resultPath: path.relative(ROOT, report.markdownPath).split(path.sep).join('/'),
     critical: report.critical,
     high: report.high,
@@ -787,55 +808,88 @@ function persistSuccess(job: QueuedAuditJob, report: ParsedAuditReport): void {
   });
 }
 
-async function executeAuditJob(job: QueuedAuditJob): Promise<void> {
+function resolveExecutionContext(job: QueuedAuditJob): {
+  backend: ReturnType<typeof getAiAuditBackendConfig>;
+  chain: ChainSpec;
+  providerModule: NonNullable<ReturnType<typeof getAiAuditProviderModule>>;
+  mode: AuditMode;
+  auditAddress: string;
+  verificationAddress: string;
+} {
   const backend = getAiAuditBackendConfig();
-  if (!backend.baseUrl || !backend.apiKey) {
-    logger.error(`[ai-audit] backend config is incomplete for ${job.targetType} ${job.chain}:${job.targetAddr}`);
-    persistFailure(job);
-    return;
-  }
-
   const chain = getChainSpec(job.chain);
   const providerModule = getAiAuditProviderModule(job.provider);
   if (!providerModule) {
-    logger.error(`[ai-audit] Unsupported provider module for ${job.provider}`);
-    persistFailure(job);
-    return;
+    throw new Error(`Unsupported provider module for ${job.provider}`);
   }
+
   let mode: AuditMode = 'single';
   let auditAddress = job.targetAddr;
   let verificationAddress = job.targetAddr;
-
   if (job.targetType === 'contract') {
     const plan = getContractAiAuditPlan(job.chain, job.targetAddr);
     if (!plan.accepted) {
-      logger.warn(`[ai-audit] Skipping contract audit ${job.chain}:${job.targetAddr} — ${plan.reason || 'not requestable'}`);
-      persistFailure(job);
-      return;
+      throw new Error(plan.reason || 'Contract is not requestable');
     }
     mode = plan.mode;
     auditAddress = plan.auditAddress;
     verificationAddress = plan.verificationAddress;
   }
 
-  logger.info(`[ai-audit] Starting ${job.targetType} audit ${job.chain}:${job.targetAddr} (${mode}) via ${job.provider}/${job.model}`);
-  updateAiAuditLifecycleStatus({
-    requestSession: job.requestSession,
-    status: 'running',
-  });
-  publishAiAuditEvent(job, {
-    kind: 'started',
-    status: 'running',
-  });
+  return {
+    backend,
+    chain,
+    providerModule,
+    mode,
+    auditAddress,
+    verificationAddress,
+  };
+}
+
+async function continueAuditJob(
+  job: QueuedAuditJob,
+  options: {
+    reason: 'fresh' | 'resume';
+  },
+): Promise<void> {
+  let dedaubJobId = String(job.dedaubJobId || '').trim();
+  let analysisSessionId = String(job.analysisSessionId || '').trim();
 
   try {
+    const { backend, chain, providerModule, mode, auditAddress, verificationAddress } = resolveExecutionContext(job);
+    if (!backend.baseUrl || !backend.apiKey) {
+      throw new Error('backend config is incomplete');
+    }
+
+    if (options.reason === 'fresh') {
+      logger.info(`[ai-audit] Starting ${job.targetType} audit ${job.chain}:${job.targetAddr} (${mode}) via ${job.provider}/${job.model}`);
+    } else {
+      logger.info(`[ai-audit] Resuming ${job.targetType} audit ${job.chain}:${job.targetAddr} (${mode}) via ${job.provider}/${job.model}`);
+    }
+
+    updateAiAuditLifecycleStatus({
+      requestSession: job.requestSession,
+      status: 'running',
+    });
+    publishAiAuditEvent(job, {
+      kind: 'started',
+      status: 'running',
+    });
+
     const verification = await resolveVerificationStatus(backend, chain, verificationAddress);
-    let dedaubJobId = '';
     let sourceCodePath = '';
     if (!verification.verified) {
-      const decompile = await waitForDedaubFile(backend, chain, verificationAddress);
-      dedaubJobId = decompile.jobId;
-      sourceCodePath = decompile.filePath;
+      if (dedaubJobId) {
+        sourceCodePath = await waitForDedaubFileByJobId(backend, dedaubJobId);
+      } else {
+        const decompile = await waitForDedaubFile(backend, chain, verificationAddress);
+        dedaubJobId = decompile.jobId;
+        sourceCodePath = decompile.filePath;
+        updateAiAuditBackendSessionIds({
+          requestSession: job.requestSession,
+          dedaubJobId,
+        });
+      }
     }
 
     const prompt = providerModule.buildPrompt({
@@ -845,11 +899,19 @@ async function executeAuditJob(job: QueuedAuditJob): Promise<void> {
       verified: verification.verified,
       sourceCodePath,
     });
-    const analysisStart = await startAnalysis(backend, job, chain, prompt, sourceCodePath, auditAddress);
-    const analysisSessionId = String(analysisStart.session?.id || '').trim();
+
     if (!analysisSessionId) {
-      throw new Error('analysis request did not return a session id');
+      const analysisStart = await startAnalysis(backend, job, chain, prompt, sourceCodePath, auditAddress);
+      analysisSessionId = String(analysisStart.session?.id || '').trim();
+      if (!analysisSessionId) {
+        throw new Error('analysis request did not return a session id');
+      }
+      updateAiAuditBackendSessionIds({
+        requestSession: job.requestSession,
+        analysisSessionId,
+      });
     }
+
     const analysisStatus = await waitForAnalysisResult(backend, analysisSessionId);
     const report = await writeAuditReport(
       job,
@@ -864,11 +926,23 @@ async function executeAuditJob(job: QueuedAuditJob): Promise<void> {
       analysisSessionId,
       analysisStatus,
     );
-    persistSuccess(job, report);
+    persistSuccess(job, report, { dedaubJobId, analysisSessionId });
     logger.info(`[ai-audit] Completed ${job.targetType} audit ${job.chain}:${job.targetAddr} -> c:${report.critical} h:${report.high} m:${report.medium}`);
   } catch (error) {
     logger.error(`[ai-audit] Audit failed for ${job.targetType} ${job.chain}:${job.targetAddr}`, error);
-    persistFailure(job);
+    persistFailure(job, { dedaubJobId, analysisSessionId });
+  }
+}
+
+async function executeAuditJob(job: QueuedAuditJob): Promise<void> {
+  try {
+    await continueAuditJob(job, { reason: 'fresh' });
+  } catch (error) {
+    logger.error(`[ai-audit] Audit failed for ${job.targetType} ${job.chain}:${job.targetAddr}`, error);
+    persistFailure(job, {
+      dedaubJobId: job.dedaubJobId ?? null,
+      analysisSessionId: job.analysisSessionId ?? null,
+    });
   }
 }
 
@@ -920,14 +994,46 @@ function enqueueAudit(job: QueuedAuditJob | null | undefined): void {
   void drainQueue();
 }
 
+function resumeAudit(job: QueuedAuditJob): void {
+  if (!job?.requestSession) return;
+  if (queuedSessions.has(job.requestSession) || activeSessions.has(job.requestSession)) return;
+  activeSessions.add(job.requestSession);
+  activeJobTypes.set(job.requestSession, job.targetType);
+  void (async () => {
+    try {
+      await continueAuditJob(job, { reason: 'resume' });
+    } finally {
+      activeSessions.delete(job.requestSession);
+      activeJobTypes.delete(job.requestSession);
+      void drainQueue();
+    }
+  })();
+}
+
 export function startAiAuditWorker(): void {
   if (workerStarted) return;
   workerStarted = true;
+  const repaired = reconcileTerminalAiAuditRows();
+  if (repaired > 0) {
+    logger.warn(`[ai-audit] Reconciled ${repaired} stale terminal audit row(s) before worker startup`);
+  }
   const pending = listPendingAiAudits();
   if (pending.length) {
+    logger.info(`[ai-audit] Restoring ${pending.length} pending audit request(s)`);
+  }
+  for (const job of pending) {
+    if (job.status === 'requested' && !job.dedaubJobId && !job.analysisSessionId) {
+      enqueueAudit(job);
+      continue;
+    }
+    if (job.analysisSessionId || job.dedaubJobId) {
+      resumeAudit(job);
+      continue;
+    }
     logger.warn(
-      `[ai-audit] Found ${pending.length} unresolved audit request(s); leaving them untouched until explicitly updated`,
+      `[ai-audit] Marking ${job.targetType} ${job.chain}:${job.targetAddr} session=${job.requestSession} as failed; backend session ids were not persisted`,
     );
+    persistFailure(job);
   }
 }
 

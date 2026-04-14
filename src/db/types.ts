@@ -202,6 +202,8 @@ export interface BaseAiAuditRow {
   title: string;
   provider: string;
   model: string;
+  dedaubJobId: string | null;
+  analysisSessionId: string | null;
   resultPath: string | null;
   critical: number | null;
   high: number | null;

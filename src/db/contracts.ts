@@ -247,6 +247,8 @@ function mapBaseAiAuditRow(row: {
   title: string;
   provider: string;
   model: string;
+  dedaub_job_id: string | null;
+  analysis_session_id: string | null;
   result_path: string | null;
   critical: number | null;
   high: number | null;
@@ -268,6 +270,8 @@ function mapBaseAiAuditRow(row: {
     title: row.title ?? '',
     provider: row.provider ?? '',
     model: row.model ?? '',
+    dedaubJobId: row.dedaub_job_id ?? null,
+    analysisSessionId: row.analysis_session_id ?? null,
     resultPath: row.result_path ?? null,
     critical: row.critical ?? null,
     high: row.high ?? null,
@@ -317,7 +321,7 @@ function getLatestAiAudits(
   const rows = getDb().prepare(`
     SELECT
       request_session, chain, target_type, target_addr, status, title, provider, model, result_path,
-      critical, high, medium, is_success, requested_at, audited_at
+      dedaub_job_id, analysis_session_id, critical, high, medium, is_success, requested_at, audited_at
     FROM ai_audits
     WHERE chain = ?
       AND target_type = ?
@@ -332,6 +336,8 @@ function getLatestAiAudits(
     title: string;
     provider: string;
     model: string;
+    dedaub_job_id: string | null;
+    analysis_session_id: string | null;
     result_path: string | null;
     critical: number | null;
     high: number | null;
@@ -384,10 +390,13 @@ export function getSingleTokenAiAudit(
 export function listPendingAiAudits(): BaseAiAuditRow[] {
   const rows = getDb().prepare(`
     SELECT
-      request_session, chain, target_type, target_addr, status, title, provider, model, result_path,
+      request_session, chain, target_type, target_addr, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
       critical, high, medium, is_success, requested_at, audited_at
     FROM ai_audits
     WHERE status IN ('requested', 'running')
+      AND is_success IS NULL
+      AND result_path IS NULL
+      AND audited_at IS NULL
     ORDER BY requested_at ASC, request_session ASC
   `).all() as Array<{
     request_session: string;
@@ -398,6 +407,8 @@ export function listPendingAiAudits(): BaseAiAuditRow[] {
     title: string;
     provider: string;
     model: string;
+    dedaub_job_id: string | null;
+    analysis_session_id: string | null;
     result_path: string | null;
     critical: number | null;
     high: number | null;
@@ -408,6 +419,23 @@ export function listPendingAiAudits(): BaseAiAuditRow[] {
   }>;
 
   return rows.map((row) => mapBaseAiAuditRow(row));
+}
+
+export function reconcileTerminalAiAuditRows(): number {
+  const result = getDb().prepare(`
+    UPDATE ai_audits
+    SET status = CASE
+      WHEN COALESCE(is_success, 0) = 1 OR result_path IS NOT NULL THEN 'completed'
+      WHEN is_success = 0 THEN 'failed'
+      ELSE status
+    END
+    WHERE status IN ('requested', 'running')
+      AND (
+        is_success IS NOT NULL
+        OR result_path IS NOT NULL
+      )
+  `).run();
+  return result.changes ?? 0;
 }
 
 function requestAiAudit(input: {
@@ -434,8 +462,8 @@ function requestAiAudit(input: {
   const requestSession = v2Id('ai-audit', `${input.targetType}:${chainName}:${address}:${Date.now()}`);
   getDb().prepare(`
     INSERT INTO ai_audits (
-      request_session, chain, target_type, target_addr, status, title, provider, model, requested_at
-    ) VALUES (?, ?, ?, ?, 'requested', ?, ?, ?, datetime('now'))
+      request_session, chain, target_type, target_addr, status, title, provider, model, dedaub_job_id, analysis_session_id, requested_at
+    ) VALUES (?, ?, ?, ?, 'requested', ?, ?, ?, NULL, NULL, datetime('now'))
   `).run(
     requestSession,
     chainName,
@@ -459,6 +487,8 @@ function requestAiAudit(input: {
     title,
     provider,
     model,
+    dedaubJobId: null,
+    analysisSessionId: null,
     resultPath: null,
     critical: null,
     high: null,
@@ -529,7 +559,7 @@ export function updateAiAuditLifecycleStatus(input: {
 
   const row = getDb().prepare(`
     SELECT
-      request_session, chain, target_type, target_addr, status, title, provider, model, result_path,
+      request_session, chain, target_type, target_addr, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
       critical, high, medium, is_success, requested_at, audited_at
     FROM ai_audits
     WHERE request_session = ?
@@ -543,6 +573,8 @@ export function updateAiAuditLifecycleStatus(input: {
     title: string;
     provider: string;
     model: string;
+    dedaub_job_id: string | null;
+    analysis_session_id: string | null;
     result_path: string | null;
     critical: number | null;
     high: number | null;
@@ -562,6 +594,78 @@ export function updateAiAuditLifecycleStatus(input: {
   return row ? mapBaseAiAuditRow(row) : null;
 }
 
+export function updateAiAuditBackendSessionIds(input: {
+  requestSession: string;
+  dedaubJobId?: string | null;
+  analysisSessionId?: string | null;
+}): BaseAiAuditRow | null {
+  const previous = getDb().prepare(`
+    SELECT request_session, chain, target_type, target_addr, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
+           critical, high, medium, is_success, requested_at, audited_at
+    FROM ai_audits
+    WHERE request_session = ?
+    LIMIT 1
+  `).get(input.requestSession) as {
+    request_session: string;
+    chain: string;
+    target_type: string;
+    target_addr: string;
+    status: string | null;
+    title: string;
+    provider: string;
+    model: string;
+    dedaub_job_id: string | null;
+    analysis_session_id: string | null;
+    result_path: string | null;
+    critical: number | null;
+    high: number | null;
+    medium: number | null;
+    is_success: number | null;
+    requested_at: string;
+    audited_at: string | null;
+  } | undefined;
+  if (!previous) return null;
+
+  getDb().prepare(`
+    UPDATE ai_audits
+    SET dedaub_job_id = COALESCE(?, dedaub_job_id),
+        analysis_session_id = COALESCE(?, analysis_session_id)
+    WHERE request_session = ?
+  `).run(
+    input.dedaubJobId ?? null,
+    input.analysisSessionId ?? null,
+    input.requestSession,
+  );
+
+  const row = getDb().prepare(`
+    SELECT request_session, chain, target_type, target_addr, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
+           critical, high, medium, is_success, requested_at, audited_at
+    FROM ai_audits
+    WHERE request_session = ?
+    LIMIT 1
+  `).get(input.requestSession) as {
+    request_session: string;
+    chain: string;
+    target_type: string;
+    target_addr: string;
+    status: string | null;
+    title: string;
+    provider: string;
+    model: string;
+    dedaub_job_id: string | null;
+    analysis_session_id: string | null;
+    result_path: string | null;
+    critical: number | null;
+    high: number | null;
+    medium: number | null;
+    is_success: number | null;
+    requested_at: string;
+    audited_at: string | null;
+  } | undefined;
+
+  return row ? mapBaseAiAuditRow(row) : null;
+}
+
 function saveAiAuditResult(input: {
   targetType: AiAuditTargetType;
   chain: string;
@@ -570,6 +674,8 @@ function saveAiAuditResult(input: {
   title?: string;
   provider?: string;
   model?: string;
+  dedaubJobId?: string | null;
+  analysisSessionId?: string | null;
   resultPath?: string | null;
   critical?: number | null;
   high?: number | null;
@@ -582,7 +688,7 @@ function saveAiAuditResult(input: {
   const existing = input.requestSession
     ? getDb().prepare(`
       SELECT request_session, chain, target_type, target_addr, status, title, provider, model, result_path,
-             critical, high, medium, is_success, requested_at, audited_at
+             dedaub_job_id, analysis_session_id, critical, high, medium, is_success, requested_at, audited_at
       FROM ai_audits
       WHERE request_session = ?
       LIMIT 1
@@ -595,6 +701,8 @@ function saveAiAuditResult(input: {
       title: string;
       provider: string;
       model: string;
+      dedaub_job_id: string | null;
+      analysis_session_id: string | null;
       result_path: string | null;
       critical: number | null;
       high: number | null;
@@ -616,14 +724,16 @@ function saveAiAuditResult(input: {
 
   getDb().prepare(`
     INSERT INTO ai_audits (
-      request_session, chain, target_type, target_addr, status, title, provider, model, result_path,
+      request_session, chain, target_type, target_addr, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
       critical, high, medium, is_success, requested_at, audited_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
     ON CONFLICT(request_session) DO UPDATE SET
       status = excluded.status,
       title = excluded.title,
       provider = excluded.provider,
       model = excluded.model,
+      dedaub_job_id = COALESCE(excluded.dedaub_job_id, ai_audits.dedaub_job_id),
+      analysis_session_id = COALESCE(excluded.analysis_session_id, ai_audits.analysis_session_id),
       result_path = COALESCE(excluded.result_path, ai_audits.result_path),
       critical = excluded.critical,
       high = excluded.high,
@@ -639,6 +749,8 @@ function saveAiAuditResult(input: {
     title,
     provider,
     model,
+    input.dedaubJobId ?? latest?.dedaubJobId ?? null,
+    input.analysisSessionId ?? latest?.analysisSessionId ?? null,
     input.resultPath ?? latest?.resultPath ?? null,
     input.critical ?? null,
     input.high ?? null,
@@ -660,6 +772,8 @@ function saveAiAuditResult(input: {
     title,
     provider,
     model,
+    dedaubJobId: input.dedaubJobId ?? latest?.dedaubJobId ?? null,
+    analysisSessionId: input.analysisSessionId ?? latest?.analysisSessionId ?? null,
     resultPath: input.resultPath ?? latest?.resultPath ?? null,
     critical: input.critical ?? null,
     high: input.high ?? null,
@@ -677,6 +791,8 @@ export function saveContractAiAuditResult(input: {
   title?: string;
   provider?: string;
   model?: string;
+  dedaubJobId?: string | null;
+  analysisSessionId?: string | null;
   resultPath?: string | null;
   critical?: number | null;
   high?: number | null;
@@ -692,6 +808,8 @@ export function saveContractAiAuditResult(input: {
     title: input.title,
     provider: input.provider,
     model: input.model,
+    dedaubJobId: input.dedaubJobId,
+    analysisSessionId: input.analysisSessionId,
     resultPath: input.resultPath,
     critical: input.critical,
     high: input.high,
@@ -716,6 +834,8 @@ export function saveTokenAiAuditResult(input: {
   title?: string;
   provider?: string;
   model?: string;
+  dedaubJobId?: string | null;
+  analysisSessionId?: string | null;
   resultPath?: string | null;
   critical?: number | null;
   high?: number | null;
@@ -731,6 +851,8 @@ export function saveTokenAiAuditResult(input: {
     title: input.title,
     provider: input.provider,
     model: input.model,
+    dedaubJobId: input.dedaubJobId,
+    analysisSessionId: input.analysisSessionId,
     resultPath: input.resultPath,
     critical: input.critical,
     high: input.high,

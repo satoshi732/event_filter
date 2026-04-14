@@ -338,6 +338,8 @@ function ensureAiAuditSchema(db: Database.Database): void {
         title             TEXT NOT NULL DEFAULT '',
         provider          TEXT NOT NULL DEFAULT '',
         model             TEXT NOT NULL DEFAULT '',
+        dedaub_job_id     TEXT DEFAULT NULL,
+        analysis_session_id TEXT DEFAULT NULL,
         result_path       TEXT DEFAULT NULL,
         critical          INTEGER DEFAULT NULL,
         high              INTEGER DEFAULT NULL,
@@ -366,6 +368,12 @@ function ensureAiAuditSchema(db: Database.Database): void {
   }
   if (!cols.some((col) => col.name === 'model')) {
     db.exec(`ALTER TABLE ai_audits ADD COLUMN model TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!cols.some((col) => col.name === 'dedaub_job_id')) {
+    db.exec(`ALTER TABLE ai_audits ADD COLUMN dedaub_job_id TEXT DEFAULT NULL;`);
+  }
+  if (!cols.some((col) => col.name === 'analysis_session_id')) {
+    db.exec(`ALTER TABLE ai_audits ADD COLUMN analysis_session_id TEXT DEFAULT NULL;`);
   }
   if (!cols.some((col) => col.name === 'result_path')) {
     db.exec(`ALTER TABLE ai_audits ADD COLUMN result_path TEXT DEFAULT NULL;`);
@@ -403,7 +411,7 @@ function migrateLegacyContractAiAudits(db: Database.Database): void {
 
   db.exec(`
     INSERT OR IGNORE INTO ai_audits (
-      request_session, chain, target_type, target_addr, status, title, provider, model, result_path,
+      request_session, chain, target_type, target_addr, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
       critical, high, medium, is_success, requested_at, audited_at
     )
     SELECT
@@ -419,6 +427,8 @@ function migrateLegacyContractAiAudits(db: Database.Database): void {
       title,
       provider,
       model,
+      NULL AS dedaub_job_id,
+      NULL AS analysis_session_id,
       result_path,
       critical,
       high,

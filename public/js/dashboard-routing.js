@@ -13,6 +13,9 @@
       loadViewDataForCurrentRoute,
       restoreCurrentScroll,
       applyStatePayload,
+      prepareDashboardContractRows,
+      prepareTokenDetail,
+      prepareContractDetail,
       rememberRunRefresh,
       hasRecentRunRefresh,
       invalidateChainCollectionCache,
@@ -142,11 +145,114 @@
       state.autoAnalysis = payload;
     }
 
+    function applySeenPatternPatch(row, labelByHash) {
+      if (!row || typeof row !== 'object') return false;
+      const directHash = String(row.selector_hash || '').toLowerCase();
+      const directLabel = directHash ? labelByHash.get(directHash) : '';
+      const targetList = Array.isArray(row.pattern_targets) ? row.pattern_targets : [];
+      let matchedLabel = directLabel;
+
+      if (!matchedLabel && targetList.length) {
+        for (const target of targetList) {
+          const nextHash = String(target?.pattern_hash || '').toLowerCase();
+          if (!nextHash) continue;
+          const label = labelByHash.get(nextHash);
+          if (label) {
+            matchedLabel = label;
+            break;
+          }
+        }
+      }
+
+      if (!matchedLabel) return false;
+
+      row.is_seen_pattern = true;
+      row.group_kind = 'seen';
+      row.group_label = row.label || row.seen_label || matchedLabel;
+      row.seen_label = matchedLabel;
+      if (!row.label) row.label = matchedLabel;
+
+      if (targetList.length) {
+        row.pattern_targets = targetList.map((target) => {
+          const nextHash = String(target?.pattern_hash || '').toLowerCase();
+          const nextLabel = labelByHash.get(nextHash);
+          return nextLabel ? { ...target, seen_label: nextLabel } : target;
+        });
+      }
+
+      return true;
+    }
+
+    function applySeenPatternPatchToCurrentState(patterns) {
+      const labelByHash = new Map(
+        (patterns || [])
+          .map((row) => [String(row?.hash || '').toLowerCase(), String(row?.label || '')])
+          .filter(([hash, label]) => hash && label),
+      );
+      if (!labelByHash.size) return false;
+
+      let changed = false;
+
+      if (Array.isArray(state.dashboard.contracts) && state.dashboard.contracts.length) {
+        state.dashboard.contracts.forEach((row) => {
+          if (applySeenPatternPatch(row, labelByHash)) changed = true;
+        });
+        if (changed) {
+          state.prepared.dashboardContracts = prepareDashboardContractRows(state.dashboard.contracts);
+        }
+      }
+
+      if (state.tokenDetail?.groups?.length) {
+        state.tokenDetail.groups.forEach((group) => {
+          if (!Array.isArray(group?.contracts)) return;
+          group.contracts.forEach((row) => {
+            if (applySeenPatternPatch(row, labelByHash)) changed = true;
+          });
+        });
+        if (changed) {
+          state.prepared.tokenDetail = prepareTokenDetail(state.tokenDetail);
+        }
+      }
+
+      if (state.contractDetail) {
+        const detailTargets = Array.isArray(state.contractDetail.pattern_targets) ? state.contractDetail.pattern_targets : [];
+        const selectorHash = String(state.contractDetail.selector_hash || '').toLowerCase();
+        const directLabel = selectorHash ? labelByHash.get(selectorHash) : '';
+        let matchedLabel = directLabel;
+        if (!matchedLabel) {
+          for (const target of detailTargets) {
+            const nextHash = String(target?.pattern_hash || '').toLowerCase();
+            const label = labelByHash.get(nextHash);
+            if (label) {
+              matchedLabel = label;
+              break;
+            }
+          }
+        }
+        if (matchedLabel) {
+          state.contractDetail.pattern_targets = detailTargets.map((target) => {
+            const nextHash = String(target?.pattern_hash || '').toLowerCase();
+            const nextLabel = labelByHash.get(nextHash);
+            return nextLabel ? { ...target, seen_label: nextLabel } : target;
+          });
+          if (!state.contractDetail.label) state.contractDetail.label = matchedLabel;
+          state.prepared.contractDetail = prepareContractDetail(state.contractDetail);
+          changed = true;
+        }
+      }
+
+      return changed;
+    }
+
     function handlePatternSyncSse(payload) {
       const status = payload?.status;
       if (status && typeof status === 'object') {
         state.syncStatus = status;
       }
+      const pulledPatterns = Array.isArray(payload?.result?.patterns) ? payload.result.patterns : [];
+      if (!pulledPatterns.length) return;
+      invalidateChainCache(state.selectedChain);
+      applySeenPatternPatchToCurrentState(pulledPatterns);
     }
 
     async function handleReviewUpdatedSse(payload) {

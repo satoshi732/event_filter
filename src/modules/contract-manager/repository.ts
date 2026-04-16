@@ -1,5 +1,6 @@
 import {
   ContractRegistryRow,
+  deleteSelectorsTempRowsForContract,
   getContractsRegistry,
   getKnownContractAddresses,
   updateContractDeploymentBatch,
@@ -57,4 +58,12 @@ export function storeContractDeploymentRows(
   rows: Array<{ contractAddr: string; deployedAt: string | null }>,
 ): void {
   updateContractDeploymentBatch(chain, rows);
+}
+
+export function removeContractSelectorTempRows(
+  chain: string,
+  contractAddr: string,
+  hashes: string[],
+): number {
+  return deleteSelectorsTempRowsForContract(chain, contractAddr, hashes);
 }

@@ -136,6 +136,22 @@
       state.contractReviewModal.error = '';
     }
 
+    function openContractLinkageModal() {
+      const detail = state.contractDetail;
+      if (!detail?.address) return;
+      state.contractLinkageModal.open = true;
+      state.contractLinkageModal.link_type = String(detail.link_type || '').toLowerCase();
+      state.contractLinkageModal.linkage = String(detail.linkage || '').trim().toLowerCase();
+      state.contractLinkageModal.saving = false;
+      state.contractLinkageModal.error = '';
+    }
+
+    function closeContractLinkageModal() {
+      state.contractLinkageModal.open = false;
+      state.contractLinkageModal.saving = false;
+      state.contractLinkageModal.error = '';
+    }
+
     function openTokenReviewModal(row) {
       if (!row?.token) return;
       state.tokenReviewModal.open = true;
@@ -222,6 +238,38 @@
       }
     }
 
+    async function saveContractLinkageModal() {
+      if (!state.contractDetail?.address) return;
+      const nextType = String(state.contractLinkageModal.link_type || '').trim().toLowerCase();
+      const nextLinkage = String(state.contractLinkageModal.linkage || '').trim().toLowerCase();
+      if ((nextType === 'proxy' || nextType === 'eip7702') && !nextLinkage) {
+        state.contractLinkageModal.error = 'Implementation address is required.';
+        return;
+      }
+
+      state.contractLinkageModal.saving = true;
+      state.contractLinkageModal.error = '';
+      try {
+        await apiFetch('/api/contract-linkage', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chain: state.selectedChain,
+            contract: state.contractDetail.address,
+            link_type: nextType,
+            linkage: nextType ? nextLinkage : '',
+          }),
+        });
+        invalidateChainCache(state.selectedChain);
+        await loadContractDetail({ force: true });
+        closeContractLinkageModal();
+      } catch (err) {
+        state.contractLinkageModal.error = err instanceof Error ? err.message : String(err);
+      } finally {
+        state.contractLinkageModal.saving = false;
+      }
+    }
+
     return {
       hydrateReviewForm,
       hydrateTokenReviewForm,
@@ -231,6 +279,9 @@
       syncContractReviewModalForSelectedTarget,
       openContractReviewModal,
       closeContractReviewModal,
+      openContractLinkageModal,
+      closeContractLinkageModal,
+      saveContractLinkageModal,
       openTokenReviewModal,
       closeTokenReviewModal,
       saveContractReviewModal,

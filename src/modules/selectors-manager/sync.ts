@@ -262,7 +262,14 @@ export async function pullPatterns(): Promise<{ pulled: number; lastPullAt: stri
   }
 
   if (highest) updatePatternSyncState(config.remoteName, { lastPullAt: highest });
-  const result = { pulled: rows.length, lastPullAt: highest };
+  const result = {
+    pulled: rows.length,
+    lastPullAt: highest,
+    patterns: rows.map((row) => ({
+      hash: row.hash,
+      label: row.label ?? '',
+    })),
+  };
   void publishPatternSyncEvent('pull', result);
   return result;
 }

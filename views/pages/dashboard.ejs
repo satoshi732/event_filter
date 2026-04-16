@@ -1705,7 +1705,12 @@
                 </div>
               </div>
               <div class="panel-block">
-                <h3>Pattern Meta</h3>
+                <div class="card-head compact">
+                  <h3>Pattern Meta</h3>
+                  <button class="btn subtle btn-small" type="button" @click="openContractLinkageModal">
+                    {{ contractDetail.link_type || contractDetail.linkage ? 'Edit Impl' : 'Set Impl' }}
+                  </button>
+                </div>
                 <div class="mini-meta-grid">
                   <div class="mini-meta">
                     <span>Linkage</span>
@@ -2068,6 +2073,56 @@
                 <button class="btn ghost" type="button" @click="closeContractReviewModal">Cancel</button>
                 <button class="btn primary" type="button" :disabled="contractReviewModal.saving" @click="saveContractReviewModal">
                   {{ contractReviewModal.saving ? 'Saving...' : 'Save Review' }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="contractLinkageModal.open" class="modal-backdrop" @click.self="closeContractLinkageModal">
+        <div class="modal-card review-modal-card">
+          <div class="review-modal-topbar">
+            <label class="stack-label review-modal-address-field">
+              <span>Contract</span>
+              <input :value="contractDetail?.address || ''" type="text" readonly class="code-box review-modal-code">
+            </label>
+            <button class="icon-action-btn review-modal-close" type="button" @click="closeContractLinkageModal" aria-label="Close impl modal" title="Close">
+              <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                <path d="M4.2 3.2 8 7l3.8-3.8 1 1L9 8l3.8 3.8-1 1L8 9l-3.8 3.8-1-1L7 8 3.2 4.2z" fill="currentColor"></path>
+              </svg>
+            </button>
+          </div>
+          <div class="review-modal-body">
+            <section class="review-modal-form-grid">
+              <label class="stack-label review-modal-field">
+                <span>Link Type</span>
+                <select v-model="contractLinkageModal.link_type">
+                  <option value="">Plain Contract</option>
+                  <option value="proxy">Proxy</option>
+                  <option value="eip7702">EIP-7702</option>
+                </select>
+              </label>
+              <label class="stack-label review-modal-field review-modal-field-wide">
+                <span>Implementation</span>
+                <input
+                  v-model="contractLinkageModal.linkage"
+                  type="text"
+                  class="code-box review-modal-code"
+                  :disabled="!contractLinkageModal.link_type"
+                  placeholder="0x implementation address"
+                >
+              </label>
+            </section>
+            <p class="muted review-modal-helper">
+              Saving linkage also updates the contract's effective pattern target so the detail view, reviews, and pending sync pattern rows stay aligned.
+            </p>
+            <div class="review-modal-footer">
+              <p v-if="contractLinkageModal.error" class="inline-error review-modal-error">{{ contractLinkageModal.error }}</p>
+              <div class="button-row review-modal-actions">
+                <button class="btn ghost" type="button" @click="closeContractLinkageModal">Cancel</button>
+                <button class="btn primary" type="button" :disabled="contractLinkageModal.saving" @click="saveContractLinkageModal">
+                  {{ contractLinkageModal.saving ? 'Saving...' : 'Save Impl' }}
                 </button>
               </div>
             </div>

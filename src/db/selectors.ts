@@ -345,6 +345,31 @@ export function markSeenContractPushResult(
   `).run(lastError, hash);
 }
 
+export function deleteSelectorsTempRowsForContract(
+  chain: string,
+  contractAddr: string,
+  hashes: string[],
+): number {
+  const normalizedChain = String(chain || '').toLowerCase();
+  const normalizedAddress = String(contractAddr || '').toLowerCase();
+  const normalizedHashes = [...new Set(
+    (hashes || [])
+      .map((hash) => String(hash || '').trim())
+      .filter(Boolean),
+  )];
+  if (!normalizedChain || !normalizedAddress || !normalizedHashes.length) return 0;
+
+  const placeholders = normalizedHashes.map(() => '?').join(', ');
+  const result = getDb().prepare(`
+    DELETE FROM selectors_temp
+    WHERE chain = ?
+      AND contract_addr = ?
+      AND selector_hash IN (${placeholders})
+  `).run(normalizedChain, normalizedAddress, ...normalizedHashes);
+
+  return result.changes ?? 0;
+}
+
 export function getSeenContractQueueCounts(): Record<string, number> {
   const rows = getDb().prepare(`
     SELECT status, COUNT(*) AS count

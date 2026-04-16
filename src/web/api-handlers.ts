@@ -43,6 +43,7 @@ import {
   startAutoAnalysis,
   stopAutoAnalysis,
 } from '../modules/auto-analysis/index.js';
+import { updateManualContractLinkage } from '../modules/contract-manager/index.js';
 import { withLiveReviews, type DashboardContractSummary, type DashboardTokenSummary, type LatestRunMeta } from '../modules/dashboard/read-model.js';
 import { deriveAiAuditLifecycleStatus } from '../db/audit-state.js';
 import type { PipelineRunResult } from '../pipeline.js';
@@ -702,6 +703,45 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         run: latestRunMeta(run),
         contract: detail,
         ai_config: buildAiAuditConfigPayload(),
+      });
+      return true;
+    }
+
+    if (reqPath === '/api/contract-linkage' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const chain = typeof body.chain === 'string' ? body.chain.toLowerCase() : '';
+      const contract = typeof body.contract === 'string' ? body.contract.toLowerCase() : '';
+      const rawLinkType = typeof body.link_type === 'string' ? body.link_type.trim().toLowerCase() : '';
+      const rawLinkage = typeof body.linkage === 'string' ? body.linkage.trim().toLowerCase() : '';
+      if (!chain || !contract) {
+        sendJson(res, 400, { error: 'chain and contract are required' });
+        return true;
+      }
+
+      const saved = await updateManualContractLinkage({
+        chain,
+        contractAddr: contract,
+        linkType: rawLinkType === 'proxy' || rawLinkType === 'eip7702' ? rawLinkType : null,
+        linkage: rawLinkType ? rawLinkage : null,
+      });
+      invalidateReadCaches(chain);
+      broadcastNamedEvent('data-refresh', {
+        kind: 'contract-linkage-updated',
+        chain,
+        contract,
+        link_type: saved.linkType,
+        linkage: saved.linkage,
+        ts: new Date().toISOString(),
+      });
+      sendJson(res, 200, {
+        ok: true,
+        linkage: {
+          contract: saved.contractAddr,
+          link_type: saved.linkType,
+          linkage: saved.linkage,
+          selector_hash: saved.selectorHash,
+          contract_selector_hash: saved.contractSelectorHash,
+        },
       });
       return true;
     }

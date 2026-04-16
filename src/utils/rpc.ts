@@ -238,6 +238,17 @@ async function rpcCall<T = unknown>(chain: string, method: string, params: unkno
   return rpcCallWithOptions<T>(chain, method, params, {});
 }
 
+export async function getContractBytecode(chain: string, address: string): Promise<string> {
+  const result = await rpcCall<string>(chain, 'eth_getCode', [address.toLowerCase(), 'latest']);
+  return String(result || '').trim().toLowerCase();
+}
+
+export async function getContractCodeSize(chain: string, address: string): Promise<number> {
+  const normalized = strip0x(await getContractBytecode(chain, address));
+  if (!normalized) return 0;
+  return Math.floor(normalized.length / 2);
+}
+
 async function rpcCallWithOptions<T = unknown>(
   chain: string,
   method: string,

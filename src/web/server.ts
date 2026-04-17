@@ -530,8 +530,6 @@ export async function startWebServer(
 
   function resolveRun(chain: string): PipelineRunResult | null {
     const normalizedChain = chain.toLowerCase();
-    const inMemory = state.latestRuns.get(normalizedChain);
-    if (inMemory) return inMemory;
     return readCache.resolvePersistedRun(normalizedChain, () => buildPersistedRun(normalizedChain) ?? null);
   }
 
@@ -648,6 +646,7 @@ export async function startWebServer(
       });
       state.latestRuns.set(chain, run);
       invalidateReadCaches(chain);
+      readCache.resolvePersistedRun(chain, () => buildPersistedRun(chain) ?? null);
       state.progress = {
         chain,
         stage: 'complete',

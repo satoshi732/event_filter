@@ -27,6 +27,7 @@
       syncDashboardUrlState,
       viewDataCache,
       goBackToPrevious,
+      ignoreNextReviewUpdate,
     } = deps;
 
     let copiedAddressTimer = null;
@@ -566,6 +567,7 @@
             exploitable: state.reviewForm.exploitable,
           }),
         });
+        ignoreNextReviewUpdate(state.selectedChain, 'contract', state.contractDetail.address);
         state.reviewForm.review_text = '';
         invalidateChainCache(state.selectedChain);
         await loaders.loadContractDetail({ force: true });
@@ -588,6 +590,7 @@
             exploitable: state.tokenReviewForm.exploitable,
           }),
         });
+        ignoreNextReviewUpdate(state.selectedChain, 'token', state.tokenDetail.token);
         invalidateChainCache(state.selectedChain);
         await loaders.loadTokenDetail({ force: true });
         state.tokenReviewExpanded = false;

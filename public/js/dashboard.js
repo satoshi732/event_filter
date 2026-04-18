@@ -1271,6 +1271,7 @@
         loadViewDataForCurrentRoute,
         clearChainScopedData,
       } = loaders;
+      let ignoreNextReviewUpdate = () => {};
 
       const actions = createDashboardActions({
         state,
@@ -1299,6 +1300,7 @@
         syncDashboardUrlState,
         viewDataCache,
         goBackToPrevious,
+        ignoreNextReviewUpdate: (...args) => ignoreNextReviewUpdate(...args),
       });
 
       const {
@@ -1345,6 +1347,7 @@
         normalizeAiProvider,
         normalizeAiModel,
         contractReviewTargetOptions,
+        ignoreNextReviewUpdate: (...args) => ignoreNextReviewUpdate(...args),
       });
 
       ({
@@ -1388,7 +1391,8 @@
         pushNotification,
       });
 
-      const { bootstrap } = routing;
+      const { bootstrap, ignoreNextReviewUpdate: registerIgnoredReviewUpdate } = routing;
+      ignoreNextReviewUpdate = registerIgnoredReviewUpdate;
 
       installDashboardViewState({
         onMounted,

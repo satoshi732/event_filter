@@ -75,6 +75,7 @@ interface ApiRouteHandlerDeps {
   broadcastStateSnapshot: () => Promise<void>;
   broadcastNamedEvent: (event: string, payload: unknown) => void;
   invalidateReadCaches: (chain?: string) => void;
+  invalidateDerivedReadCaches: (chain?: string) => void;
   resolveRun: (chain: string) => PipelineRunResult | null;
   resolveDashboardContracts: (chain: string, run: PipelineRunResult) => DashboardContractSummary[];
   resolveDashboardTokens: (chain: string, run: PipelineRunResult) => DashboardTokenSummary[];
@@ -218,6 +219,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       broadcastStateSnapshot,
       broadcastNamedEvent,
       invalidateReadCaches,
+      invalidateDerivedReadCaches,
       resolveRun,
       resolveDashboardContracts,
       resolveDashboardTokens,
@@ -371,14 +373,14 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
 
     if (reqPath === '/api/sync/pull' && method === 'POST') {
       const result = await pullPatterns();
-      invalidateReadCaches();
+      invalidateDerivedReadCaches();
       sendJson(res, 200, { ok: true, result, status: await getPatternSyncStatus() });
       return true;
     }
 
     if (reqPath === '/api/sync/push' && method === 'POST') {
       const result = await pushPatterns();
-      invalidateReadCaches();
+      invalidateDerivedReadCaches();
       sendJson(res, 200, { ok: true, result, status: await getPatternSyncStatus() });
       return true;
     }
@@ -424,7 +426,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         return true;
       }
       const result = saveContractReview({ chain, address, targetKind, label, reviewText, exploitable });
-      invalidateReadCaches(chain);
+      invalidateDerivedReadCaches(chain);
       const status = await getPatternSyncStatus();
       sendJson(res, 200, { ok: true, hash: result.hash, persisted_only: result.persistedOnly, status });
       broadcastNamedEvent('review-updated', {
@@ -454,7 +456,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       }
       const analysis = requestContractAiAudit({ chain, contractAddr: contract, title, provider, model });
       enqueueContractAiAudit(analysis);
-      invalidateReadCaches(chain);
+      invalidateDerivedReadCaches(chain);
       sendJson(res, 200, { ok: true, analysis, plan });
       return true;
     }
@@ -472,7 +474,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       const model = normalizeAiAuditModel(provider, typeof body.model === 'string' ? body.model.trim() : getDefaultAiAuditModel(provider));
       const analysis = requestTokenAiAudit({ chain, tokenAddr: token, title, provider, model });
       enqueueTokenAiAudit(analysis);
-      invalidateReadCaches(chain);
+      invalidateDerivedReadCaches(chain);
       sendJson(res, 200, { ok: true, analysis });
       return true;
     }
@@ -516,7 +518,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
             isSuccess: body.isSuccess == null ? null : Boolean(body.isSuccess),
             auditedAt: typeof body.audited_at === 'string' ? body.audited_at : null,
           });
-      invalidateReadCaches(chain);
+      invalidateDerivedReadCaches(chain);
       sendJson(res, 200, { ok: true, analysis });
       const lifecycle = deriveAiAuditLifecycleStatus(analysis);
       broadcastNamedEvent('ai-audit', {
@@ -674,7 +676,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         return true;
       }
       const saved = saveTokenManualReview({ chain, token, reviewText, exploitable });
-      invalidateReadCaches(chain);
+      invalidateDerivedReadCaches(chain);
       sendJson(res, 200, { ok: true, token: saved });
       broadcastNamedEvent('review-updated', {
         kind: 'saved-token-review', chain, targetType: 'token', targetAddr: token, exploitable, ts: new Date().toISOString(),
@@ -724,7 +726,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         linkType: rawLinkType === 'proxy' || rawLinkType === 'eip7702' ? rawLinkType : null,
         linkage: rawLinkType ? rawLinkage : null,
       });
-      invalidateReadCaches(chain);
+      invalidateDerivedReadCaches(chain);
       broadcastNamedEvent('data-refresh', {
         kind: 'contract-linkage-updated',
         chain,

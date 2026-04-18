@@ -7,6 +7,7 @@ export interface ReadCacheCollections<Run, ContractRows, TokenRows, ContractDeta
 
 export interface DashboardReadCache<Run, ContractRows, TokenRows, ContractDetail> {
   invalidate(chain?: string): void;
+  invalidateDerived(chain?: string): void;
   resolvePersistedRun(chain: string, build: () => Run | null): Run | null;
   resolveDashboardContracts(chain: string, runKey: string, build: () => ContractRows): ContractRows;
   resolveDashboardTokens(chain: string, runKey: string, build: () => TokenRows): TokenRows;
@@ -47,15 +48,22 @@ export function createDashboardReadCache<Run, ContractRows, TokenRows, ContractD
   };
 
   function invalidate(chain?: string): void {
+    invalidateDerived(chain);
     if (!chain) {
       collections.persistedRuns.clear();
+      return;
+    }
+    collections.persistedRuns.delete(chain.toLowerCase());
+  }
+
+  function invalidateDerived(chain?: string): void {
+    if (!chain) {
       collections.dashboardContracts.clear();
       collections.dashboardTokens.clear();
       collections.contractDetails.clear();
       return;
     }
     const normalizedChain = chain.toLowerCase();
-    collections.persistedRuns.delete(normalizedChain);
     collections.dashboardContracts.delete(normalizedChain);
     collections.dashboardTokens.delete(normalizedChain);
     for (const key of [...collections.contractDetails.keys()]) {
@@ -101,6 +109,7 @@ export function createDashboardReadCache<Run, ContractRows, TokenRows, ContractD
 
   return {
     invalidate,
+    invalidateDerived,
     resolvePersistedRun,
     resolveDashboardContracts,
     resolveDashboardTokens,

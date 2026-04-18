@@ -27,6 +27,29 @@
     let stateStreamReadyPromise = null;
     let resolveStateStreamReady = null;
     let stateStreamReady = false;
+    const ignoredReviewUpdates = new Map();
+
+    function reviewUpdateKey(chain, targetType, targetAddr) {
+      return `${String(chain || '').toLowerCase()}:${String(targetType || '').toLowerCase()}:${String(targetAddr || '').toLowerCase()}`;
+    }
+
+    function ignoreNextReviewUpdate(chain, targetType, targetAddr) {
+      const key = reviewUpdateKey(chain, targetType, targetAddr);
+      if (!key || key === '::') return;
+      ignoredReviewUpdates.set(key, Date.now() + 4000);
+    }
+
+    function shouldIgnoreReviewUpdate(chain, targetType, targetAddr) {
+      const key = reviewUpdateKey(chain, targetType, targetAddr);
+      const expiresAt = ignoredReviewUpdates.get(key);
+      if (!expiresAt) return false;
+      if (expiresAt <= Date.now()) {
+        ignoredReviewUpdates.delete(key);
+        return false;
+      }
+      ignoredReviewUpdates.delete(key);
+      return true;
+    }
 
     function startStateStream(handleAiAuditSse, handleAutoAnalysisSse, handlePatternSyncSse, handleReviewUpdatedSse, handleDataRefreshSse) {
       if (stateEventSource) return stateStreamReadyPromise || Promise.resolve();
@@ -260,6 +283,7 @@
       const targetType = String(payload?.targetType || '').toLowerCase();
       const targetAddr = String(payload?.targetAddr || '').toLowerCase();
       if (!chain || !targetType || !targetAddr) return;
+      if (shouldIgnoreReviewUpdate(chain, targetType, targetAddr)) return;
 
       invalidateChainCache(chain);
       if (chain !== state.selectedChain) return;
@@ -348,6 +372,7 @@
       handlePatternSyncSse,
       handleReviewUpdatedSse,
       handleDataRefreshSse,
+      ignoreNextReviewUpdate,
       bootstrap,
     };
   }

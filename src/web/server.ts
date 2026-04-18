@@ -528,6 +528,10 @@ export async function startWebServer(
     readCache.invalidate(chain);
   }
 
+  function invalidateDerivedReadCaches(chain?: string): void {
+    readCache.invalidateDerived(chain);
+  }
+
   function resolveRun(chain: string): PipelineRunResult | null {
     const normalizedChain = chain.toLowerCase();
     return readCache.resolvePersistedRun(normalizedChain, () => buildPersistedRun(normalizedChain) ?? null);
@@ -732,6 +736,7 @@ export async function startWebServer(
     broadcastStateSnapshot,
     broadcastNamedEvent,
     invalidateReadCaches,
+    invalidateDerivedReadCaches,
     resolveRun,
     resolveDashboardContracts,
     resolveDashboardTokens,

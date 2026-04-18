@@ -12,6 +12,7 @@
       normalizeAiProvider,
       normalizeAiModel,
       contractReviewTargetOptions,
+      ignoreNextReviewUpdate,
     } = deps;
 
     function hydrateReviewForm() {
@@ -191,6 +192,7 @@
             exploitable: state.contractReviewModal.exploitable,
           }),
         });
+        ignoreNextReviewUpdate(state.selectedChain, 'contract', state.contractReviewModal.address);
         invalidateChainCache(state.selectedChain);
         if (currentView.value === 'token-detail') {
           await loadTokenDetail({ force: true });
@@ -223,6 +225,7 @@
             exploitable: state.tokenReviewModal.exploitable,
           }),
         });
+        ignoreNextReviewUpdate(state.selectedChain, 'token', state.tokenReviewModal.address);
         invalidateChainCache(state.selectedChain);
         if (currentView.value === 'token') {
           await loadDashboardTokens({ showLoading: false, force: true });

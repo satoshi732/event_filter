@@ -9,11 +9,157 @@
       loadDashboardTokens,
       loadTokenDetail,
       loadContractDetail,
+      prepareDashboardContractRows,
+      prepareDashboardTokenRows,
+      prepareTokenDetail,
       normalizeAiProvider,
       normalizeAiModel,
       contractReviewTargetOptions,
       ignoreNextReviewUpdate,
     } = deps;
+
+    function upsertContractReview(reviews, nextReview) {
+      const rows = Array.isArray(reviews) ? reviews.slice() : [];
+      const index = rows.findIndex((entry) => {
+        if (nextReview.pattern_hash && entry.pattern_hash === nextReview.pattern_hash) return true;
+        return entry.pattern_kind === nextReview.pattern_kind
+          && entry.pattern_address === nextReview.pattern_address;
+      });
+      if (index >= 0) {
+        rows[index] = {
+          ...rows[index],
+          ...nextReview,
+          id: rows[index].id ?? nextReview.id,
+        };
+        return { rows, inserted: false };
+      }
+      return { rows: [nextReview, ...rows], inserted: true };
+    }
+
+    function refreshPreparedContracts() {
+      state.prepared.dashboardContracts = prepareDashboardContractRows(state.dashboard.contracts || []);
+    }
+
+    function refreshPreparedTokens() {
+      state.prepared.dashboardTokens = prepareDashboardTokenRows(state.dashboard.tokens || []);
+    }
+
+    function applyLocalContractReviewUpdate(input) {
+      const address = String(input.address || '').toLowerCase();
+      if (!address) return;
+
+      const targetKind = String(input.targetKind || 'contract').toLowerCase();
+      const target = (Array.isArray(input.targetOptions) ? input.targetOptions : []).find((entry) => entry.kind === targetKind)
+        || { kind: targetKind, address, pattern_hash: input.hash || '' };
+      const nextReview = {
+        id: `local-${Date.now()}`,
+        chain: String(state.selectedChain || '').toLowerCase(),
+        contract_address: address,
+        pattern_hash: String(input.hash || target.pattern_hash || '').toLowerCase(),
+        pattern_kind: String(target.kind || targetKind || 'contract').toLowerCase(),
+        pattern_address: String(target.address || address).toLowerCase(),
+        label: String(input.label || '').trim(),
+        review_text: String(input.reviewText || ''),
+        exploitable: Boolean(input.exploitable),
+        status: 'saved',
+        updated_at: new Date().toISOString(),
+      };
+
+      const currentDetailAddress = String(state.contractDetail?.address || '').toLowerCase();
+      let insertedReview = false;
+      if (currentDetailAddress === address && state.contractDetail) {
+        if (input.persistedOnly) {
+          state.contractDetail = {
+            ...state.contractDetail,
+            label: nextReview.label || state.contractDetail.label,
+            review: nextReview.review_text,
+            is_exploitable: nextReview.exploitable,
+            is_manual_audit: true,
+          };
+        } else {
+          const reviewResult = upsertContractReview(state.contractDetail.reviews, nextReview);
+          insertedReview = reviewResult.inserted;
+          state.contractDetail = {
+            ...state.contractDetail,
+            label: nextReview.label || state.contractDetail.label,
+            is_exploitable: nextReview.exploitable,
+            is_manual_audit: true,
+            reviews: reviewResult.rows,
+          };
+        }
+      }
+
+      if (state.tokenDetail?.groups?.length) {
+        state.tokenDetail = {
+          ...state.tokenDetail,
+          groups: state.tokenDetail.groups.map((group) => ({
+            ...group,
+            contracts: (group.contracts || []).map((contract) => {
+              if (String(contract?.contract || '').toLowerCase() !== address) return contract;
+              const reviewResult = input.persistedOnly
+                ? { rows: contract.reviews || [], inserted: false }
+                : upsertContractReview(contract.reviews, nextReview);
+              return {
+                ...contract,
+                label: nextReview.label || contract.label,
+                is_exploitable: nextReview.exploitable,
+                is_manual_audit: true,
+                ...(input.persistedOnly
+                  ? { review: nextReview.review_text }
+                  : { reviews: reviewResult.rows }),
+              };
+            }),
+          })),
+        };
+        state.prepared.tokenDetail = prepareTokenDetail(state.tokenDetail);
+      }
+
+      if (Array.isArray(state.dashboard.contracts) && state.dashboard.contracts.length) {
+        state.dashboard.contracts = state.dashboard.contracts.map((row) => {
+          if (String(row?.contract || '').toLowerCase() !== address) return row;
+          const existingReviewCount = Number(row.review_count || 0);
+          return {
+            ...row,
+            label: nextReview.label || row.label,
+            is_exploitable: nextReview.exploitable,
+            is_manual_audit: true,
+            review_count: input.persistedOnly
+              ? existingReviewCount
+              : existingReviewCount + (insertedReview ? 1 : 0),
+          };
+        });
+        refreshPreparedContracts();
+      }
+    }
+
+    function applyLocalTokenReviewUpdate(input) {
+      const tokenAddress = String(input.token || '').toLowerCase();
+      if (!tokenAddress) return;
+
+      if (state.tokenDetail?.token && String(state.tokenDetail.token).toLowerCase() === tokenAddress) {
+        state.tokenDetail = {
+          ...state.tokenDetail,
+          review: String(input.reviewText || ''),
+          is_exploitable: Boolean(input.exploitable),
+          is_manual_audit: true,
+        };
+        state.prepared.tokenDetail = prepareTokenDetail(state.tokenDetail);
+      }
+
+      if (Array.isArray(state.dashboard.tokens) && state.dashboard.tokens.length) {
+        state.dashboard.tokens = state.dashboard.tokens.map((row) => (
+          String(row?.token || '').toLowerCase() === tokenAddress
+            ? {
+              ...row,
+              review: String(input.reviewText || ''),
+              is_exploitable: Boolean(input.exploitable),
+              is_manual_audit: true,
+            }
+            : row
+        ));
+        refreshPreparedTokens();
+      }
+    }
 
     function hydrateReviewForm() {
       const detail = state.contractDetail;
@@ -180,7 +326,7 @@
       state.contractReviewModal.saving = true;
       state.contractReviewModal.error = '';
       try {
-        await apiFetch('/api/review', {
+        const data = await apiFetch('/api/review', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -193,15 +339,17 @@
           }),
         });
         ignoreNextReviewUpdate(state.selectedChain, 'contract', state.contractReviewModal.address);
+        applyLocalContractReviewUpdate({
+          address: state.contractReviewModal.address,
+          targetKind: state.contractReviewModal.target_kind,
+          targetOptions: state.contractReviewModal.target_options,
+          label: state.contractReviewModal.label,
+          reviewText: state.contractReviewModal.review_text,
+          exploitable: state.contractReviewModal.exploitable,
+          hash: data?.hash || '',
+          persistedOnly: Boolean(data?.persisted_only),
+        });
         invalidateChainCache(state.selectedChain);
-        if (currentView.value === 'token-detail') {
-          await loadTokenDetail({ force: true });
-        } else {
-          await loadDashboardContracts({ showLoading: false, force: true });
-        }
-        if (state.contractDetail?.address === state.contractReviewModal.address) {
-          await loadContractDetail({ force: true });
-        }
         closeContractReviewModal();
       } catch (err) {
         state.contractReviewModal.error = err instanceof Error ? err.message : String(err);
@@ -226,13 +374,12 @@
           }),
         });
         ignoreNextReviewUpdate(state.selectedChain, 'token', state.tokenReviewModal.address);
+        applyLocalTokenReviewUpdate({
+          token: state.tokenReviewModal.address,
+          reviewText: state.tokenReviewModal.review_text,
+          exploitable: state.tokenReviewModal.exploitable,
+        });
         invalidateChainCache(state.selectedChain);
-        if (currentView.value === 'token') {
-          await loadDashboardTokens({ showLoading: false, force: true });
-        }
-        if (state.tokenDetail?.token === state.tokenReviewModal.address) {
-          await loadTokenDetail({ force: true });
-        }
         closeTokenReviewModal();
       } catch (err) {
         state.tokenReviewModal.error = err instanceof Error ? err.message : String(err);

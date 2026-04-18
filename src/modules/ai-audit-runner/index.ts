@@ -22,6 +22,7 @@ import type { ProviderAuditMode } from './providers/index.js';
 const ROOT = path.dirname(path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url)))));
 const REPORT_DIR = path.join(ROOT, 'reports', 'ai-audits');
 const QUICK_ANALYZE_PROVIDER = 'codex';
+const QUICK_ANALYZE_HTTP_TIMEOUT_MS = 180_000;
 const MUCH_SMALLER_RATIO = 0.35;
 const MUCH_SMALLER_ABS_DELTA = 300;
 const AUDIT_START_STAGGER_MS = 400;
@@ -413,12 +414,20 @@ function getAuthHeaders(apiKey: string): Record<string, string> {
   };
 }
 
-async function postJson<T>(baseUrl: string, apiKey: string, insecureTls: boolean, endpoint: string, body: Record<string, unknown>): Promise<T> {
+async function postJson<T>(
+  baseUrl: string,
+  apiKey: string,
+  insecureTls: boolean,
+  endpoint: string,
+  body: Record<string, unknown>,
+  options: { timeoutMs?: number } = {},
+): Promise<T> {
   return await requestJson<T>(`${baseUrl}${endpoint}`, {
     method: 'POST',
     headers: getAuthHeaders(apiKey),
     body: JSON.stringify(body),
     insecureTls,
+    timeoutMs: options.timeoutMs,
   });
 }
 
@@ -462,6 +471,7 @@ async function startQuickAnalyzeRequest(
       model,
       title,
     },
+    { timeoutMs: QUICK_ANALYZE_HTTP_TIMEOUT_MS },
   );
 
   const tempId = String(response.tempId || response.request?.tempId || '').trim();
@@ -494,6 +504,7 @@ async function waitForQuickAnalyzeResult(
       backend.insecureTls,
       '/api/quickAnalyze/status',
       sessionId ? { sessionId } : { tempId },
+      { timeoutMs: QUICK_ANALYZE_HTTP_TIMEOUT_MS },
     );
 
     const discoveredSessionId = String(status.session?.id || status.request?.sessionId || '').trim();

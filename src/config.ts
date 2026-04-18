@@ -235,10 +235,14 @@ function sanitizeAiProviderRows(rows: AiAuditProviderRow[]): AiAuditProviderRow[
 
 function sanitizeAiModelRows(rows: AiAuditModelRow[]): AiAuditModelRow[] {
   const filtered = rows
-    .filter((row) => String(row.provider || '').trim().toLowerCase() === AI_AUDIT_PROVIDER_CODEX)
+    .filter((row) => (
+      String(row.provider || '').trim().toLowerCase() === AI_AUDIT_PROVIDER_CODEX
+      && String(row.model || '').trim() === AI_AUDIT_DEFAULT_MODEL
+    ))
     .map((row) => ({
       ...row,
       provider: AI_AUDIT_PROVIDER_CODEX,
+      model: AI_AUDIT_DEFAULT_MODEL,
     }));
   return filtered.length ? filtered : [defaultCodexModelRow()];
 }

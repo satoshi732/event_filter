@@ -258,10 +258,9 @@
                     </span>
                   </td>
                   <td>
-                    <span v-if="autoAuditStatusLabel(row.auto_audit_status) === 'yes'" class="audit-severity-pills">
-                      <span v-for="entry in auditSeverityPills(row)" :key="`${row.contract}:${entry.key}`" class="audit-severity-pill" :class="entry.className">
-                        <span class="audit-severity-label">{{ entry.shortLabel }}</span>
-                        <span class="audit-severity-value">{{ entry.count }}</span>
+                    <span v-if="autoAuditStatusLabel(row.auto_audit_status) === 'yes'" class="audit-severity-badge">
+                      <span v-for="entry in auditSeverityPills(row)" :key="`${row.contract}:${entry.key}`" class="audit-severity-fragment" :class="entry.className">
+                        <span class="audit-severity-label">{{ entry.shortLabel }}</span><span class="audit-severity-value">{{ entry.count }}</span>
                       </span>
                     </span>
                     <span v-else class="muted">--</span>
@@ -1007,10 +1006,9 @@
                     </span>
                   </td>
                   <td>
-                    <span v-if="autoAuditStatusLabel(token.auto_audit_status) === 'yes'" class="audit-severity-pills">
-                      <span v-for="entry in auditSeverityPills(token)" :key="`${token.token}:${entry.key}`" class="audit-severity-pill" :class="entry.className">
-                        <span class="audit-severity-label">{{ entry.shortLabel }}</span>
-                        <span class="audit-severity-value">{{ entry.count }}</span>
+                    <span v-if="autoAuditStatusLabel(token.auto_audit_status) === 'yes'" class="audit-severity-badge">
+                      <span v-for="entry in auditSeverityPills(token)" :key="`${token.token}:${entry.key}`" class="audit-severity-fragment" :class="entry.className">
+                        <span class="audit-severity-label">{{ entry.shortLabel }}</span><span class="audit-severity-value">{{ entry.count }}</span>
                       </span>
                     </span>
                     <span v-else class="muted">--</span>
@@ -1468,10 +1466,9 @@
                     </span>
                   </td>
                   <td>
-                    <span v-if="autoAuditStatusLabel(row.auto_audit_status) === 'yes'" class="audit-severity-pills">
-                      <span v-for="entry in auditSeverityPills(row)" :key="`${row.contract}:${entry.key}`" class="audit-severity-pill" :class="entry.className">
-                        <span class="audit-severity-label">{{ entry.shortLabel }}</span>
-                        <span class="audit-severity-value">{{ entry.count }}</span>
+                    <span v-if="autoAuditStatusLabel(row.auto_audit_status) === 'yes'" class="audit-severity-badge">
+                      <span v-for="entry in auditSeverityPills(row)" :key="`${row.contract}:${entry.key}`" class="audit-severity-fragment" :class="entry.className">
+                        <span class="audit-severity-label">{{ entry.shortLabel }}</span><span class="audit-severity-value">{{ entry.count }}</span>
                       </span>
                     </span>
                     <span v-else class="muted">--</span>

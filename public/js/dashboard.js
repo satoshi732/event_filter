@@ -123,8 +123,7 @@
     settings: 30_000,
   };
   const DEFAULT_AI_PROVIDER_MODELS = {
-    claude: ['claude-sonnet', 'claude-opus'],
-    codex: ['gpt-5-codex', 'gpt-5-codex-mini'],
+    codex: ['gpt-5.4'],
   };
   const router = createRouter({
     history: createWebHistory(),
@@ -317,8 +316,8 @@
             stop_at_datetime: '',
             token_share_percent: 40,
             contract_share_percent: 60,
-            provider: 'claude',
-            model: DEFAULT_AI_PROVIDER_MODELS.claude[0],
+            provider: 'codex',
+            model: DEFAULT_AI_PROVIDER_MODELS.codex[0],
             contract_min_tvl_usd: 10000,
             token_min_price_usd: 0.001,
             require_token_sync: true,
@@ -347,8 +346,8 @@
       aiConfig: {
         providers: [],
         models: [],
-        default_provider: 'claude',
-        default_model: DEFAULT_AI_PROVIDER_MODELS.claude[0],
+        default_provider: 'codex',
+        default_model: DEFAULT_AI_PROVIDER_MODELS.codex[0],
       },
       syncStatus: null,
       autoAnalysis: {
@@ -411,8 +410,8 @@
       tokenReviewExpanded: false,
       analysisForm: {
         title: 'AI Auto Audit',
-        provider: 'claude',
-        model: DEFAULT_AI_PROVIDER_MODELS.claude[0],
+        provider: 'codex',
+        model: DEFAULT_AI_PROVIDER_MODELS.codex[0],
       },
       selectedContractFlowToken: '',
       copiedAddress: '',
@@ -753,7 +752,7 @@
       function normalizeAiProvider(value) {
         const normalized = String(value || '').trim().toLowerCase();
         const allowed = getConfiguredAiProviders();
-        return allowed.includes(normalized) ? normalized : (allowed[0] || state.aiConfig.default_provider || 'claude');
+        return allowed.includes(normalized) ? normalized : (allowed[0] || state.aiConfig.default_provider || 'codex');
       }
 
       function normalizeAiModel(provider, value) {
@@ -976,8 +975,8 @@
         state.contractDetail?.auto_analysis || {
           request_session: null,
           title: 'AI Auto Audit',
-          provider: 'claude',
-          model: DEFAULT_AI_PROVIDER_MODELS.claude[0],
+          provider: 'codex',
+          model: DEFAULT_AI_PROVIDER_MODELS.codex[0],
           status: 'idle',
           requested_at: null,
           completed_at: null,
@@ -993,8 +992,8 @@
         state.tokenDetail?.auto_analysis || {
           request_session: null,
           title: 'AI Auto Audit',
-          provider: 'claude',
-          model: DEFAULT_AI_PROVIDER_MODELS.claude[0],
+          provider: 'codex',
+          model: DEFAULT_AI_PROVIDER_MODELS.codex[0],
           status: 'idle',
           requested_at: null,
           completed_at: null,

@@ -1,7 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import { URL } from 'node:url';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -15,18 +15,15 @@ import {
   updateAiAuditBackendSessionIds,
   updateAiAuditLifecycleStatus,
 } from '../../db.js';
-import { getAiAuditBackendConfig } from '../../config.js';
+import { getAiAuditBackendConfig, normalizeAiAuditModel } from '../../config.js';
 import { logger } from '../../utils/logger.js';
-import { getAiAuditProviderModule, type ProviderAuditMode } from './providers/index.js';
+import type { ProviderAuditMode } from './providers/index.js';
 
 const ROOT = path.dirname(path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url)))));
 const REPORT_DIR = path.join(ROOT, 'reports', 'ai-audits');
+const QUICK_ANALYZE_PROVIDER = 'codex';
 const MUCH_SMALLER_RATIO = 0.35;
 const MUCH_SMALLER_ABS_DELTA = 300;
-const VERIFICATION_RETRY_ATTEMPTS = 3;
-const VERIFICATION_RETRY_BACKOFF_MS = 1_500;
-const VERIFICATION_CACHE_TTL_MS = 30 * 60 * 1000;
-const MAX_VERIFICATION_CACHE_ENTRIES = 512;
 const AUDIT_START_STAGGER_MS = 400;
 
 type QueuedAuditJob = BaseAiAuditRow;
@@ -35,8 +32,6 @@ type AuditMode = ProviderAuditMode;
 interface ChainSpec {
   canonical: string;
   dedaubChain: string;
-  etherscanChainId: string;
-  explorerUrl: string;
   aliases: string[];
 }
 
@@ -62,30 +57,26 @@ interface ResponsePayload {
   text: string;
 }
 
-interface VerificationStatus {
-  verified: boolean;
-  method: 'etherscan-api' | 'explorer-html';
-  detail: string;
+interface QuickAnalyzeLinkage {
+  proxy?: boolean;
+  implementationAddress?: string;
 }
 
-interface DedaubRequestResponse {
-  session?: { id?: string };
-  analysis?: { state?: string; error?: string; filePath?: string };
+interface QuickAnalyzeRequestState {
+  tempId?: string;
+  state?: string;
+  phase?: string;
+  message?: string;
+  error?: string;
+  sessionId?: string;
+  cliSessionId?: string;
 }
 
-interface DedaubStatusResponse {
-  session?: { id?: string; status?: string };
-  analysis?: { state?: string; error?: string; filePath?: string };
-}
-
-interface AnalysisRequestResponse {
-  session?: { id?: string };
-  analysis?: { state?: string; error?: string };
-}
-
-interface AnalysisStatusResponse {
-  session?: { id?: string; error?: string };
-  analysis?: { state?: string; error?: string; result?: unknown };
+interface QuickAnalyzeStatusResponse {
+  tempId?: string;
+  request?: QuickAnalyzeRequestState | null;
+  session?: { id?: string; status?: string; error?: string } | null;
+  analysis?: { state?: string; error?: string; result?: unknown } | null;
 }
 
 interface ParsedAuditReport {
@@ -146,14 +137,14 @@ function describeAuditError(error: unknown): string {
 }
 
 const CHAIN_SPECS: ChainSpec[] = [
-  { canonical: 'ethereum', dedaubChain: 'ethereum', etherscanChainId: '1', explorerUrl: 'https://etherscan.io', aliases: ['eth', 'ethereum', 'mainnet'] },
-  { canonical: 'arbitrum', dedaubChain: 'arbitrum', etherscanChainId: '42161', explorerUrl: 'https://arbiscan.io', aliases: ['arb', 'arbitrum'] },
-  { canonical: 'optimism', dedaubChain: 'optimism', etherscanChainId: '10', explorerUrl: 'https://optimistic.etherscan.io', aliases: ['op', 'optimism'] },
-  { canonical: 'base', dedaubChain: 'base', etherscanChainId: '8453', explorerUrl: 'https://basescan.org', aliases: ['base'] },
-  { canonical: 'polygon', dedaubChain: 'polygon', etherscanChainId: '137', explorerUrl: 'https://polygonscan.com', aliases: ['polygon', 'matic', 'poly'] },
-  { canonical: 'bsc', dedaubChain: 'binance', etherscanChainId: '56', explorerUrl: 'https://bscscan.com', aliases: ['bsc', 'binance', 'binance-smart-chain', 'bnb'] },
-  { canonical: 'avalanche', dedaubChain: 'avalanche', etherscanChainId: '43114', explorerUrl: 'https://snowtrace.io', aliases: ['avalanche', 'avax'] },
-  { canonical: 'blast', dedaubChain: 'blast', etherscanChainId: '81457', explorerUrl: 'https://blastscan.io', aliases: ['blast'] },
+  { canonical: 'ethereum', dedaubChain: 'ethereum', aliases: ['eth', 'ethereum', 'mainnet'] },
+  { canonical: 'arbitrum', dedaubChain: 'arbitrum', aliases: ['arb', 'arbitrum'] },
+  { canonical: 'optimism', dedaubChain: 'optimism', aliases: ['op', 'optimism'] },
+  { canonical: 'base', dedaubChain: 'base', aliases: ['base'] },
+  { canonical: 'polygon', dedaubChain: 'polygon', aliases: ['polygon', 'matic', 'poly'] },
+  { canonical: 'bsc', dedaubChain: 'binance', aliases: ['bsc', 'binance', 'binance-smart-chain', 'bnb'] },
+  { canonical: 'avalanche', dedaubChain: 'avalanche', aliases: ['avalanche', 'avax'] },
+  { canonical: 'blast', dedaubChain: 'blast', aliases: ['blast'] },
 ];
 
 const CHAIN_BY_ALIAS = new Map<string, ChainSpec>();
@@ -169,64 +160,11 @@ const activeSessions = new Set<string>();
 const activeJobTypes = new Map<string, 'contract' | 'token'>();
 const queue: QueuedAuditJob[] = [];
 const aiAuditListeners = new Set<(event: AiAuditEvent) => void | Promise<void>>();
-const verificationStatusCache = new Map<string, { expiresAt: number; status: VerificationStatus }>();
 let drainLoopRunning = false;
 let nextAuditStartAt = 0;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function verificationCacheKey(chain: string, address: string): string {
-  return `${String(chain || '').toLowerCase()}:${normalizeAddress(address)}`;
-}
-
-function getCachedVerificationStatus(chain: string, address: string): VerificationStatus | null {
-  const key = verificationCacheKey(chain, address);
-  const cached = verificationStatusCache.get(key);
-  if (!cached) return null;
-  if (cached.expiresAt <= Date.now()) {
-    verificationStatusCache.delete(key);
-    return null;
-  }
-  return cached.status;
-}
-
-function setCachedVerificationStatus(chain: string, address: string, status: VerificationStatus): VerificationStatus {
-  const key = verificationCacheKey(chain, address);
-  if (verificationStatusCache.has(key)) verificationStatusCache.delete(key);
-  verificationStatusCache.set(key, {
-    expiresAt: Date.now() + VERIFICATION_CACHE_TTL_MS,
-    status,
-  });
-  while (verificationStatusCache.size > MAX_VERIFICATION_CACHE_ENTRIES) {
-    const oldestKey = verificationStatusCache.keys().next().value;
-    if (oldestKey == null) break;
-    verificationStatusCache.delete(oldestKey);
-  }
-  return status;
-}
-
-async function retryVerificationProbe<T>(
-  label: string,
-  request: () => Promise<T>,
-): Promise<T> {
-  let lastError: Error | null = null;
-  for (let attempt = 1; attempt <= VERIFICATION_RETRY_ATTEMPTS; attempt += 1) {
-    try {
-      return await request();
-    } catch (error) {
-      lastError = error as Error;
-      const finalAttempt = attempt >= VERIFICATION_RETRY_ATTEMPTS;
-      logger.warn(
-        `[ai-audit] ${label} failed (attempt ${attempt}/${VERIFICATION_RETRY_ATTEMPTS}): ${lastError.message}`,
-      );
-      if (!finalAttempt) {
-        await sleep(VERIFICATION_RETRY_BACKOFF_MS * attempt);
-      }
-    }
-  }
-  throw lastError ?? new Error(`${label} failed`);
 }
 
 function publishAiAuditEvent(job: QueuedAuditJob, patch: {
@@ -246,8 +184,8 @@ function publishAiAuditEvent(job: QueuedAuditJob, patch: {
     targetAddr: job.targetAddr,
     requestSession: job.requestSession,
     title: job.title,
-    provider: job.provider,
-    model: job.model,
+    provider: QUICK_ANALYZE_PROVIDER,
+    model: resolveAuditModel(job.model),
     status: patch.status,
     reportPath: patch.reportPath ?? null,
     critical: patch.critical ?? null,
@@ -333,6 +271,10 @@ function getChainSpec(chain: string): ChainSpec {
 
 function normalizeAddress(address: string): string {
   return String(address || '').trim().toLowerCase();
+}
+
+function resolveAuditModel(model: string | null | undefined): string {
+  return normalizeAiAuditModel(QUICK_ANALYZE_PROVIDER, model);
 }
 
 function hasSelectors(registry: ContractRegistryRow | undefined): boolean {
@@ -480,181 +422,101 @@ async function postJson<T>(baseUrl: string, apiKey: string, insecureTls: boolean
   });
 }
 
-async function resolveVerificationStatus(
-  baseUrlConfig: ReturnType<typeof getAiAuditBackendConfig>,
-  chain: ChainSpec,
-  verificationAddress: string,
-): Promise<VerificationStatus> {
-  const cached = getCachedVerificationStatus(chain.canonical, verificationAddress);
-  if (cached) return cached;
-
-  let etherscanErrorMessage = '';
-  if (baseUrlConfig.etherscanApiKey) {
-    const url = new URL('https://api.etherscan.io/v2/api');
-    url.searchParams.set('module', 'contract');
-    url.searchParams.set('action', 'getsourcecode');
-    url.searchParams.set('chainid', chain.etherscanChainId);
-    url.searchParams.set('address', verificationAddress);
-    url.searchParams.set('apikey', baseUrlConfig.etherscanApiKey);
-
-    try {
-      const response = await retryVerificationProbe(
-        `Etherscan verification for ${chain.canonical}:${verificationAddress}`,
-        async () => await requestJson<{
-        result?: Array<{ SourceCode?: string; ABI?: string }> | string;
-      }>(url.toString(), { family: 4 }),
-      );
-
-      if (Array.isArray(response.result) && response.result.length > 0) {
-        const record = response.result[0] ?? {};
-        const sourceCode = String(record.SourceCode || '').trim();
-        const abi = String(record.ABI || '').trim();
-        const verified =
-          Boolean(sourceCode) &&
-          abi !== 'Contract source code not verified' &&
-          !sourceCode.includes('Contract source code not verified');
-        return setCachedVerificationStatus(chain.canonical, verificationAddress, {
-          verified,
-          method: 'etherscan-api',
-          detail: verified ? 'verified source returned by Etherscan API' : 'Etherscan API indicates source is not verified',
-        });
-      }
-      if (typeof response.result === 'string' && response.result.trim()) {
-        etherscanErrorMessage = `Etherscan API result: ${response.result.trim()}`;
-      }
-    } catch (error) {
-      etherscanErrorMessage = (error as Error).message || 'unknown error';
-    }
-  }
-
-  const explorerUrl = `${chain.explorerUrl}/address/${verificationAddress}#code`;
-  try {
-    const html = await retryVerificationProbe(
-      `Explorer verification for ${chain.canonical}:${verificationAddress}`,
-      async () => await requestText(explorerUrl, { timeoutMs: 30_000, family: 4 }),
-    );
-    const verified =
-      html.text.includes('Source Code Verified')
-      || html.text.includes('Contract Source Code Verified')
-      || html.text.includes('Similar Match Source Code')
-      || html.text.includes('Contract: Verified');
-    const similarMatch = html.text.includes('Similar Match Source Code');
-    return setCachedVerificationStatus(chain.canonical, verificationAddress, {
-      verified,
-      method: 'explorer-html',
-      detail: verified
-        ? (similarMatch
-          ? `similar-match verified marker found at ${explorerUrl}`
-          : `verified marker found at ${explorerUrl}`)
-        : `verified marker not found at ${explorerUrl}`,
-    });
-  } catch (error) {
-    const explorerErrorMessage = (error as Error).message || 'unknown error';
-    return setCachedVerificationStatus(chain.canonical, verificationAddress, {
-      verified: false,
-      method: 'explorer-html',
-      detail: etherscanErrorMessage
-        ? `verification probes failed; etherscan: ${etherscanErrorMessage}; explorer: ${explorerErrorMessage}`
-        : `verification probe failed at ${explorerUrl}: ${explorerErrorMessage}`,
-    });
-  }
+function buildQuickAnalyzeLinkage(mode: AuditMode, auditAddress: string, verificationAddress: string): QuickAnalyzeLinkage | undefined {
+  if (mode !== 'proxy') return undefined;
+  if (!isLikelyAddress(verificationAddress)) return undefined;
+  if (normalizeAddress(auditAddress) === normalizeAddress(verificationAddress)) return undefined;
+  return {
+    proxy: true,
+    implementationAddress: normalizeAddress(verificationAddress),
+  };
 }
 
-async function waitForDedaubFile(
+function getQuickAnalyzeError(status: QuickAnalyzeStatusResponse | null | undefined): string {
+  return String(
+    status?.analysis?.error
+    || status?.session?.error
+    || status?.request?.error
+    || 'quickAnalyze failed',
+  ).trim();
+}
+
+async function startQuickAnalyzeRequest(
   backend: ReturnType<typeof getAiAuditBackendConfig>,
   chain: ChainSpec,
-  address: string,
-): Promise<{ jobId: string; filePath: string }> {
-  const startResponse = await postJson<DedaubRequestResponse>(
+  auditAddress: string,
+  model: string,
+  title: string,
+  linkage?: QuickAnalyzeLinkage,
+): Promise<{ tempId: string; sessionId: string }> {
+  const response = await postJson<QuickAnalyzeStatusResponse>(
     backend.baseUrl,
     backend.apiKey,
     backend.insecureTls,
-    '/api/dedaub/request',
+    '/api/quickAnalyze/request',
     {
       chain: chain.dedaubChain,
-      address,
-      waitSeconds: backend.dedaubWaitSeconds,
+      contract: auditAddress,
+      linkage,
+      provider: QUICK_ANALYZE_PROVIDER,
+      model,
+      title,
     },
   );
 
-  const jobId = String(startResponse.session?.id || '').trim();
-  if (!jobId) {
-    throw new Error('Dedaub request did not return a session id');
+  const tempId = String(response.tempId || response.request?.tempId || '').trim();
+  if (!tempId) {
+    throw new Error('quickAnalyze request did not return a tempId');
   }
 
-  const filePath = await waitForDedaubFileByJobId(backend, jobId);
-  return { jobId, filePath };
+  return {
+    tempId,
+    sessionId: String(response.session?.id || response.request?.sessionId || '').trim(),
+  };
 }
 
-async function waitForDedaubFileByJobId(
+async function waitForQuickAnalyzeResult(
   backend: ReturnType<typeof getAiAuditBackendConfig>,
-  jobId: string,
-): Promise<string> {
+  input: {
+    tempId?: string;
+    sessionId?: string;
+    onSessionId?: (sessionId: string) => void;
+  },
+): Promise<{ sessionId: string; status: QuickAnalyzeStatusResponse }> {
+  let tempId = String(input.tempId || '').trim();
+  let sessionId = String(input.sessionId || '').trim();
+
   while (true) {
     await sleep(backend.pollIntervalMs);
-    const status = await postJson<DedaubStatusResponse>(
+    const status = await postJson<QuickAnalyzeStatusResponse>(
       backend.baseUrl,
       backend.apiKey,
       backend.insecureTls,
-      '/api/dedaub/status',
-      { sessionId: jobId },
+      '/api/quickAnalyze/status',
+      sessionId ? { sessionId } : { tempId },
     );
 
-    const state = String(status.analysis?.state || '').trim().toLowerCase();
-    if (state === 'completed') {
-      const filePath = String(status.analysis?.filePath || '').trim();
-      if (!filePath) throw new Error('Dedaub completed without filePath');
-      return filePath;
+    const discoveredSessionId = String(status.session?.id || status.request?.sessionId || '').trim();
+    if (!sessionId && discoveredSessionId) {
+      sessionId = discoveredSessionId;
+      input.onSessionId?.(sessionId);
     }
-    if (state === 'stopped') {
-      throw new Error(`Dedaub failed: ${String(status.analysis?.error || 'unknown error')}`);
+    if (!tempId) {
+      tempId = String(status.tempId || status.request?.tempId || '').trim();
     }
-  }
-}
 
-async function startAnalysis(
-  backend: ReturnType<typeof getAiAuditBackendConfig>,
-  job: QueuedAuditJob,
-  chain: ChainSpec,
-  prompt: string,
-  sourceCodePath: string,
-  auditAddress: string,
-): Promise<AnalysisRequestResponse> {
-  return await postJson<AnalysisRequestResponse>(
-    backend.baseUrl,
-    backend.apiKey,
-    backend.insecureTls,
-    '/api/analysis/request',
-    {
-      provider: job.provider,
-      model: job.model,
-      title: job.title,
-      prompt,
-      sourceCodePath: sourceCodePath || undefined,
-      contractAddress: auditAddress,
-      chain: chain.canonical,
-    },
-  );
-}
+    const analysisState = String(status.analysis?.state || '').trim().toLowerCase();
+    if (analysisState === 'completed') {
+      return { sessionId, status };
+    }
+    if (analysisState === 'stopped') {
+      throw new Error(getQuickAnalyzeError(status));
+    }
 
-async function waitForAnalysisResult(
-  backend: ReturnType<typeof getAiAuditBackendConfig>,
-  sessionId: string,
-): Promise<AnalysisStatusResponse> {
-  while (true) {
-    await sleep(backend.pollIntervalMs);
-    const status = await postJson<AnalysisStatusResponse>(
-      backend.baseUrl,
-      backend.apiKey,
-      backend.insecureTls,
-      '/api/analysis/status',
-      { sessionId },
-    );
-
-    const state = String(status.analysis?.state || '').trim().toLowerCase();
-    if (state === 'completed') return status;
-    if (state === 'stopped') {
-      throw new Error(`analysis stopped: ${String(status.analysis?.error || status.session?.error || 'unknown error')}`);
+    const requestState = String(status.request?.state || '').trim().toLowerCase();
+    const requestPhase = String(status.request?.phase || '').trim().toLowerCase();
+    if (requestState === 'failed' || requestPhase.endsWith('_failed')) {
+      throw new Error(getQuickAnalyzeError(status));
     }
   }
 }
@@ -683,12 +545,10 @@ async function writeAuditReport(
   mode: AuditMode,
   auditAddress: string,
   verificationAddress: string,
-  prompt: string,
-  sourceCodePath: string,
-  verification: VerificationStatus,
-  dedaubJobId: string,
+  linkage: QuickAnalyzeLinkage | undefined,
+  quickAnalyzeTempId: string,
   analysisSessionId: string,
-  analysisStatus: AnalysisStatusResponse,
+  analysisStatus: QuickAnalyzeStatusResponse,
 ): Promise<ParsedAuditReport> {
   await mkdir(REPORT_DIR, { recursive: true });
   const stem = `${chain.canonical}_${auditAddress}`.toLowerCase();
@@ -696,23 +556,24 @@ async function writeAuditReport(
   const jsonPath = path.join(REPORT_DIR, `${stem}.json`);
   const generatedAt = new Date().toISOString();
   const resultText = renderResult(analysisStatus.analysis?.result);
+  const requestState = String(analysisStatus.request?.state || '').trim() || 'n/a';
+  const requestPhase = String(analysisStatus.request?.phase || '').trim() || 'n/a';
 
   const markdown = `# Audit Report
 
 - generatedAt: ${generatedAt}
 - chain: ${chain.canonical}
+- workflow: quickAnalyze
 - mode: ${mode}
 - auditAddress: ${auditAddress}
 - verificationAddress: ${verificationAddress}
-- provider: ${job.provider}
-- model: ${job.model}
-- verificationStatus: ${verification.verified ? 'verified' : 'unverified'}
-- verificationMethod: ${verification.method}
-- verificationDetail: ${verification.detail}
-- dedaubJobId: ${dedaubJobId || 'n/a'}
+- provider: ${QUICK_ANALYZE_PROVIDER}
+- model: ${resolveAuditModel(job.model)}
+- linkage: ${linkage ? JSON.stringify(linkage) : 'n/a'}
+- quickAnalyzeTempId: ${quickAnalyzeTempId || 'n/a'}
 - analysisSessionId: ${analysisSessionId}
-- sourceCodePath: ${sourceCodePath || 'n/a'}
-- prompt: ${prompt}
+- requestState: ${requestState}
+- requestPhase: ${requestPhase}
 
 ## Result
 
@@ -722,15 +583,14 @@ ${resultText}
   const metadata = {
     generatedAt,
     chain: chain.canonical,
+    workflow: 'quickAnalyze',
     mode,
     auditAddress,
     verificationAddress,
-    provider: job.provider,
-    model: job.model,
-    prompt,
-    sourceCodePath,
-    verification,
-    dedaubJobId,
+    provider: QUICK_ANALYZE_PROVIDER,
+    model: resolveAuditModel(job.model),
+    linkage,
+    quickAnalyzeTempId,
     analysisSessionId,
     analysis: analysisStatus,
   };
@@ -758,8 +618,8 @@ function persistFailure(
     chain: job.chain,
     requestSession: job.requestSession,
     title: job.title,
-    provider: job.provider,
-    model: job.model,
+    provider: QUICK_ANALYZE_PROVIDER,
+    model: resolveAuditModel(job.model),
     dedaubJobId: sessions.dedaubJobId ?? job.dedaubJobId ?? null,
     analysisSessionId: sessions.analysisSessionId ?? job.analysisSessionId ?? null,
     resultPath: null,
@@ -792,8 +652,8 @@ function persistSuccess(
     chain: job.chain,
     requestSession: job.requestSession,
     title: job.title,
-    provider: job.provider,
-    model: job.model,
+    provider: QUICK_ANALYZE_PROVIDER,
+    model: resolveAuditModel(job.model),
     dedaubJobId: sessions.dedaubJobId ?? job.dedaubJobId ?? null,
     analysisSessionId: sessions.analysisSessionId ?? job.analysisSessionId ?? null,
     resultPath: path.relative(ROOT, report.markdownPath).split(path.sep).join('/'),
@@ -823,17 +683,15 @@ function persistSuccess(
 function resolveExecutionContext(job: QueuedAuditJob): {
   backend: ReturnType<typeof getAiAuditBackendConfig>;
   chain: ChainSpec;
-  providerModule: NonNullable<ReturnType<typeof getAiAuditProviderModule>>;
   mode: AuditMode;
   auditAddress: string;
   verificationAddress: string;
+  linkage: QuickAnalyzeLinkage | undefined;
+  model: string;
 } {
   const backend = getAiAuditBackendConfig();
   const chain = getChainSpec(job.chain);
-  const providerModule = getAiAuditProviderModule(job.provider);
-  if (!providerModule) {
-    throw new Error(`Unsupported provider module for ${job.provider}`);
-  }
+  const model = resolveAuditModel(job.model);
 
   let mode: AuditMode = 'single';
   let auditAddress = job.targetAddr;
@@ -851,10 +709,11 @@ function resolveExecutionContext(job: QueuedAuditJob): {
   return {
     backend,
     chain,
-    providerModule,
     mode,
     auditAddress,
     verificationAddress,
+    linkage: buildQuickAnalyzeLinkage(mode, auditAddress, verificationAddress),
+    model,
   };
 }
 
@@ -868,15 +727,15 @@ async function continueAuditJob(
   let analysisSessionId = String(job.analysisSessionId || '').trim();
 
   try {
-    const { backend, chain, providerModule, mode, auditAddress, verificationAddress } = resolveExecutionContext(job);
+    const { backend, chain, mode, auditAddress, verificationAddress, linkage, model } = resolveExecutionContext(job);
     if (!backend.baseUrl || !backend.apiKey) {
       throw new Error('backend config is incomplete');
     }
 
     if (options.reason === 'fresh') {
-      logger.info(`[ai-audit] Starting ${job.targetType} audit ${job.chain}:${job.targetAddr} (${mode}) via ${job.provider}/${job.model}`);
+      logger.info(`[ai-audit] Starting ${job.targetType} audit ${job.chain}:${job.targetAddr} (${mode}) via ${QUICK_ANALYZE_PROVIDER}/${model}`);
     } else {
-      logger.info(`[ai-audit] Resuming ${job.targetType} audit ${job.chain}:${job.targetAddr} (${mode}) via ${job.provider}/${job.model}`);
+      logger.info(`[ai-audit] Resuming ${job.targetType} audit ${job.chain}:${job.targetAddr} (${mode}) via ${QUICK_ANALYZE_PROVIDER}/${model}`);
     }
 
     updateAiAuditLifecycleStatus({
@@ -888,57 +747,51 @@ async function continueAuditJob(
       status: 'running',
     });
 
-    const verification = await resolveVerificationStatus(backend, chain, verificationAddress);
-    let sourceCodePath = '';
-    if (!verification.verified) {
-      if (dedaubJobId) {
-        sourceCodePath = await waitForDedaubFileByJobId(backend, dedaubJobId);
-      } else {
-        const decompile = await waitForDedaubFile(backend, chain, verificationAddress);
-        dedaubJobId = decompile.jobId;
-        sourceCodePath = decompile.filePath;
-        updateAiAuditBackendSessionIds({
-          requestSession: job.requestSession,
-          dedaubJobId,
-        });
-      }
-    }
-
-    const prompt = providerModule.buildPrompt({
-      mode,
-      chain: chain.canonical,
-      auditAddress,
-      verified: verification.verified,
-      sourceCodePath,
-    });
-
-    if (!analysisSessionId) {
-      const analysisStart = await startAnalysis(backend, job, chain, prompt, sourceCodePath, auditAddress);
-      analysisSessionId = String(analysisStart.session?.id || '').trim();
-      if (!analysisSessionId) {
-        throw new Error('analysis request did not return a session id');
-      }
+    if (!dedaubJobId && !analysisSessionId) {
+      const start = await startQuickAnalyzeRequest(
+        backend,
+        chain,
+        auditAddress,
+        model,
+        job.title,
+        linkage,
+      );
+      dedaubJobId = start.tempId;
+      analysisSessionId = start.sessionId;
       updateAiAuditBackendSessionIds({
         requestSession: job.requestSession,
-        analysisSessionId,
+        dedaubJobId,
+        analysisSessionId: analysisSessionId || null,
       });
     }
 
-    const analysisStatus = await waitForAnalysisResult(backend, analysisSessionId);
+    const analysisStatus = await waitForQuickAnalyzeResult(backend, {
+      tempId: dedaubJobId,
+      sessionId: analysisSessionId,
+      onSessionId: (sessionId) => {
+        analysisSessionId = sessionId;
+        updateAiAuditBackendSessionIds({
+          requestSession: job.requestSession,
+          analysisSessionId,
+        });
+      },
+    });
+
     const report = await writeAuditReport(
       job,
       chain,
       mode,
       auditAddress,
       verificationAddress,
-      prompt,
-      sourceCodePath,
-      verification,
+      linkage,
       dedaubJobId,
-      analysisSessionId,
-      analysisStatus,
+      analysisStatus.sessionId || analysisSessionId,
+      analysisStatus.status,
     );
-    persistSuccess(job, report, { dedaubJobId, analysisSessionId });
+    persistSuccess(job, report, {
+      dedaubJobId,
+      analysisSessionId: analysisStatus.sessionId || analysisSessionId,
+    });
     logger.info(`[ai-audit] Completed ${job.targetType} audit ${job.chain}:${job.targetAddr} -> c:${report.critical} h:${report.high} m:${report.medium}`);
   } catch (error) {
     logger.error(`[ai-audit] Audit failed for ${job.targetType} ${job.chain}:${job.targetAddr}`, error);

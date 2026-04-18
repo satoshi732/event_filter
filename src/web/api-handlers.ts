@@ -766,16 +766,23 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       const aiModelsRaw = Array.isArray(body.ai_models) ? body.ai_models as Array<Record<string, unknown>> : [];
       const whitelistPatterns = Array.isArray(body.whitelist_patterns) ? body.whitelist_patterns as Array<Record<string, unknown>> : [];
 
+      const defaultAiProvider = getDefaultAiAuditProvider();
+      const defaultAiModel = getDefaultAiAuditModel(defaultAiProvider);
+
       const normalizedProviders = aiProviders
         .map((row, index) => ({
           provider: String(row.provider || '').trim().toLowerCase(),
           enabled: coerceBoolean(row.enabled, true),
           position: coercePositiveInt(row.position, index),
         }))
-        .filter((row) => row.provider);
+        .filter((row) => row.provider === defaultAiProvider);
+
+      const providerRows = normalizedProviders.length
+        ? normalizedProviders
+        : [{ provider: defaultAiProvider, enabled: true, position: 0 }];
 
       const normalizedModels = normalizeAiModelRows(
-        normalizedProviders,
+        providerRows,
         aiModelsRaw.map((row, index) => ({
           provider: String(row.provider || '').trim().toLowerCase(),
           model: String(row.model || '').trim(),
@@ -783,7 +790,17 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
           isDefault: coerceBoolean(row.is_default ?? row.isDefault, false),
           position: coercePositiveInt(row.position, index),
         })),
-      );
+      ).filter((row) => row.provider === defaultAiProvider);
+
+      const modelRows = normalizedModels.length
+        ? normalizedModels
+        : [{
+          provider: defaultAiProvider,
+          model: defaultAiModel,
+          enabled: true,
+          isDefault: true,
+          position: 0,
+        }];
 
       const httpsEnabled = coerceBoolean(access.https_enabled, false);
       const tlsCertPath = String(access.tls_cert_path || '').trim();
@@ -837,8 +854,8 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         multicall3Address: String(row.multicall3 || '').trim().toLowerCase(),
       })).filter((row) => row.chain));
 
-      replaceAiAuditProviders(normalizedProviders);
-      replaceAiAuditModels(normalizedModels);
+      replaceAiAuditProviders(providerRows);
+      replaceAiAuditModels(modelRows);
       replaceWhitelistPatterns(whitelistPatterns.map((row, index) => ({
         name: String(row.name || '').trim(),
         hexPattern: String((row.hex_pattern ?? row.hexPattern) || '').trim(),

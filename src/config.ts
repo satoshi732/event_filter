@@ -196,10 +196,52 @@ const INFURA_NETWORK_BY_CHAIN: Record<string, string> = {
 let runtimeConfigCache: RuntimeConfigCache | null = null;
 let seeded = false;
 
+const AI_AUDIT_PROVIDER_CODEX = 'codex';
+const AI_AUDIT_DEFAULT_MODEL = 'gpt-5.4';
 const DEFAULT_AI_AUDIT_SEED: Record<string, string[]> = {
-  claude: ['claude-sonnet', 'claude-opus'],
-  codex: ['gpt-5-codex', 'gpt-5-codex-mini'],
+  [AI_AUDIT_PROVIDER_CODEX]: [AI_AUDIT_DEFAULT_MODEL],
 };
+
+function defaultCodexProviderRow(): AiAuditProviderRow {
+  return {
+    provider: AI_AUDIT_PROVIDER_CODEX,
+    enabled: true,
+    position: 0,
+    updatedAt: '',
+  };
+}
+
+function defaultCodexModelRow(): AiAuditModelRow {
+  return {
+    id: 0,
+    provider: AI_AUDIT_PROVIDER_CODEX,
+    model: AI_AUDIT_DEFAULT_MODEL,
+    enabled: true,
+    isDefault: true,
+    position: 0,
+    updatedAt: '',
+  };
+}
+
+function sanitizeAiProviderRows(rows: AiAuditProviderRow[]): AiAuditProviderRow[] {
+  const filtered = rows
+    .filter((row) => String(row.provider || '').trim().toLowerCase() === AI_AUDIT_PROVIDER_CODEX)
+    .map((row) => ({
+      ...row,
+      provider: AI_AUDIT_PROVIDER_CODEX,
+    }));
+  return filtered.length ? filtered : [defaultCodexProviderRow()];
+}
+
+function sanitizeAiModelRows(rows: AiAuditModelRow[]): AiAuditModelRow[] {
+  const filtered = rows
+    .filter((row) => String(row.provider || '').trim().toLowerCase() === AI_AUDIT_PROVIDER_CODEX)
+    .map((row) => ({
+      ...row,
+      provider: AI_AUDIT_PROVIDER_CODEX,
+    }));
+  return filtered.length ? filtered : [defaultCodexModelRow()];
+}
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
@@ -363,11 +405,11 @@ function readLegacyKeysFile(): LegacyKeysFile {
 }
 
 function defaultAiProviders(): Array<{ provider: string; enabled: boolean; position: number }> {
-  return Object.keys(DEFAULT_AI_AUDIT_SEED).map((provider, index) => ({
-    provider,
+  return [{
+    provider: AI_AUDIT_PROVIDER_CODEX,
     enabled: true,
-    position: index,
-  }));
+    position: 0,
+  }];
 }
 
 function defaultAiModels(): Array<{ provider: string; model: string; enabled: boolean; is_default: boolean; position: number }> {
@@ -397,7 +439,7 @@ function normalizeAiAuditProviderFromRows(
   const allowed = getAiAuditProviderOptionsFromRows(rows);
   return allowed.includes(normalized)
     ? normalized
-    : (allowed[0] || 'claude');
+    : (allowed[0] || AI_AUDIT_PROVIDER_CODEX);
 }
 
 function getAiAuditModelOptionsFromRows(
@@ -599,8 +641,8 @@ function loadRuntimeConfigFromDb(): RuntimeConfigCache {
   seedRuntimeConfigIfNeeded();
 
   const chainRows = listChainSettings();
-  const aiProviders = listAiAuditProviders();
-  const aiModels = listAiAuditModels();
+  const aiProviders = sanitizeAiProviderRows(listAiAuditProviders());
+  const aiModels = sanitizeAiModelRows(listAiAuditModels());
   const autoAnalysisProvider = normalizeAiAuditProviderFromRows(getAppSetting('auto_analysis.provider'), aiProviders);
   const autoAnalysisModel = normalizeAiAuditModelFromRows(
     autoAnalysisProvider,
@@ -762,15 +804,15 @@ export function getPancakeSwapPriceLimiterConfig(): { maxReqPerSecond: number; m
 }
 
 export function getAiAuditProviderConfigs(): AiAuditProviderRow[] {
-  return JSON.parse(JSON.stringify(ensureRuntimeCache().aiProviders)) as AiAuditProviderRow[];
+  return JSON.parse(JSON.stringify(sanitizeAiProviderRows(ensureRuntimeCache().aiProviders))) as AiAuditProviderRow[];
 }
 
 export function getAiAuditModelConfigs(): AiAuditModelRow[] {
-  return JSON.parse(JSON.stringify(ensureRuntimeCache().aiModels)) as AiAuditModelRow[];
+  return JSON.parse(JSON.stringify(sanitizeAiModelRows(ensureRuntimeCache().aiModels))) as AiAuditModelRow[];
 }
 
 export function getAiAuditProviderOptions(): string[] {
-  const enabled = ensureRuntimeCache().aiProviders
+  const enabled = sanitizeAiProviderRows(ensureRuntimeCache().aiProviders)
     .filter((row) => row.enabled)
     .sort((a, b) => a.position - b.position || a.provider.localeCompare(b.provider))
     .map((row) => row.provider);
@@ -778,7 +820,7 @@ export function getAiAuditProviderOptions(): string[] {
 }
 
 export function getDefaultAiAuditProvider(): string {
-  return getAiAuditProviderOptions()[0] || 'claude';
+  return getAiAuditProviderOptions()[0] || AI_AUDIT_PROVIDER_CODEX;
 }
 
 export function normalizeAiAuditProvider(provider: string | null | undefined): string {
@@ -790,7 +832,7 @@ export function normalizeAiAuditProvider(provider: string | null | undefined): s
 
 export function getAiAuditModelOptions(provider: string | null | undefined): string[] {
   const normalizedProvider = normalizeAiAuditProvider(provider);
-  const enabled = ensureRuntimeCache().aiModels
+  const enabled = sanitizeAiModelRows(ensureRuntimeCache().aiModels)
     .filter((row) => row.provider === normalizedProvider && row.enabled)
     .sort((a, b) => {
       if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;

@@ -58,6 +58,8 @@
     autoAuditStatusTone,
     autoAuditStatusLabel,
     autoAuditSeveritySummary,
+    compareAuditSeverity,
+    auditSeverityPills,
     auditResultDisplay,
     contractToneClass,
     tokenToneClass,
@@ -904,7 +906,7 @@
             case 'auto_audit_status':
               return compareString(a.auto_audit_status || 'no', b.auto_audit_status || 'no');
             case 'audit_result':
-              return compareString(auditResultDisplay(a), auditResultDisplay(b));
+              return compareAuditSeverity(a, b);
             case 'balance':
             default:
               return compareBigInt(a.current_balance, b.current_balance);
@@ -1625,6 +1627,7 @@
         autoAuditStatusLabel,
         autoAuditStatusTone,
         autoAuditSeveritySummary,
+        auditSeverityPills,
         auditResultDisplay,
         refreshCurrent,
         handleChainChanged,

@@ -226,6 +226,14 @@ function applyDashboardContractQuery(
   page: number,
   pageSize: number,
 ) {
+  const compareAuditSeverity = (a: { auto_audit_critical?: number | null; auto_audit_high?: number | null; auto_audit_medium?: number | null }, b: { auto_audit_critical?: number | null; auto_audit_high?: number | null; auto_audit_medium?: number | null }) => {
+    const criticalDelta = compareNumberLike(a.auto_audit_critical ?? 0, b.auto_audit_critical ?? 0);
+    if (criticalDelta !== 0) return criticalDelta;
+    const highDelta = compareNumberLike(a.auto_audit_high ?? 0, b.auto_audit_high ?? 0);
+    if (highDelta !== 0) return highDelta;
+    return compareNumberLike(a.auto_audit_medium ?? 0, b.auto_audit_medium ?? 0);
+  };
+
   const queryText = String(search || '').trim().toLowerCase();
   let filtered = rows.filter((row) => {
     const isSeen = Boolean(row.is_seen_pattern || row.group_kind === 'seen');
@@ -267,6 +275,9 @@ function applyDashboardContractQuery(
       case 'auto_audit_status':
         delta = compareStringLike(a.auto_audit_status, b.auto_audit_status);
         break;
+      case 'audit_result':
+        delta = compareAuditSeverity(a, b);
+        break;
       case 'total_usd':
       default:
         delta = compareNumberLike(a.portfolio_usd, b.portfolio_usd);
@@ -298,6 +309,14 @@ function applyDashboardTokenQuery(
   page: number,
   pageSize: number,
 ) {
+  const compareAuditSeverity = (a: { auto_audit_critical?: number | null; auto_audit_high?: number | null; auto_audit_medium?: number | null }, b: { auto_audit_critical?: number | null; auto_audit_high?: number | null; auto_audit_medium?: number | null }) => {
+    const criticalDelta = compareNumberLike(a.auto_audit_critical ?? 0, b.auto_audit_critical ?? 0);
+    if (criticalDelta !== 0) return criticalDelta;
+    const highDelta = compareNumberLike(a.auto_audit_high ?? 0, b.auto_audit_high ?? 0);
+    if (highDelta !== 0) return highDelta;
+    return compareNumberLike(a.auto_audit_medium ?? 0, b.auto_audit_medium ?? 0);
+  };
+
   const queryText = String(search || '').trim().toLowerCase();
   let filtered = rows.filter((row) => {
     const searchBlob = `${row.token} ${row.token_name || ''} ${row.token_symbol || ''}`.toLowerCase();
@@ -323,10 +342,7 @@ function applyDashboardTokenQuery(
         delta = compareStringLike(a.auto_audit_status, b.auto_audit_status);
         break;
       case 'audit_result':
-        delta = compareStringLike(
-          `${a.auto_audit_critical ?? 0}:${a.auto_audit_high ?? 0}:${a.auto_audit_medium ?? 0}`,
-          `${b.auto_audit_critical ?? 0}:${b.auto_audit_high ?? 0}:${b.auto_audit_medium ?? 0}`,
-        );
+        delta = compareAuditSeverity(a, b);
         break;
       case 'manual_audit':
         delta = compareNumberLike(a.is_manual_audit ? 1 : 0, b.is_manual_audit ? 1 : 0);

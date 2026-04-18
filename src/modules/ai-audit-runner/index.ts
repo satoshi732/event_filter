@@ -537,10 +537,30 @@ function renderResult(result: unknown): string {
   return JSON.stringify(result, null, 2);
 }
 
+function extractFindingsSection(text: string): string {
+  const normalized = String(text || '');
+  const findingsMatch = normalized.match(/\*\*Findings\*\*([\s\S]*?)(?=\n\*\*[A-Z][^*]*\*\*|\n#|\n##|$)/i);
+  if (!findingsMatch) return normalized;
+  return String(findingsMatch[1] || '').trim() || normalized;
+}
+
 function extractSeverityCounts(result: unknown): { critical: number; high: number; medium: number } {
   const text = renderResult(result);
-  const normalizedText = text.replace(/[*_`]/g, '');
   const counts = { critical: 0, high: 0, medium: 0 };
+  const findingsText = extractFindingsSection(text);
+
+  for (const match of findingsText.matchAll(/^\s*(?:[-*]\s*)?[`'"]?\s*\[(CRITICAL|HIGH|MEDIUM|LOW)\]\s*(?:\[[^\]]+\])?/gim)) {
+    const severity = String(match[1] || '').toLowerCase();
+    if (severity === 'critical') counts.critical += 1;
+    if (severity === 'high') counts.high += 1;
+    if (severity === 'medium') counts.medium += 1;
+  }
+
+  if (counts.critical || counts.high || counts.medium) {
+    return counts;
+  }
+
+  const normalizedText = text.replace(/[*_`]/g, '');
   for (const match of normalizedText.matchAll(/Severity\s*:\s*(CRITICAL|HIGH|MEDIUM)\b/gi)) {
     const severity = String(match[1] || '').toLowerCase();
     if (severity === 'critical') counts.critical += 1;

@@ -206,6 +206,36 @@
     return `c:${Number.isFinite(critical) ? critical : 0} h:${Number.isFinite(high) ? high : 0} m:${Number.isFinite(medium) ? medium : 0}`;
   }
 
+  function auditSeverityCounts(row) {
+    const critical = Number(row?.auto_audit_critical);
+    const high = Number(row?.auto_audit_high);
+    const medium = Number(row?.auto_audit_medium);
+    return {
+      critical: Number.isFinite(critical) && critical >= 0 ? critical : 0,
+      high: Number.isFinite(high) && high >= 0 ? high : 0,
+      medium: Number.isFinite(medium) && medium >= 0 ? medium : 0,
+    };
+  }
+
+  function compareAuditSeverity(a, b) {
+    const left = auditSeverityCounts(a);
+    const right = auditSeverityCounts(b);
+    const criticalDelta = compareNumber(left.critical, right.critical);
+    if (criticalDelta !== 0) return criticalDelta;
+    const highDelta = compareNumber(left.high, right.high);
+    if (highDelta !== 0) return highDelta;
+    return compareNumber(left.medium, right.medium);
+  }
+
+  function auditSeverityPills(row) {
+    const counts = auditSeverityCounts(row);
+    return [
+      { key: 'critical', shortLabel: 'c', count: counts.critical, className: 'audit-severity-critical' },
+      { key: 'high', shortLabel: 'h', count: counts.high, className: 'audit-severity-high' },
+      { key: 'medium', shortLabel: 'm', count: counts.medium, className: 'audit-severity-medium' },
+    ];
+  }
+
   function auditResultDisplay(row) {
     return autoAuditStatusLabel(row?.auto_audit_status) === 'yes'
       ? (autoAuditSeveritySummary(row) || 'c:0 h:0 m:0')
@@ -458,6 +488,9 @@
     autoAuditStatusTone,
     autoAuditStatusLabel,
     autoAuditSeveritySummary,
+    auditSeverityCounts,
+    compareAuditSeverity,
+    auditSeverityPills,
     auditResultDisplay,
     contractToneClass,
     tokenToneClass,

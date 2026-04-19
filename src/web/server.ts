@@ -236,7 +236,7 @@ function applyDashboardContractQuery(
 
   const queryText = String(search || '').trim().toLowerCase();
   let filtered = rows.filter((row) => {
-    const isSeen = Boolean(row.is_seen_pattern || row.group_kind === 'seen');
+    const isSeen = Boolean(row.is_seen_pattern || row.is_manual_audit || row.group_kind === 'seen');
     const riskMatch = risk === 'all'
       || (risk === 'exploitable' && row.is_exploitable)
       || (risk === 'seen' && isSeen)

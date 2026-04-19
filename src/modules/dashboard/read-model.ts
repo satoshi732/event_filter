@@ -586,7 +586,10 @@ function applyLiveReviewsToToken(
         : (contract.matched_whitelist ?? []),
       pattern_targets: patternTargets,
       reviews,
-      is_seen_pattern: Boolean(seenLabel) || patternTargets.some((target) => Boolean(target.seen_label)),
+      is_seen_pattern: Boolean(seenLabel)
+        || patternTargets.some((target) => Boolean(target.seen_label))
+        || Boolean(registry?.isManualAudit)
+        || Boolean(contract.is_manual_audit),
       is_exploitable: Boolean(registry?.isExploitable) || reviews.some((item) => item.exploitable),
       is_auto_audit: registry?.isAutoAudit ?? contract.is_auto_audit ?? false,
       is_manual_audit: registry?.isManualAudit ?? contract.is_manual_audit ?? false,
@@ -705,7 +708,7 @@ export function buildDashboardContracts(chain: string, run: PipelineRunResult): 
           totalTokenFlow: 0n,
           isExploitable: false,
           reviewIds: new Set<string>(),
-          isSeenPattern: Boolean(contract.is_seen_pattern) || Boolean(contract.seen_label),
+          isSeenPattern: Boolean(contract.is_seen_pattern) || Boolean(contract.seen_label) || Boolean(contract.is_manual_audit),
           selectorHash: primaryPatternTarget(contract.pattern_targets ?? [])?.pattern_hash ?? null,
           codeSize: contract.code_size ?? 0,
           whitelist: new Set<string>(),
@@ -720,7 +723,10 @@ export function buildDashboardContracts(chain: string, run: PipelineRunResult): 
         current.txCount = Math.max(current.txCount, contract.tx_count ?? 0);
         current.totalTokenFlow += safeBigInt(contract.total_token_flow);
         current.isExploitable = current.isExploitable || Boolean(contract.is_exploitable);
-        current.isSeenPattern = current.isSeenPattern || Boolean(contract.is_seen_pattern) || Boolean(contract.seen_label);
+        current.isSeenPattern = current.isSeenPattern
+          || Boolean(contract.is_seen_pattern)
+          || Boolean(contract.seen_label)
+          || Boolean(contract.is_manual_audit);
         if (!current.label && contract.seen_label) current.label = contract.seen_label;
         if (!current.selectorHash && contract.pattern_targets?.length) {
           current.selectorHash = primaryPatternTarget(contract.pattern_targets)?.pattern_hash ?? null;
@@ -764,7 +770,7 @@ export function buildDashboardContracts(chain: string, run: PipelineRunResult): 
       auto_audit_medium: autoAnalysis?.medium ?? null,
       is_auto_audit: resolved.is_auto_audit,
       is_manual_audit: resolved.is_manual_audit,
-      is_seen_pattern: source.isSeenPattern,
+      is_seen_pattern: source.isSeenPattern || resolved.is_manual_audit,
       label: resolved.label,
       link_type: resolved.link_type,
       token_count: source.tokenMap.size,

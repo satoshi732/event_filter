@@ -253,6 +253,7 @@
   function hasSeenPattern(row) {
     return Boolean(
       row?.is_seen_pattern
+      || row?.is_manual_audit
       || row?.seen_label
       || row?.group_kind === 'seen',
     );

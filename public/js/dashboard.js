@@ -882,7 +882,7 @@
         const mode = String(state.dashboardFilters.tokenRelatedSeen || 'all');
         if (mode === 'all') return tokenContracts.value;
         return tokenContracts.value.filter((row) => {
-          const isSeen = Boolean(row.is_seen_pattern || row.seen_label || row.group_kind === 'seen');
+          const isSeen = Boolean(row.is_seen_pattern || row.is_manual_audit || row.seen_label || row.group_kind === 'seen');
           return mode === 'seen' ? isSeen : !isSeen;
         });
       });

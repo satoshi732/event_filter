@@ -87,6 +87,7 @@ export interface AutoAnalysisRuntimeConfig {
   queueCapacity: number;
   roundAuditLimit: number;
   roundRestSeconds: number;
+  continueOnEmptyRound: boolean;
   stopAtDateTime: string | null;
   tokenSharePercent: number;
   contractSharePercent: number;
@@ -116,6 +117,7 @@ const DEFAULT_AUTO_ANALYSIS_CONFIG: AutoAnalysisRuntimeConfig = {
   queueCapacity: 10,
   roundAuditLimit: 5,
   roundRestSeconds: 60,
+  continueOnEmptyRound: false,
   stopAtDateTime: null,
   tokenSharePercent: 40,
   contractSharePercent: 60,
@@ -235,6 +237,7 @@ function normalizeRuntimeConfig(input: Partial<AutoAnalysisRuntimeConfig> | null
     queueCapacity: parsePositiveInt(merged.queueCapacity, DEFAULT_AUTO_ANALYSIS_CONFIG.queueCapacity),
     roundAuditLimit: parsePositiveInt(merged.roundAuditLimit, DEFAULT_AUTO_ANALYSIS_CONFIG.roundAuditLimit),
     roundRestSeconds: parsePositiveInt(merged.roundRestSeconds, DEFAULT_AUTO_ANALYSIS_CONFIG.roundRestSeconds),
+    continueOnEmptyRound: parseBoolean(merged.continueOnEmptyRound, DEFAULT_AUTO_ANALYSIS_CONFIG.continueOnEmptyRound),
     stopAtDateTime: normalizeDateTimeLocal(merged.stopAtDateTime),
     tokenSharePercent: parsePositiveInt(merged.tokenSharePercent, DEFAULT_AUTO_ANALYSIS_CONFIG.tokenSharePercent),
     contractSharePercent: parsePositiveInt(merged.contractSharePercent, DEFAULT_AUTO_ANALYSIS_CONFIG.contractSharePercent),
@@ -546,6 +549,12 @@ async function runLoop(): Promise<void> {
           phase: 'auditing',
           lastAction: `Watching ${totalInFlight()} in-flight audit${totalInFlight() === 1 ? '' : 's'} on ${chain.toUpperCase()}`,
         });
+        await sleep(LOOP_INTERVAL_MS);
+        continue;
+      }
+
+      if (!getRuntimeConfig().continueOnEmptyRound) {
+        stopAutoAnalysis(`No eligible candidates left on ${chain.toUpperCase()}. Auto analysis stopped because next-round continuation is disabled`);
         await sleep(LOOP_INTERVAL_MS);
         continue;
       }

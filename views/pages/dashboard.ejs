@@ -558,6 +558,13 @@
                       <p>Leave previously auto or manually audited contracts out of the queue.</p>
                     </div>
                   </label>
+                  <label class="auto-rule-item">
+                    <input v-model="settings.runtime_settings.auto_analysis.continue_on_empty_round" type="checkbox">
+                    <div class="auto-rule-copy">
+                      <strong>Continue to next block range automatically</strong>
+                      <p>Only when enabled will auto mode start the next scan round after the current eligible candidates are exhausted.</p>
+                    </div>
+                  </label>
                 </div>
               </div>
 

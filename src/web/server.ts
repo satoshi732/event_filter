@@ -199,6 +199,7 @@ function serializeAutoAnalysisRuntimeConfig() {
     queue_capacity: config.queueCapacity,
     round_audit_limit: config.roundAuditLimit,
     round_rest_seconds: config.roundRestSeconds,
+    continue_on_empty_round: config.continueOnEmptyRound,
     stop_at_datetime: config.stopAtDateTime || '',
     token_share_percent: config.tokenSharePercent,
     contract_share_percent: config.contractSharePercent,

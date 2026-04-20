@@ -177,6 +177,7 @@ function coerceAutoAnalysisRuntimeConfig(input: unknown) {
     queueCapacity: toPositiveInt(source.queue_capacity, 10),
     roundAuditLimit: toPositiveInt(source.round_audit_limit, 5),
     roundRestSeconds: toPositiveInt(source.round_rest_seconds, 60),
+    continueOnEmptyRound: toBoolean(source.continue_on_empty_round, false),
     stopAtDateTime: normalizeDateTimeLocalInput(source.stop_at_datetime ?? source.stop_at_time) || null,
     tokenSharePercent: toPositiveInt(source.token_share_percent, 40),
     contractSharePercent: toPositiveInt(source.contract_share_percent, 60),

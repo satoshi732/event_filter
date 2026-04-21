@@ -29,6 +29,8 @@
   const PREV_ROUTE_SCROLL_STORAGE_KEY = 'event-filter-prev-route-scroll';
   const AUTH_ENABLED = document.body.dataset.authEnabled === '1';
   const CURRENT_USER = document.body.dataset.currentUser || '';
+  const CURRENT_USER_ROLE = document.body.dataset.currentUserRole || 'user';
+  const IS_ADMIN = document.body.dataset.isAdmin === '1';
   const shared = window.EventFilterDashboardShared || {};
   const runtime = window.EventFilterDashboardRuntime || {};
   const scrollSyncRuntime = window.EventFilterDashboardScrollSync || {};
@@ -215,7 +217,7 @@
       runningChain: null,
       progress: null,
       dashboardTab: queryOrDefault('tab', 'tokens', ['tokens', 'auto', 'settings']),
-      settingsSection: queryOrDefault('st', 'keys', ['keys', 'runtime', 'access', 'pattern-sync', 'chains', 'whitelist', 'ai']),
+      settingsSection: queryOrDefault('st', IS_ADMIN ? 'keys' : 'account', ['account', 'keys', 'runtime', 'access', 'pattern-sync', 'chains', 'whitelist', 'ai']),
       dashboard: {
         run: null,
         tokens: [],
@@ -340,6 +342,15 @@
             tls_cert_path: '',
             tls_key_path: '',
           },
+          account: {
+            username: CURRENT_USER,
+            role: CURRENT_USER_ROLE,
+            ai_api_key: '',
+            has_ai_api_key: false,
+            current_password: '',
+            new_password: '',
+            confirm_password: '',
+          },
         },
         chain_configs: [],
         ai_providers: [],
@@ -420,6 +431,8 @@
       copiedAddress: '',
       authEnabled: AUTH_ENABLED,
       currentUser: CURRENT_USER,
+      currentUserRole: CURRENT_USER_ROLE,
+      isAdmin: IS_ADMIN,
       pageLoading: {
         count: 0,
         label: '',
@@ -477,6 +490,13 @@
         state.settings.runtime_settings = {
           ...state.settings.runtime_settings,
           ...(data.runtime_settings || {}),
+          account: {
+            ...(state.settings.runtime_settings.account || {}),
+            ...(data.runtime_settings?.account || {}),
+            current_password: '',
+            new_password: '',
+            confirm_password: '',
+          },
           chainbase_keys: Array.isArray(data.runtime_settings?.chainbase_keys)
             ? data.runtime_settings.chainbase_keys.join('\n')
             : String(data.runtime_settings?.chainbase_keys || ''),
@@ -654,8 +674,8 @@
         );
         state.settingsSection = routeValueOrDefault(
           String(routeQuery.st || ''),
-          'keys',
-          ['keys', 'runtime', 'access', 'pattern-sync', 'chains', 'whitelist', 'ai'],
+          state.isAdmin ? 'keys' : 'account',
+          ['account', 'keys', 'runtime', 'access', 'pattern-sync', 'chains', 'whitelist', 'ai'],
         );
         const nextChain = String(routeQuery.chain || '').toLowerCase();
         if (nextChain) state.selectedChain = nextChain;
@@ -1551,6 +1571,8 @@
         autoAnalysisDetailText,
         authEnabled: computed(() => state.authEnabled),
         currentUser: computed(() => state.currentUser),
+        currentUserRole: computed(() => state.currentUserRole),
+        isAdmin: computed(() => state.isAdmin),
         reviewForm: state.reviewForm,
         contractReviewModal: state.contractReviewModal,
         contractLinkageModal: state.contractLinkageModal,

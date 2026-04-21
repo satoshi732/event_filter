@@ -7,6 +7,8 @@
     data-initial-view="<%= initialView || 'dashboard' %>"
     data-auth-enabled="<%= authEnabled ? '1' : '0' %>"
     data-current-user="<%= currentUser || '' %>"
+    data-current-user-role="<%= currentUserRole || 'user' %>"
+    data-is-admin="<%= isAdmin ? '1' : '0' %>"
   >
     <div id="app" class="app-shell" v-cloak>
       <div v-if="notifications.length" class="toast-stack" aria-live="polite" aria-atomic="true">
@@ -36,7 +38,7 @@
                 <option v-for="chain in chains" :key="chain" :value="chain">{{ chain.toUpperCase() }}</option>
               </select>
             </label>
-            <button class="btn primary" type="button" :disabled="running || !selectedChain" @click="runScan">
+            <button v-if="isAdmin" class="btn primary" type="button" :disabled="running || !selectedChain" @click="runScan">
               {{ running ? 'Running...' : 'Run Round' }}
             </button>
             <button class="btn ghost" type="button" @click="refreshCurrent">Refresh</button>
@@ -72,7 +74,7 @@
             <button class="tab" :class="{ active: currentView === 'dashboard' && dashboardTab === 'tokens' }" @click="openDashboardMain">Dashboard</button>
             <button class="tab" :class="{ active: currentView === 'dashboard' && dashboardTab === 'auto' }" @click="openAutoMode">Auto Mode</button>
             <button class="tab" :class="{ active: currentView === 'token' || currentView === 'token-detail' }" @click="navigateToken">Token</button>
-            <button class="tab" :class="{ active: currentView === 'dashboard' && dashboardTab === 'settings' }" @click="openSettings">Settings</button>
+            <button class="tab" :class="{ active: currentView === 'dashboard' && dashboardTab === 'settings' }" @click="openSettings(isAdmin ? 'keys' : 'account')">Settings</button>
           </div>
           <div class="hero-status-badges">
             <span class="status-badge" :class="syncStatus?.configured ? 'active' : 'inactive'">AUTO SYNC</span>
@@ -600,6 +602,48 @@
             <span class="muted">Saved in DB and hot-applied</span>
           </div>
           <div class="settings-shell">
+            <template v-if="!isAdmin">
+              <aside class="settings-sidebar">
+                <button class="settings-nav-btn active" type="button" @click="openSettings('account')">
+                  <strong>Account</strong>
+                  <span>{{ settings.runtime_settings.account.role || 'user' }} / personal API</span>
+                </button>
+                <button class="btn primary settings-save-btn" type="button" @click="saveAccountSettings">Save Account</button>
+              </aside>
+
+              <section class="settings-content">
+                <div class="settings-panel">
+                  <div class="card-head compact">
+                    <h3>My Account</h3>
+                    <span class="muted">Only your username, password, and AI audit API key are editable here.</span>
+                  </div>
+                  <div class="settings-inline-grid">
+                    <label class="stack-label">
+                      <span>Username</span>
+                      <input v-model="settings.runtime_settings.account.username" type="text" autocomplete="username">
+                    </label>
+                    <label class="stack-label">
+                      <span>AI API Key</span>
+                      <input v-model="settings.runtime_settings.account.ai_api_key" type="password" placeholder="tkc_...">
+                    </label>
+                    <label class="stack-label">
+                      <span>Current Password</span>
+                      <input v-model="settings.runtime_settings.account.current_password" type="password" autocomplete="current-password" placeholder="required for username/password changes">
+                    </label>
+                    <label class="stack-label">
+                      <span>New Password</span>
+                      <input v-model="settings.runtime_settings.account.new_password" type="password" autocomplete="new-password" placeholder="leave blank to keep current">
+                    </label>
+                    <label class="stack-label">
+                      <span>Confirm New Password</span>
+                      <input v-model="settings.runtime_settings.account.confirm_password" type="password" autocomplete="new-password">
+                    </label>
+                  </div>
+                </div>
+              </section>
+            </template>
+
+            <template v-else>
             <aside class="settings-sidebar">
               <button class="settings-nav-btn" :class="{ active: settingsSection === 'keys' }" type="button" @click="openSettings('keys')">
                 <strong>Keys</strong>
@@ -927,6 +971,7 @@
                 </div>
               </div>
             </section>
+            </template>
           </div>
         </section>
       </main>

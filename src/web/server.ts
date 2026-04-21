@@ -13,6 +13,7 @@ import {
   enforceAuthentication,
   getAuthenticatedSession,
   isPublicRequest,
+  isAdminAuthUser,
   revokeAuthenticatedSession,
   setSessionCookie,
 } from './auth.js';
@@ -394,9 +395,21 @@ async function buildSettingsPayload() {
       pancakeswap_price: snapshot.pancakeswap_price ?? { max_req_per_second: 2, max_req_per_minute: 90 },
       ai_audit_backend: snapshot.ai_audit_backend ?? getAiAuditBackendConfig(),
       auto_analysis: serializeAutoAnalysisRuntimeConfig(),
+      account: {
+        username: userAuth.username,
+        role: userAuth.role,
+        ai_api_key: userAuth.users.find((user) => user.username === userAuth.username)?.aiApiKey || '',
+        has_ai_api_key: Boolean(userAuth.users.find((user) => user.username === userAuth.username)?.aiApiKey),
+      },
       access: {
         auth_enabled: userAuth.authEnabled,
         username: userAuth.username,
+        role: userAuth.role,
+        users: userAuth.users.map((user) => ({
+          username: user.username,
+          role: user.role,
+          has_ai_api_key: Boolean(user.aiApiKey),
+        })),
         password: '',
         has_password: Boolean(userAuth.passwordHash),
         auth_source: path.relative(ROOT, USER_FILE_PATH),
@@ -780,6 +793,9 @@ export async function startWebServer(
       const url = new URL(req.url ?? '/', `${requestProtocol}://localhost`);
       const reqPath = url.pathname;
       const activeSession = getAuthenticatedSession(req);
+      const currentUser = activeSession?.session.username || '';
+      const currentIsAdmin = !userAuth.authEnabled || isAdminAuthUser(userAuth, currentUser);
+      const currentUserRole = currentIsAdmin ? 'admin' : 'user';
       const isApiRequest = reqPath.startsWith('/api/');
       const isPageRequest = method === 'GET' && appPageRoutes.has(reqPath);
       const publicRequest = isPublicRequest(method, reqPath, isStaticAssetRequest);
@@ -839,7 +855,9 @@ export async function startWebServer(
         reqPath,
         res,
         authEnabled: userAuth.authEnabled,
-        currentUser: activeSession?.session.username || '',
+        currentUser,
+        currentUserRole,
+        isAdmin: currentIsAdmin,
         renderPage,
       })) {
         return;

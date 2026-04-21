@@ -47,6 +47,9 @@ import { updateManualContractLinkage } from '../modules/contract-manager/index.j
 import { withLiveReviews, type DashboardContractSummary, type DashboardTokenSummary, type LatestRunMeta } from '../modules/dashboard/read-model.js';
 import { deriveAiAuditLifecycleStatus } from '../db/audit-state.js';
 import type { PipelineRunResult } from '../pipeline.js';
+import { getAuthenticatedSession, isAdminAuthUser, renameAuthenticatedSessions } from './auth.js';
+import { findUserAuthAccount, getUserAuthConfig, updateOwnUserAuthAccount } from '../utils/user-auth.js';
+import { verifyPassword } from '../utils/web-security.js';
 
 type StateStreamClient = ServerResponse<IncomingMessage> & {
   __stateHeartbeat?: NodeJS.Timeout;
@@ -238,9 +241,79 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     } = deps;
 
     if (!reqPath.startsWith('/api/')) return false;
+    const requestUserAuth = getUserAuthConfig();
+    const requestSession = getAuthenticatedSession(req);
+    const requestUsername = requestSession?.session.username || '';
+    const requestIsAdmin = !requestUserAuth.authEnabled
+      || isAdminAuthUser(requestUserAuth, requestUsername);
+    const requireAdmin = () => {
+      if (requestIsAdmin) return true;
+      sendJson(res, 403, { error: 'Admin privileges are required for this action' });
+      return false;
+    };
+    const buildAccountPayload = (username = requestUsername, config = requestUserAuth) => {
+      const account = findUserAuthAccount(config, username);
+      return {
+        username: account?.username || username,
+        role: account?.role || 'user',
+        ai_api_key: account?.aiApiKey || '',
+        has_ai_api_key: Boolean(account?.aiApiKey),
+      };
+    };
 
     if (reqPath === '/api/state' && method === 'GET') {
       sendJson(res, 200, await buildStatePayload());
+      return true;
+    }
+
+    if (reqPath === '/api/account' && method === 'GET') {
+      if (!requestUserAuth.authEnabled) {
+        sendJson(res, 400, { error: 'Authentication is disabled' });
+        return true;
+      }
+      sendJson(res, 200, { account: buildAccountPayload() });
+      return true;
+    }
+
+    if (reqPath === '/api/account' && method === 'POST') {
+      if (!requestUserAuth.authEnabled) {
+        sendJson(res, 400, { error: 'Authentication is disabled' });
+        return true;
+      }
+      const account = findUserAuthAccount(requestUserAuth, requestUsername);
+      if (!account) {
+        sendJson(res, 404, { error: 'Current user was not found' });
+        return true;
+      }
+      const body = await readJsonBody(req);
+      const nextUsername = String(body.username ?? account.username).trim();
+      const aiApiKey = String(body.ai_api_key ?? body.aiApiKey ?? '').trim();
+      const currentPassword = String(body.current_password || '');
+      const newPassword = String(body.new_password || '');
+      const confirmPassword = String(body.confirm_password || '');
+      const changingCredentials = nextUsername.toLowerCase() !== account.username.toLowerCase() || Boolean(newPassword);
+      if (changingCredentials && !verifyPassword(currentPassword, account.passwordHash)) {
+        sendJson(res, 400, { error: 'Current password is required to change username or password' });
+        return true;
+      }
+      if (newPassword && newPassword !== confirmPassword) {
+        sendJson(res, 400, { error: 'New password confirmation does not match' });
+        return true;
+      }
+      try {
+        const updated = updateOwnUserAuthAccount(requestUsername, {
+          username: nextUsername,
+          newPassword,
+          aiApiKey,
+        });
+        renameAuthenticatedSessions(updated.previousUsername, updated.user.username);
+        sendJson(res, 200, {
+          ok: true,
+          account: buildAccountPayload(updated.user.username, updated.config),
+        });
+      } catch (err) {
+        sendJson(res, 400, { error: (err as Error).message || 'Account update failed' });
+      }
       return true;
     }
 
@@ -456,7 +529,8 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         return true;
       }
       const analysis = requestContractAiAudit({ chain, contractAddr: contract, title, provider, model });
-      enqueueContractAiAudit(analysis);
+      const account = findUserAuthAccount(requestUserAuth, requestUsername);
+      enqueueContractAiAudit(analysis, { backendApiKey: account?.aiApiKey || null });
       invalidateDerivedReadCaches(chain);
       sendJson(res, 200, { ok: true, analysis, plan });
       return true;
@@ -474,7 +548,8 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       const provider = normalizeAiAuditProvider(typeof body.provider === 'string' ? body.provider.trim() : getDefaultAiAuditProvider());
       const model = normalizeAiAuditModel(provider, typeof body.model === 'string' ? body.model.trim() : getDefaultAiAuditModel(provider));
       const analysis = requestTokenAiAudit({ chain, tokenAddr: token, title, provider, model });
-      enqueueTokenAiAudit(analysis);
+      const account = findUserAuthAccount(requestUserAuth, requestUsername);
+      enqueueTokenAiAudit(analysis, { backendApiKey: account?.aiApiKey || null });
       invalidateDerivedReadCaches(chain);
       sendJson(res, 200, { ok: true, analysis });
       return true;
@@ -580,6 +655,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     }
 
     if (reqPath === '/api/run' && method === 'POST') {
+      if (!requireAdmin()) return true;
       const body = await readJsonBody(req);
       const chain = typeof body.chain === 'string' ? body.chain.toLowerCase() : chains[0];
       if (!chain || !chains.includes(chain)) {
@@ -750,11 +826,25 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     }
 
     if (reqPath === '/api/settings' && method === 'GET') {
-      sendJson(res, 200, await buildSettingsPayload());
+      const payload = await buildSettingsPayload() as Record<string, unknown>;
+      if (!requestIsAdmin) {
+        sendJson(res, 200, {
+          runtime_settings: {
+            account: buildAccountPayload(),
+          },
+          chain_configs: [],
+          ai_providers: [],
+          ai_models: [],
+          whitelist_patterns: [],
+        });
+        return true;
+      }
+      sendJson(res, 200, payload);
       return true;
     }
 
     if (reqPath === '/api/settings' && method === 'POST') {
+      if (!requireAdmin()) return true;
       const body = await readJsonBody(req);
       const runtime = (typeof body.runtime_settings === 'object' && body.runtime_settings) ? body.runtime_settings as Record<string, unknown> : {};
       const patternSync = (typeof runtime.pattern_sync === 'object' && runtime.pattern_sync) ? runtime.pattern_sync as Record<string, unknown> : {};

@@ -204,6 +204,10 @@
     }
 
     async function runScan() {
+      if (!state.isAdmin) {
+        pushNotification('Run Round is available to admin users only', 'warning', 4200);
+        return;
+      }
       if (!state.selectedChain || state.running) return;
       state.running = true;
       state.runningChain = state.selectedChain;
@@ -298,7 +302,7 @@
 
     function openSettings(section = 'keys') {
       state.dashboardTab = 'settings';
-      state.settingsSection = section;
+      state.settingsSection = state.isAdmin ? section : 'account';
       if (currentView.value === 'dashboard') {
         syncDashboardUrlState();
         return;
@@ -619,6 +623,10 @@
     }
 
     async function saveSettings() {
+      if (!state.isAdmin) {
+        await saveAccountSettings();
+        return;
+      }
       const aiProviders = (state.settings.ai_providers || [])
         .map((row, index) => ({
           provider: String(row.provider || '').trim().toLowerCase(),
@@ -687,6 +695,41 @@
           cachedAt: Date.now(),
         };
         pushNotification('Settings saved and hot-applied', 'success');
+      } catch (err) {
+        pushNotification(err instanceof Error ? err.message : String(err), 'error', 5200);
+      }
+    }
+
+    async function saveAccountSettings() {
+      const account = state.settings.runtime_settings.account || {};
+      try {
+        const data = await apiFetch('/api/account', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: String(account.username || '').trim(),
+            ai_api_key: String(account.ai_api_key || '').trim(),
+            current_password: String(account.current_password || ''),
+            new_password: String(account.new_password || ''),
+            confirm_password: String(account.confirm_password || ''),
+          }),
+        });
+        state.settings.runtime_settings.account = {
+          ...(state.settings.runtime_settings.account || {}),
+          ...(data.account || {}),
+          current_password: '',
+          new_password: '',
+          confirm_password: '',
+        };
+        if (data.account?.username) {
+          state.currentUser = data.account.username;
+        }
+        if (data.account?.role) {
+          state.currentUserRole = data.account.role;
+          state.isAdmin = data.account.role === 'admin';
+        }
+        viewDataCache.settings = null;
+        pushNotification('Account saved', 'success');
       } catch (err) {
         pushNotification(err instanceof Error ? err.message : String(err), 'error', 5200);
       }
@@ -792,6 +835,7 @@
       addWhitelistPatternRow,
       removeWhitelistPatternRow,
       saveSettings,
+      saveAccountSettings,
       saveReview,
       saveTokenReview,
       logout,

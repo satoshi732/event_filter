@@ -16,6 +16,8 @@ interface PageRouteDeps {
   res: ServerResponse;
   authEnabled: boolean;
   currentUser: string;
+  currentUserRole: string;
+  isAdmin: boolean;
   renderPage: (res: ServerResponse, viewPath: string, data: Record<string, unknown>) => Promise<void>;
 }
 
@@ -26,17 +28,24 @@ export async function handleAppPageRoutes(deps: PageRouteDeps): Promise<boolean>
     res,
     authEnabled,
     currentUser,
+    currentUserRole,
+    isAdmin,
     renderPage,
   } = deps;
 
   if (method !== 'GET') return false;
+  const basePageData = {
+    authEnabled,
+    currentUser,
+    currentUserRole,
+    isAdmin,
+  };
 
   if (reqPath === '/') {
     await renderPage(res, 'pages/dashboard.ejs', {
       title: 'Solana Mev Labs',
       initialView: 'dashboard',
-      authEnabled,
-      currentUser,
+      ...basePageData,
     });
     return true;
   }
@@ -45,8 +54,7 @@ export async function handleAppPageRoutes(deps: PageRouteDeps): Promise<boolean>
     await renderPage(res, 'pages/dashboard.ejs', {
       title: 'Token Directory',
       initialView: 'token',
-      authEnabled,
-      currentUser,
+      ...basePageData,
     });
     return true;
   }
@@ -55,8 +63,7 @@ export async function handleAppPageRoutes(deps: PageRouteDeps): Promise<boolean>
     await renderPage(res, 'pages/dashboard.ejs', {
       title: 'Token Detail',
       initialView: 'token-detail',
-      authEnabled,
-      currentUser,
+      ...basePageData,
     });
     return true;
   }
@@ -65,8 +72,7 @@ export async function handleAppPageRoutes(deps: PageRouteDeps): Promise<boolean>
     await renderPage(res, 'pages/dashboard.ejs', {
       title: 'Contract Detail',
       initialView: 'contract',
-      authEnabled,
-      currentUser,
+      ...basePageData,
     });
     return true;
   }

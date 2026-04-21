@@ -14,6 +14,12 @@ export interface UserAuthLike {
   authEnabled: boolean;
   username: string;
   passwordHash: string;
+  users?: Array<{
+    username: string;
+    passwordHash: string;
+    role: 'admin' | 'user';
+    aiApiKey?: string;
+  }>;
 }
 
 const SESSION_COOKIE_NAME = 'solana_mev_session';
@@ -65,6 +71,41 @@ export function createAuthenticatedSession(username: string): string {
     expiresAt: Date.now() + SESSION_TTL_MS,
   });
   return token;
+}
+
+export function renameAuthenticatedSessions(previousUsername: string, nextUsername: string): void {
+  const previous = String(previousUsername || '').trim().toLowerCase();
+  const next = String(nextUsername || '').trim();
+  if (!previous || !next) return;
+  for (const [token, session] of sessions.entries()) {
+    if (String(session.username || '').trim().toLowerCase() === previous) {
+      sessions.set(token, {
+        ...session,
+        username: next,
+      });
+    }
+  }
+}
+
+export function findUserAuthAccount(userAuth: UserAuthLike, username: string) {
+  const normalized = String(username || '').trim().toLowerCase();
+  if (!normalized) return null;
+  const users = Array.isArray(userAuth.users) ? userAuth.users : [];
+  const user = users.find((item) => String(item.username || '').trim().toLowerCase() === normalized);
+  if (user) return user;
+  if (String(userAuth.username || '').trim().toLowerCase() === normalized) {
+    return {
+      username: userAuth.username,
+      passwordHash: userAuth.passwordHash,
+      role: 'admin' as const,
+      aiApiKey: '',
+    };
+  }
+  return null;
+}
+
+export function isAdminAuthUser(userAuth: UserAuthLike, username: string): boolean {
+  return findUserAuthAccount(userAuth, username)?.role === 'admin';
 }
 
 export function revokeAuthenticatedSession(token: string | null | undefined): void {
@@ -133,7 +174,14 @@ export function enforceAuthentication(
   } = options;
 
   if (!userAuth.authEnabled) return true;
-  if (!userAuth.username || !userAuth.passwordHash) {
+  const configuredUsers = Array.isArray(userAuth.users) && userAuth.users.length
+    ? userAuth.users
+    : (userAuth.username && userAuth.passwordHash ? [{
+      username: userAuth.username,
+      passwordHash: userAuth.passwordHash,
+      role: 'admin' as const,
+    }] : []);
+  if (!configuredUsers.length) {
     res.writeHead(503, {
       'Content-Type': 'text/plain; charset=utf-8',
       'Cache-Control': 'no-store',

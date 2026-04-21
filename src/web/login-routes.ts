@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import { safeEqualString, verifyPassword } from '../utils/web-security.js';
-import type { AuthenticatedSession, UserAuthLike } from './auth.js';
+import { verifyPassword } from '../utils/web-security.js';
+import { findUserAuthAccount, type AuthenticatedSession, type UserAuthLike } from './auth.js';
 
 interface LoginRouteDeps {
   method: string;
@@ -64,12 +64,13 @@ export async function handleLoginRoutes(deps: LoginRouteDeps): Promise<boolean> 
     const username = String(body.username || '').trim();
     const password = String(body.password || '');
     const nextPath = String(body.next || '/').trim() || '/';
-    const authenticated = safeEqualString(username, userAuth.username) && verifyPassword(password, userAuth.passwordHash);
+    const account = findUserAuthAccount(userAuth, username);
+    const authenticated = Boolean(account && verifyPassword(password, account.passwordHash));
     if (!authenticated) {
       sendJson(res, 401, { error: 'Invalid username or password' });
       return true;
     }
-    const token = createAuthenticatedSession(username);
+    const token = createAuthenticatedSession(account?.username || username);
     setSessionCookie(res, token, secureCookies);
     sendJson(res, 200, { ok: true, next: nextPath });
     return true;

@@ -27,7 +27,9 @@ const MUCH_SMALLER_RATIO = 0.35;
 const MUCH_SMALLER_ABS_DELTA = 300;
 const AUDIT_START_STAGGER_MS = 400;
 
-type QueuedAuditJob = BaseAiAuditRow;
+type QueuedAuditJob = BaseAiAuditRow & {
+  backendApiKeyOverride?: string | null;
+};
 type AuditMode = ProviderAuditMode;
 
 interface ChainSpec {
@@ -720,7 +722,11 @@ function resolveExecutionContext(job: QueuedAuditJob): {
   linkage: QuickAnalyzeLinkage | undefined;
   model: string;
 } {
-  const backend = getAiAuditBackendConfig();
+  const baseBackend = getAiAuditBackendConfig();
+  const backend = {
+    ...baseBackend,
+    apiKey: String(job.backendApiKeyOverride || baseBackend.apiKey || '').trim(),
+  };
   const chain = getChainSpec(job.chain);
   const model = resolveAuditModel(job.model);
 
@@ -978,12 +984,24 @@ export function subscribeAiAuditEvents(
   };
 }
 
-export function enqueueContractAiAudit(row: BaseAiAuditRow | null | undefined): void {
+export function enqueueContractAiAudit(
+  row: BaseAiAuditRow | null | undefined,
+  options: { backendApiKey?: string | null } = {},
+): void {
   if (!row || row.targetType !== 'contract') return;
-  enqueueAudit(row);
+  enqueueAudit({
+    ...row,
+    backendApiKeyOverride: String(options.backendApiKey || '').trim() || null,
+  });
 }
 
-export function enqueueTokenAiAudit(row: BaseAiAuditRow | null | undefined): void {
+export function enqueueTokenAiAudit(
+  row: BaseAiAuditRow | null | undefined,
+  options: { backendApiKey?: string | null } = {},
+): void {
   if (!row || row.targetType !== 'token') return;
-  enqueueAudit(row);
+  enqueueAudit({
+    ...row,
+    backendApiKeyOverride: String(options.backendApiKey || '').trim() || null,
+  });
 }

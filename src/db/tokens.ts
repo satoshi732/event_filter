@@ -81,6 +81,17 @@ export function getTokensMissingPrice(chain: string, limit = 300): string[] {
   return rows.map((row) => row.token.toLowerCase());
 }
 
+export function listTokenPriceSyncTargets(chain: string): string[] {
+  const rows = getDb().prepare(`
+    SELECT address AS token
+    FROM tokens_registry
+    WHERE chain = ?
+      AND COALESCE(token_kind, 'fungible') NOT IN ('erc721', 'erc1155')
+    ORDER BY updated_at ASC, address ASC
+  `).all(chain.toLowerCase()) as Array<{ token: string }>;
+  return rows.map((row) => row.token.toLowerCase());
+}
+
 export function upsertTokenMetadataBatch(
   chain: string,
   rows: Array<{

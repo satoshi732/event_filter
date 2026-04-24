@@ -112,6 +112,7 @@ export interface ChainConfig {
   rpcNetwork: string;
   rpcUrls: string[];
   multicall3Address: string;
+  wrappedNativeTokenAddress: string;
   nativeCurrency: {
     name: string;
     symbol: string;
@@ -169,13 +170,13 @@ interface LegacyKeysFile {
 }
 
 const BASE_CHAIN_CONFIGS: Record<string, Omit<ChainConfig, 'blocksPerScan' | 'chainbaseKeys' | 'rpcNetwork' | 'rpcUrls' | 'multicall3Address'>> = {
-  ethereum:  { name: 'Ethereum',  chainId: 1,     tablePrefix: 'ethereum',  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
-  bsc:       { name: 'BSC',       chainId: 56,    tablePrefix: 'bsc',       nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 } },
-  polygon:   { name: 'Polygon',   chainId: 137,   tablePrefix: 'polygon',   nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 } },
-  arbitrum:  { name: 'Arbitrum',  chainId: 42161, tablePrefix: 'arbitrum',  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
-  optimism:  { name: 'Optimism',  chainId: 10,    tablePrefix: 'op',        nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
-  base:      { name: 'Base',      chainId: 8453,  tablePrefix: 'base',      nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
-  avalanche: { name: 'Avalanche', chainId: 43114, tablePrefix: 'avalanche', nativeCurrency: { name: 'Avalanche', symbol: 'AVAX', decimals: 18 } },
+  ethereum:  { name: 'Ethereum',  chainId: 1,     tablePrefix: 'ethereum',  wrappedNativeTokenAddress: '0xc02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
+  bsc:       { name: 'BSC',       chainId: 56,    tablePrefix: 'bsc',       wrappedNativeTokenAddress: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c', nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 } },
+  polygon:   { name: 'Polygon',   chainId: 137,   tablePrefix: 'polygon',   wrappedNativeTokenAddress: '0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270', nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 } },
+  arbitrum:  { name: 'Arbitrum',  chainId: 42161, tablePrefix: 'arbitrum',  wrappedNativeTokenAddress: '0x82af49447d8a07e3bd95bd0d56f35241523fbab1', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
+  optimism:  { name: 'Optimism',  chainId: 10,    tablePrefix: 'op',        wrappedNativeTokenAddress: '0x4200000000000000000000000000000000000006', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
+  base:      { name: 'Base',      chainId: 8453,  tablePrefix: 'base',      wrappedNativeTokenAddress: '0x4200000000000000000000000000000000000006', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
+  avalanche: { name: 'Avalanche', chainId: 43114, tablePrefix: 'avalanche', wrappedNativeTokenAddress: '0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7', nativeCurrency: { name: 'Avalanche', symbol: 'AVAX', decimals: 18 } },
 };
 
 const DEFAULT_BLOCKS_PER_SCAN: Record<string, number> = {
@@ -531,6 +532,7 @@ function seedRuntimeConfigIfNeeded(): void {
         rpcNetwork: INFURA_NETWORK_BY_CHAIN[chain] ?? '',
         rpcUrls: [],
         multicall3Address: multicall3Address || DEFAULT_MULTICALL3_ADDRESS,
+        wrappedNativeTokenAddress: base.wrappedNativeTokenAddress,
         nativeCurrencyName: base.nativeCurrency.name,
         nativeCurrencySymbol: base.nativeCurrency.symbol,
         nativeCurrencyDecimals: base.nativeCurrency.decimals,
@@ -683,6 +685,7 @@ function buildChainConfigs(rows: ChainSettingRow[]): Record<string, ChainConfig>
       rpcNetwork,
       rpcUrls: buildInfuraRpcUrls(rpcNetwork, sharedRpcKeys),
       multicall3Address: (row?.multicall3Address || DEFAULT_MULTICALL3_ADDRESS).trim().toLowerCase(),
+      wrappedNativeTokenAddress: String(row?.wrappedNativeTokenAddress || base?.wrappedNativeTokenAddress || '').trim().toLowerCase(),
       nativeCurrency: {
         name: String(row?.nativeCurrencyName || base?.nativeCurrency.name || fallbackChainName(chain)).trim(),
         symbol: String(row?.nativeCurrencySymbol || base?.nativeCurrency.symbol || fallbackNativeSymbol(chain)).trim(),

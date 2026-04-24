@@ -12,6 +12,7 @@ import {
 import {
   getWhitelistPatterns,
   getTokenRegistry,
+  listTokenPriceSyncTargets,
   getSingleContractAiAudit,
   getSingleTokenAiAudit,
   replaceWhitelistPatterns,
@@ -24,6 +25,7 @@ import {
   saveTokenAiAuditResult,
   setManyAppSettings,
   replaceChainSettings,
+  upsertTokenPriceBatch,
 } from '../db.js';
 import {
   getPatternSyncStatus,
@@ -52,6 +54,7 @@ import type { PipelineRunResult } from '../pipeline.js';
 import { getAuthenticatedSession, isAdminAuthUser, renameAuthenticatedSessions } from './auth.js';
 import { findUserAuthAccount, getAllowedChainsForUser, getUserAuthConfig, updateOwnUserAuthAccount } from '../utils/user-auth.js';
 import { verifyPassword } from '../utils/web-security.js';
+import { getTokenPricesBatch } from '../utils/rpc.js';
 
 type StateStreamClient = ServerResponse<IncomingMessage> & {
   __stateHeartbeat?: NodeJS.Timeout;
@@ -742,6 +745,43 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       return true;
     }
 
+    if (reqPath === '/api/token-prices/sync' && method === 'POST') {
+      const targetChains = requestKnownChains.filter((chain) => requestAllowedChains.includes(chain));
+      let totalTokens = 0;
+      let updatedTokens = 0;
+      const syncedChains: Array<{ chain: string; totalTokens: number; updatedTokens: number }> = [];
+
+      for (const chain of targetChains) {
+        const tokens = listTokenPriceSyncTargets(chain);
+        if (!tokens.length) continue;
+        totalTokens += tokens.length;
+        const priceMap = await getTokenPricesBatch(chain, tokens);
+        const rows = [...priceMap.entries()]
+          .filter(([, priceUsd]) => priceUsd != null)
+          .map(([token, priceUsd]) => ({
+            token,
+            tokenPriceUsd: Number(priceUsd),
+          }));
+        upsertTokenPriceBatch(chain, rows);
+        updatedTokens += rows.length;
+        syncedChains.push({
+          chain,
+          totalTokens: tokens.length,
+          updatedTokens: rows.length,
+        });
+        invalidateReadCaches(chain);
+        invalidateDerivedReadCaches(chain);
+      }
+
+      sendJson(res, 200, {
+        ok: true,
+        chains: syncedChains,
+        total_tokens: totalTokens,
+        updated_tokens: updatedTokens,
+      });
+      return true;
+    }
+
     if (reqPath === '/api/results' && method === 'GET') {
       const chain = normalizeRequestedChain(url.searchParams.get('chain'));
       if (!requireAllowedChain(chain)) return true;
@@ -1004,6 +1044,11 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
             rpcNetwork: String((row.rpc_network ?? row.rpcNetwork) || '').trim(),
             rpcUrls: [],
             multicall3Address: String(row.multicall3 || '').trim().toLowerCase(),
+            wrappedNativeTokenAddress: String(
+              row.wrapped_native_token_address
+              ?? row.wrappedNativeTokenAddress
+              ?? '',
+            ).trim().toLowerCase(),
             nativeCurrencyName: String(
               row.native_currency_name
               ?? row.nativeCurrencyName
@@ -1047,6 +1092,10 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         }
         if (!row.rpcNetwork) {
           sendJson(res, 400, { error: `Chain ${row.chain} needs an Infura RPC network value` });
+          return true;
+        }
+        if (row.wrappedNativeTokenAddress && !/^0x[a-f0-9]{40}$/i.test(row.wrappedNativeTokenAddress)) {
+          sendJson(res, 400, { error: `Chain ${row.chain} has an invalid wrapped native token address` });
           return true;
         }
       }

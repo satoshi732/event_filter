@@ -441,6 +441,7 @@ async function buildSettingsPayload(username = '') {
       chainbase_keys: cfg.chainbaseKeys,
       rpc_network: cfg.rpcNetwork,
       multicall3: cfg.multicall3Address,
+      wrapped_native_token_address: cfg.wrappedNativeTokenAddress,
       native_currency: cfg.nativeCurrency,
     })),
     ai_providers: getAiAuditProviderConfigs(),

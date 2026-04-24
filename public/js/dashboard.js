@@ -287,6 +287,7 @@
       selectedChain: (query.get('chain') || '').toLowerCase(),
       latestRuns: [],
       running: false,
+      syncingPrices: false,
       runningChain: null,
       progress: null,
       dashboardTab: queryOrDefault('tab', 'tokens', ['tokens', 'auto', 'settings']),
@@ -1473,6 +1474,7 @@
       const {
         handleChainChanged,
         runScan,
+        syncTokenPrices,
         toggleAutoAnalysis,
         navigateDashboard,
         navigateToken,
@@ -1694,6 +1696,7 @@
         }),
         latestRuns: state.latestRuns,
         running: computed(() => state.running),
+        syncingPrices: computed(() => state.syncingPrices),
         progress: computed(() => state.progress),
         dashboardTab: computed({
           get: () => state.dashboardTab,
@@ -1809,6 +1812,7 @@
         refreshCurrent,
         handleChainChanged,
         runScan,
+        syncTokenPrices,
         toggleAutoAnalysis,
         navigateDashboard,
         openDashboardMain,

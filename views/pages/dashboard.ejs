@@ -41,6 +41,9 @@
             <button class="btn primary" type="button" :disabled="running || !selectedChain" @click="runScan">
               {{ running ? 'Running...' : 'Run Round' }}
             </button>
+            <button class="btn ghost" type="button" :disabled="syncingPrices" @click="syncTokenPrices">
+              {{ syncingPrices ? 'Syncing Prices...' : 'Sync Prices' }}
+            </button>
             <button class="btn ghost" type="button" @click="refreshCurrent">Refresh</button>
             <div v-if="authEnabled" class="session-chip">
               <span class="mono">{{ currentUser || 'signed in' }}</span>
@@ -980,13 +983,14 @@
                         <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'blocks_per_scan') }" @click="toggleTableSort('chainConfig', 'blocks_per_scan')">Blocks/Scan <span>{{ sortIndicator('chainConfig', 'blocks_per_scan') }}</span></button></th>
                         <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'rpc_network') }" @click="toggleTableSort('chainConfig', 'rpc_network')">Infura Network <span>{{ sortIndicator('chainConfig', 'rpc_network') }}</span></button></th>
                         <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'multicall3') }" @click="toggleTableSort('chainConfig', 'multicall3')">Multicall <span>{{ sortIndicator('chainConfig', 'multicall3') }}</span></button></th>
+                        <th>Wrapped Native</th>
                         <th>Native Currency</th>
                         <th>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
                       <tr v-if="!sortedChainConfigs.length">
-                        <td colspan="9" class="muted">No chain configs</td>
+                        <td colspan="10" class="muted">No chain configs</td>
                       </tr>
                       <tr v-for="(cfg, index) in sortedChainConfigs" :key="cfg.chain || `chain-row-${index}`">
                         <td><input v-model="cfg.chain" type="text" placeholder="base-sepolia"></td>
@@ -998,6 +1002,7 @@
                           <input v-model="cfg.rpc_network" type="text" placeholder="base-mainnet">
                         </td>
                         <td class="mono"><input v-model="cfg.multicall3" type="text" class="mono"></td>
+                        <td class="mono"><input v-model="cfg.wrapped_native_token_address" type="text" class="mono" placeholder="0x4200...0006"></td>
                         <td>
                           <div class="settings-inline-grid compact">
                             <input v-model="cfg.native_currency_name" type="text" placeholder="Ether">

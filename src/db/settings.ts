@@ -16,6 +16,7 @@ export interface ChainSettingRow {
   rpcNetwork: string;
   rpcUrls: string[];
   multicall3Address: string;
+  wrappedNativeTokenAddress: string;
   nativeCurrencyName: string;
   nativeCurrencySymbol: string;
   nativeCurrencyDecimals: number;
@@ -119,6 +120,7 @@ export function listChainSettings(): ChainSettingRow[] {
       rpc_network,
       rpc_urls,
       multicall3_address,
+      wrapped_native_token_address,
       native_currency_name,
       native_currency_symbol,
       native_currency_decimals,
@@ -135,6 +137,7 @@ export function listChainSettings(): ChainSettingRow[] {
     rpc_network: string | null;
     rpc_urls: string;
     multicall3_address: string;
+    wrapped_native_token_address: string | null;
     native_currency_name: string | null;
     native_currency_symbol: string | null;
     native_currency_decimals: number | null;
@@ -150,6 +153,7 @@ export function listChainSettings(): ChainSettingRow[] {
     rpcNetwork: row.rpc_network ?? '',
     rpcUrls: parseJsonArray(row.rpc_urls),
     multicall3Address: row.multicall3_address,
+    wrappedNativeTokenAddress: row.wrapped_native_token_address ?? '',
     nativeCurrencyName: row.native_currency_name ?? '',
     nativeCurrencySymbol: row.native_currency_symbol ?? '',
     nativeCurrencyDecimals: row.native_currency_decimals ?? 18,
@@ -167,6 +171,7 @@ export function upsertChainSettings(rows: Array<{
   rpcNetwork: string;
   rpcUrls: string[];
   multicall3Address: string;
+  wrappedNativeTokenAddress: string;
   nativeCurrencyName: string;
   nativeCurrencySymbol: string;
   nativeCurrencyDecimals: number;
@@ -176,8 +181,9 @@ export function upsertChainSettings(rows: Array<{
       INSERT INTO chain_settings (
         chain, name, chain_id, table_prefix, blocks_per_scan,
         chainbase_keys, rpc_network, rpc_urls, multicall3_address,
+        wrapped_native_token_address,
         native_currency_name, native_currency_symbol, native_currency_decimals, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       ON CONFLICT(chain) DO UPDATE SET
         name = excluded.name,
         chain_id = excluded.chain_id,
@@ -187,6 +193,7 @@ export function upsertChainSettings(rows: Array<{
         rpc_network = excluded.rpc_network,
         rpc_urls = excluded.rpc_urls,
         multicall3_address = excluded.multicall3_address,
+        wrapped_native_token_address = excluded.wrapped_native_token_address,
         native_currency_name = excluded.native_currency_name,
         native_currency_symbol = excluded.native_currency_symbol,
         native_currency_decimals = excluded.native_currency_decimals,
@@ -203,6 +210,7 @@ export function upsertChainSettings(rows: Array<{
         row.rpcNetwork.trim(),
         stringifyJsonArray(row.rpcUrls),
         row.multicall3Address.trim().toLowerCase(),
+        row.wrappedNativeTokenAddress.trim().toLowerCase(),
         row.nativeCurrencyName.trim(),
         row.nativeCurrencySymbol.trim(),
         row.nativeCurrencyDecimals,
@@ -222,6 +230,7 @@ export function replaceChainSettings(rows: Array<{
   rpcNetwork: string;
   rpcUrls: string[];
   multicall3Address: string;
+  wrappedNativeTokenAddress: string;
   nativeCurrencyName: string;
   nativeCurrencySymbol: string;
   nativeCurrencyDecimals: number;
@@ -237,6 +246,7 @@ export function replaceChainSettings(rows: Array<{
       rpcNetwork: row.rpcNetwork.trim(),
       rpcUrls: row.rpcUrls,
       multicall3Address: row.multicall3Address,
+      wrappedNativeTokenAddress: row.wrappedNativeTokenAddress.trim().toLowerCase(),
       nativeCurrencyName: row.nativeCurrencyName,
       nativeCurrencySymbol: row.nativeCurrencySymbol,
       nativeCurrencyDecimals: row.nativeCurrencyDecimals,
@@ -251,8 +261,9 @@ export function replaceChainSettings(rows: Array<{
       INSERT INTO chain_settings (
         chain, name, chain_id, table_prefix, blocks_per_scan,
         chainbase_keys, rpc_network, rpc_urls, multicall3_address,
+        wrapped_native_token_address,
         native_currency_name, native_currency_symbol, native_currency_decimals, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     `);
     for (const row of entries) {
       stmt.run(
@@ -265,6 +276,7 @@ export function replaceChainSettings(rows: Array<{
         row.rpcNetwork.trim(),
         stringifyJsonArray(row.rpcUrls),
         row.multicall3Address.trim().toLowerCase(),
+        row.wrappedNativeTokenAddress.trim().toLowerCase(),
         row.nativeCurrencyName.trim(),
         row.nativeCurrencySymbol.trim(),
         row.nativeCurrencyDecimals,

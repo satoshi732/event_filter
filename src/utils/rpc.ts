@@ -156,6 +156,11 @@ function getNativeTokenMetadata(chain: string): TokenMetadata {
   };
 }
 
+function getWrappedNativeTokenAddress(chain: string): string | null {
+  const value = String(getChainConfig(chain).wrappedNativeTokenAddress || '').trim().toLowerCase();
+  return /^0x[a-f0-9]{40}$/i.test(value) ? value : null;
+}
+
 export function isFungibleTokenKind(kind: TokenKind | null | undefined): boolean {
   return kind === 'fungible' || kind === 'native' || kind == null || kind === 'unknown';
 }
@@ -567,6 +572,17 @@ export async function getTokenPricesBatch(
   const normalized = [...new Set(tokens.map(token => token.toLowerCase()).filter(Boolean))];
   const out = new Map<string, number | null>(normalized.map((token) => [token, null]));
   if (!normalized.length) return out;
+
+  const wrappedNative = getWrappedNativeTokenAddress(chain);
+  const nativeTokens = normalized.filter((token) => isNativeToken(chain, token));
+  if (wrappedNative && nativeTokens.length) {
+    try {
+      const nativePrice = await fetchDexScreenerTokenPrice(wrappedNative);
+      nativeTokens.forEach((token) => out.set(token, nativePrice));
+    } catch (err) {
+      logger.warn(`[${chain}] Dexscreener native price fetch failed for ${wrappedNative}: ${errorMessage(err)}`);
+    }
+  }
 
   const entries = normalized
     .filter((token) => !isNativeToken(chain, token))

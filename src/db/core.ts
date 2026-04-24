@@ -81,6 +81,7 @@ function initSchema(db: Database.Database): void {
       rpc_network               TEXT NOT NULL DEFAULT '',
       rpc_urls                  TEXT NOT NULL DEFAULT '[]',
       multicall3_address        TEXT NOT NULL DEFAULT '',
+      wrapped_native_token_address TEXT NOT NULL DEFAULT '',
       native_currency_name      TEXT NOT NULL DEFAULT '',
       native_currency_symbol    TEXT NOT NULL DEFAULT '',
       native_currency_decimals  INTEGER NOT NULL DEFAULT 18,
@@ -485,6 +486,9 @@ function ensureRuntimeSettingsSchema(db: Database.Database): void {
   }
   if (!cols.some((col) => col.name === 'multicall3_address')) {
     db.exec(`ALTER TABLE chain_settings ADD COLUMN multicall3_address TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!cols.some((col) => col.name === 'wrapped_native_token_address')) {
+    db.exec(`ALTER TABLE chain_settings ADD COLUMN wrapped_native_token_address TEXT NOT NULL DEFAULT '';`);
   }
   if (!cols.some((col) => col.name === 'native_currency_name')) {
     db.exec(`ALTER TABLE chain_settings ADD COLUMN native_currency_name TEXT NOT NULL DEFAULT '';`);

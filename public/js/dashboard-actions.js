@@ -228,6 +228,30 @@
       }
     }
 
+    async function syncTokenPrices() {
+      if (state.syncingPrices) return;
+      state.syncingPrices = true;
+      try {
+        const data = await apiFetch('/api/token-prices/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        const syncedChains = Array.isArray(data?.chains) ? data.chains : [];
+        syncedChains.forEach((entry) => invalidateChainCache(entry?.chain || ''));
+        await loaders.refreshCurrent({ force: true });
+        pushNotification(
+          `Synced ${Number(data?.updated_tokens) || 0}/${Number(data?.total_tokens) || 0} token prices across ${syncedChains.length} chain(s)`,
+          'success',
+          4200,
+        );
+      } catch (err) {
+        pushNotification(err instanceof Error ? err.message : String(err), 'error', 5200);
+      } finally {
+        state.syncingPrices = false;
+      }
+    }
+
     async function toggleAutoAnalysis() {
       const wasEnabled = autoAnalysisEnabled.value;
       const selectedAutoChains = Array.isArray(state.settings.runtime_settings.auto_analysis?.selected_chains)
@@ -580,6 +604,7 @@
         blocks_per_scan: 75,
         rpc_network: '',
         multicall3: '',
+        wrapped_native_token_address: '',
         native_currency_name: '',
         native_currency_symbol: '',
         native_currency_decimals: 18,
@@ -595,6 +620,7 @@
         blocks_per_scan: Number.isFinite(Number(row?.blocks_per_scan)) ? Number(row.blocks_per_scan) : 75,
         rpc_network: String(row?.rpc_network || '').trim(),
         multicall3: String(row?.multicall3 || '').trim().toLowerCase(),
+        wrapped_native_token_address: String(row?.wrapped_native_token_address || '').trim().toLowerCase(),
         native_currency_name: String(row?.native_currency_name || '').trim(),
         native_currency_symbol: String(row?.native_currency_symbol || '').trim(),
         native_currency_decimals: Number.isFinite(Number(row?.native_currency_decimals))
@@ -961,6 +987,7 @@
     return {
       handleChainChanged,
       runScan,
+      syncTokenPrices,
       toggleAutoAnalysis,
       navigateDashboard,
       navigateToken,

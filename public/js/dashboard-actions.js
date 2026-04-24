@@ -204,10 +204,6 @@
     }
 
     async function runScan() {
-      if (!state.isAdmin) {
-        pushNotification('Run Round is available to admin users only', 'warning', 4200);
-        return;
-      }
       if (!state.selectedChain || state.running) return;
       state.running = true;
       state.runningChain = state.selectedChain;

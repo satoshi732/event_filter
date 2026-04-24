@@ -103,6 +103,7 @@ const VIEWS_DIR = path.join(ROOT, 'views');
 interface WebState {
   running: boolean;
   runningChain: string | null;
+  runningOwnerUsername: string | null;
   progress: PipelineProgressUpdate | null;
   latestRuns: Map<string, PipelineRunResult>;
 }
@@ -552,6 +553,7 @@ export async function startWebServer(
   const state: WebState = {
     running: false,
     runningChain: null,
+    runningOwnerUsername: null,
     progress: null,
     latestRuns: new Map(),
   };
@@ -626,10 +628,14 @@ export async function startWebServer(
       String(right.generated_at || '').localeCompare(String(left.generated_at || '')),
     );
 
+    const viewer = String(username || '').trim().toLowerCase();
+    const runningOwner = String(state.runningOwnerUsername || '').trim().toLowerCase();
+    const ownsActiveRound = Boolean(state.running && runningOwner && viewer === runningOwner);
+
     return {
-      running: state.running,
-      running_chain: state.runningChain && visibleChains.includes(state.runningChain) ? state.runningChain : null,
-      progress: state.progress && visibleChains.includes(String(state.progress.chain || '').toLowerCase()) ? state.progress : null,
+      running: ownsActiveRound,
+      running_chain: ownsActiveRound && state.runningChain && visibleChains.includes(state.runningChain) ? state.runningChain : null,
+      progress: ownsActiveRound && state.progress && visibleChains.includes(String(state.progress.chain || '').toLowerCase()) ? state.progress : null,
       chains: visibleChains,
       default_chain: visibleChains[0] ?? null,
       latest_runs: latestRuns,
@@ -676,13 +682,15 @@ export async function startWebServer(
     }
   }
 
-  async function handleRun(chain: string): Promise<PipelineRunResult> {
+  async function handleRun(chain: string, ownerUsername: string | null = ''): Promise<PipelineRunResult> {
     if (state.running) {
       throw new Error(`Scan already running for ${state.runningChain ?? 'unknown chain'}`);
     }
 
+    const owner = String(ownerUsername || '').trim().toLowerCase();
     state.running = true;
     state.runningChain = chain;
+    state.runningOwnerUsername = owner || null;
     state.progress = {
       chain,
       stage: 'boot',
@@ -693,6 +701,7 @@ export async function startWebServer(
     broadcastNamedEvent('data-refresh', {
       kind: 'run-started',
       chain,
+      ownerUsername: owner || null,
       ts: new Date().toISOString(),
     });
     await broadcastStateSnapshot();
@@ -720,6 +729,7 @@ export async function startWebServer(
       broadcastNamedEvent('data-refresh', {
         kind: 'run-completed',
         chain,
+        ownerUsername: owner || null,
         run: latestRunMeta(run),
         ts: new Date().toISOString(),
       });
@@ -737,6 +747,7 @@ export async function startWebServer(
       broadcastNamedEvent('data-refresh', {
         kind: 'run-failed',
         chain,
+        ownerUsername: owner || null,
         error: (err as Error).message || 'Unknown error',
         ts: new Date().toISOString(),
       });
@@ -745,6 +756,7 @@ export async function startWebServer(
     } finally {
       state.running = false;
       state.runningChain = null;
+      state.runningOwnerUsername = null;
       await broadcastStateSnapshot();
     }
   }

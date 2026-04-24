@@ -38,7 +38,7 @@
                 <option v-for="chain in chains" :key="chain" :value="chain">{{ chain.toUpperCase() }}</option>
               </select>
             </label>
-            <button v-if="isAdmin" class="btn primary" type="button" :disabled="running || !selectedChain" @click="runScan">
+            <button class="btn primary" type="button" :disabled="running || !selectedChain" @click="runScan">
               {{ running ? 'Running...' : 'Run Round' }}
             </button>
             <button class="btn ghost" type="button" @click="refreshCurrent">Refresh</button>

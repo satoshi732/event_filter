@@ -69,7 +69,7 @@ export interface AutoAnalysisRuntimeConfig {
 }
 
 interface AutoAnalysisControls {
-  runRound: (chain: string) => Promise<unknown>;
+  runRound: (chain: string, ownerUsername?: string | null) => Promise<unknown>;
   isRoundRunning: () => boolean;
 }
 
@@ -778,7 +778,7 @@ async function runLoop(context: AutoAnalysisContext): Promise<void> {
         lastAction: `No eligible candidates left across ${chainSummary}. Starting the next ${nextRoundChain.toUpperCase()} round`,
       });
       try {
-        await controls.runRound(nextRoundChain);
+        await controls.runRound(nextRoundChain, context.username);
         setStatus(context, {
           chain: nextRoundChain,
           cycle: context.state.cycle + 1,

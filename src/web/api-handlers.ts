@@ -86,7 +86,7 @@ interface ApiRouteHandlerDeps {
   resolveDashboardTokens: (chain: string, run: PipelineRunResult) => DashboardTokenSummary[];
   resolveContractDetail: (chain: string, run: PipelineRunResult, contract: string) => unknown;
   latestRunMeta: (run: PipelineRunResult) => LatestRunMeta;
-  handleRun: (chain: string) => Promise<PipelineRunResult>;
+  handleRun: (chain: string, ownerUsername?: string) => Promise<PipelineRunResult>;
   applyDashboardContractQuery: (
     rows: DashboardContractSummary[],
     search: string,
@@ -726,18 +726,18 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     }
 
     if (reqPath === '/api/run' && method === 'POST') {
-      if (!requireAdmin()) return true;
       const body = await readJsonBody(req);
       const chain = normalizeRequestedChain(body.chain);
       if (!chain || !requestKnownChains.includes(chain)) {
         sendJson(res, 400, { error: 'Invalid chain' });
         return true;
       }
+      if (!requireAllowedChain(chain)) return true;
       if (state.running) {
         sendJson(res, 409, { error: 'Scan already running', running_chain: state.runningChain });
         return true;
       }
-      const run = await handleRun(chain);
+      const run = await handleRun(chain, requestUsername);
       sendJson(res, 200, { ok: true, run: latestRunMeta(run) });
       return true;
     }

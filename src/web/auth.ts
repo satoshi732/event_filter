@@ -19,6 +19,7 @@ export interface UserAuthLike {
     passwordHash: string;
     role: 'admin' | 'user';
     aiApiKey?: string;
+    allowedChains?: string[];
   }>;
 }
 
@@ -99,6 +100,7 @@ export function findUserAuthAccount(userAuth: UserAuthLike, username: string) {
       passwordHash: userAuth.passwordHash,
       role: 'admin' as const,
       aiApiKey: '',
+      allowedChains: [],
     };
   }
   return null;

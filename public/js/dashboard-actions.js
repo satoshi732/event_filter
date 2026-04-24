@@ -654,6 +654,18 @@
           description: String(row.description || '').trim(),
         }))
         .filter((row) => row.name && row.hex_pattern);
+      const accessUsers = ((state.settings.runtime_settings.access?.users) || [])
+        .map((user) => ({
+          username: String(user.username || '').trim(),
+          role: String(user.role || 'user').trim().toLowerCase() || 'user',
+          allowed_chains: [...new Set(
+            String(user.allowed_chains_text || '')
+              .split(/[\r\n,]/)
+              .map((entry) => entry.trim().toLowerCase())
+              .filter(Boolean),
+          )],
+        }))
+        .filter((user) => user.username);
 
       try {
         const autoAnalysisDraft = {
@@ -668,7 +680,13 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            runtime_settings: state.settings.runtime_settings,
+            runtime_settings: {
+              ...state.settings.runtime_settings,
+              access: {
+                ...(state.settings.runtime_settings.access || {}),
+                users: accessUsers,
+              },
+            },
             chain_configs: state.settings.chain_configs,
             ai_providers: aiProviders,
             ai_models: aiModels,

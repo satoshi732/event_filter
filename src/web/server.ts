@@ -93,7 +93,7 @@ import {
   stopAutoAnalysis,
   subscribeAutoAnalysisStatus,
 } from '../modules/auto-analysis/index.js';
-import { getUserAuthConfig, USER_FILE_PATH } from '../utils/user-auth.js';
+import { getAllowedChainsForUser, getUserAuthConfig, USER_FILE_PATH } from '../utils/user-auth.js';
 
 const ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -108,6 +108,7 @@ interface WebState {
 
 type StateStreamClient = ServerResponse<IncomingMessage> & {
   __stateHeartbeat?: NodeJS.Timeout;
+  __username?: string;
 };
 
 function sendJson(res: ServerResponse, statusCode: number, body: unknown): void {
@@ -194,8 +195,8 @@ function isAiAuditRateLimitFailure(event: AiAuditEvent): boolean {
     || /quota exceeded/.test(message);
 }
 
-function serializeAutoAnalysisRuntimeConfig() {
-  const config = getAutoAnalysisRuntimeConfig();
+function serializeAutoAnalysisRuntimeConfig(username = '') {
+  const config = getAutoAnalysisRuntimeConfig(username);
   return {
     queue_capacity: config.queueCapacity,
     round_audit_limit: config.roundAuditLimit,
@@ -378,28 +379,32 @@ function applyDashboardTokenQuery(
   };
 }
 
-async function buildSettingsPayload() {
+async function buildSettingsPayload(username = '') {
   const snapshot = getConfigSnapshot();
   const chainConfigs = getChainConfigsSnapshot();
   const security = getWebSecurityConfig();
   const userAuth = getUserAuthConfig();
+  const effectiveUsername = String(username || userAuth.username || '').trim();
+  const allowedChains = getAllowedChainsForUser(userAuth, effectiveUsername, Object.keys(chainConfigs));
+  const currentUserRecord = userAuth.users.find((user) => user.username === effectiveUsername) || userAuth.users[0] || null;
 
   return {
     runtime_settings: {
       chainbase_keys: snapshot.chainbase_keys ?? [],
       rpc_keys: snapshot.rpc_keys ?? [],
-      monitored_chains: getMonitoredChains(),
+      monitored_chains: getMonitoredChains().filter((chain) => allowedChains.includes(chain)),
       poll_interval_ms: getPollIntervalMs(),
       debug: Boolean(snapshot.debug),
       pattern_sync: snapshot.pattern_sync ?? null,
       pancakeswap_price: snapshot.pancakeswap_price ?? { max_req_per_second: 2, max_req_per_minute: 90 },
       ai_audit_backend: snapshot.ai_audit_backend ?? getAiAuditBackendConfig(),
-      auto_analysis: serializeAutoAnalysisRuntimeConfig(),
+      auto_analysis: serializeAutoAnalysisRuntimeConfig(effectiveUsername),
       account: {
-        username: userAuth.username,
-        role: userAuth.role,
-        ai_api_key: userAuth.users.find((user) => user.username === userAuth.username)?.aiApiKey || '',
-        has_ai_api_key: Boolean(userAuth.users.find((user) => user.username === userAuth.username)?.aiApiKey),
+        username: effectiveUsername,
+        role: currentUserRecord?.role || userAuth.role,
+        ai_api_key: currentUserRecord?.aiApiKey || '',
+        has_ai_api_key: Boolean(currentUserRecord?.aiApiKey),
+        allowed_chains: allowedChains,
       },
       access: {
         auth_enabled: userAuth.authEnabled,
@@ -409,6 +414,7 @@ async function buildSettingsPayload() {
           username: user.username,
           role: user.role,
           has_ai_api_key: Boolean(user.aiApiKey),
+          allowed_chains: user.allowedChains || [],
         })),
         password: '',
         has_password: Boolean(userAuth.passwordHash),
@@ -418,7 +424,7 @@ async function buildSettingsPayload() {
         tls_key_path: security.tlsKeyPath,
       },
     },
-    chain_configs: Object.entries(chainConfigs).map(([chain, cfg]) => ({
+    chain_configs: Object.entries(chainConfigs).filter(([chain]) => allowedChains.includes(chain)).map(([chain, cfg]) => ({
       chain,
       name: cfg.name,
       chain_id: cfg.chainId,
@@ -599,9 +605,11 @@ export async function startWebServer(
     );
   }
 
-  async function buildStatePayload() {
+  async function buildStatePayload(username = '') {
     const syncStatus = await getPatternSyncStatus();
-    const latestRuns = chains.flatMap((chain) => {
+    const userAuth = getUserAuthConfig();
+    const visibleChains = getAllowedChainsForUser(userAuth, username, chains);
+    const latestRuns = visibleChains.flatMap((chain) => {
       const inMemory = state.latestRuns.get(chain);
       if (inMemory) return [latestRunMeta(inMemory)];
       const persisted = latestPersistedRunMeta(chain);
@@ -612,13 +620,13 @@ export async function startWebServer(
 
     return {
       running: state.running,
-      running_chain: state.runningChain,
-      progress: state.progress,
-      chains,
-      default_chain: chains[0] ?? null,
+      running_chain: state.runningChain && visibleChains.includes(state.runningChain) ? state.runningChain : null,
+      progress: state.progress && visibleChains.includes(String(state.progress.chain || '').toLowerCase()) ? state.progress : null,
+      chains: visibleChains,
+      default_chain: visibleChains[0] ?? null,
       latest_runs: latestRuns,
       sync_status: syncStatus,
-      auto_analysis: getAutoAnalysisStatus(),
+      auto_analysis: getAutoAnalysisStatus(username),
     };
   }
 
@@ -629,10 +637,19 @@ export async function startWebServer(
 
   function broadcastNamedEvent(event: string, payload: unknown): void {
     if (!stateStreamClients.size) return;
+    const userAuth = getUserAuthConfig();
+    const payloadChain = String((payload as { chain?: string } | null)?.chain || '').trim().toLowerCase();
+    const payloadUsername = String((payload as { username?: string; ownerUsername?: string } | null)?.username || (payload as { ownerUsername?: string } | null)?.ownerUsername || '').trim().toLowerCase();
     for (const client of stateStreamClients) {
       if (client.destroyed || client.writableEnded) {
         stateStreamClients.delete(client);
         continue;
+      }
+      const viewer = String(client.__username || '').trim().toLowerCase();
+      if (event === 'auto-analysis' && payloadUsername && viewer !== payloadUsername) continue;
+      if (payloadChain) {
+        const allowedChains = getAllowedChainsForUser(userAuth, viewer, chains);
+        if (!allowedChains.includes(payloadChain)) continue;
       }
       writeSseEvent(client, event, payload);
     }
@@ -640,12 +657,12 @@ export async function startWebServer(
 
   async function broadcastStateSnapshot(): Promise<void> {
     if (!stateStreamClients.size) return;
-    const payload = await buildStatePayload();
     for (const client of stateStreamClients) {
       if (client.destroyed || client.writableEnded) {
         stateStreamClients.delete(client);
         continue;
       }
+      const payload = await buildStatePayload(String(client.__username || ''));
       writeSseEvent(client, 'state', payload);
     }
   }
@@ -727,17 +744,18 @@ export async function startWebServer(
     runRound: handleRun,
     isRoundRunning: () => state.running,
   });
-  const unsubscribeAutoAnalysis = subscribeAutoAnalysisStatus((status) => {
-    broadcastNamedEvent('auto-analysis', status);
+  const unsubscribeAutoAnalysis = subscribeAutoAnalysisStatus((event) => {
+    broadcastNamedEvent('auto-analysis', event);
   });
   const unsubscribeAiAudit = subscribeAiAuditEvents((event) => {
     invalidateReadCaches(event.chain);
     if (isAiAuditRateLimitFailure(event)) {
-      const autoStatus = getAutoAnalysisStatus();
-      if (autoStatus.enabled) {
+      const ownerUsername = String(event.ownerUsername || '').trim().toLowerCase();
+      const autoStatus = ownerUsername ? getAutoAnalysisStatus(ownerUsername) : null;
+      if (autoStatus?.enabled && ownerUsername) {
         const detail = String(event.error || '').trim();
         const reason = `Auto analysis stopped after AI backend rate limit on ${event.provider}/${event.model} for ${event.targetType} ${event.chain}:${event.targetAddr}`;
-        stopAutoAnalysis(detail ? `${reason}: ${detail}` : reason);
+        stopAutoAnalysis(ownerUsername, detail ? `${reason}: ${detail}` : reason);
         void broadcastStateSnapshot();
       }
     }

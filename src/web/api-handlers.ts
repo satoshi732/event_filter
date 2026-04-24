@@ -48,11 +48,12 @@ import { withLiveReviews, type DashboardContractSummary, type DashboardTokenSumm
 import { deriveAiAuditLifecycleStatus } from '../db/audit-state.js';
 import type { PipelineRunResult } from '../pipeline.js';
 import { getAuthenticatedSession, isAdminAuthUser, renameAuthenticatedSessions } from './auth.js';
-import { findUserAuthAccount, getUserAuthConfig, updateOwnUserAuthAccount } from '../utils/user-auth.js';
+import { findUserAuthAccount, getAllowedChainsForUser, getUserAuthConfig, updateOwnUserAuthAccount, updateUserAllowedChains } from '../utils/user-auth.js';
 import { verifyPassword } from '../utils/web-security.js';
 
 type StateStreamClient = ServerResponse<IncomingMessage> & {
   __stateHeartbeat?: NodeJS.Timeout;
+  __username?: string;
 };
 
 interface WebStateLike {
@@ -72,8 +73,8 @@ interface ApiRouteHandlerDeps {
   escapeHtml: (value: string) => string;
   resolveReportFilePath: (rawPath: string) => string;
   resolveProjectPath: (rawPath: string) => string;
-  buildStatePayload: () => Promise<unknown>;
-  buildSettingsPayload: () => Promise<unknown>;
+  buildStatePayload: (username?: string) => Promise<unknown>;
+  buildSettingsPayload: (username?: string) => Promise<unknown>;
   buildAiAuditConfigPayload: () => unknown;
   broadcastStateSnapshot: () => Promise<void>;
   broadcastNamedEvent: (event: string, payload: unknown) => void;
@@ -246,9 +247,17 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     const requestUsername = requestSession?.session.username || '';
     const requestIsAdmin = !requestUserAuth.authEnabled
       || isAdminAuthUser(requestUserAuth, requestUsername);
+    const requestAllowedChains = getAllowedChainsForUser(requestUserAuth, requestUsername, chains);
     const requireAdmin = () => {
       if (requestIsAdmin) return true;
       sendJson(res, 403, { error: 'Admin privileges are required for this action' });
+      return false;
+    };
+    const normalizeRequestedChain = (value: unknown, fallback = requestAllowedChains[0] || '') =>
+      String(value || fallback || '').trim().toLowerCase();
+    const requireAllowedChain = (chain: string) => {
+      if (requestAllowedChains.includes(chain)) return true;
+      sendJson(res, 403, { error: `Chain access denied: ${chain || 'unknown'}` });
       return false;
     };
     const buildAccountPayload = (username = requestUsername, config = requestUserAuth) => {
@@ -258,11 +267,12 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         role: account?.role || 'user',
         ai_api_key: account?.aiApiKey || '',
         has_ai_api_key: Boolean(account?.aiApiKey),
+        allowed_chains: getAllowedChainsForUser(config, username, chains),
       };
     };
 
     if (reqPath === '/api/state' && method === 'GET') {
-      sendJson(res, 200, await buildStatePayload());
+      sendJson(res, 200, await buildStatePayload(requestUsername));
       return true;
     }
 
@@ -318,26 +328,30 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     }
 
     if (reqPath === '/api/auto-analysis' && method === 'GET') {
-      sendJson(res, 200, getAutoAnalysisStatus());
+      sendJson(res, 200, getAutoAnalysisStatus(requestUsername));
       return true;
     }
 
     if (reqPath === '/api/auto-analysis/start' && method === 'POST') {
       const body = await readJsonBody(req);
-      const chain = typeof body.chain === 'string' ? body.chain.toLowerCase() : '';
+      const chain = normalizeRequestedChain(body.chain);
       if (!chain || !chains.includes(chain)) {
         sendJson(res, 400, { error: 'Unknown chain' });
         return true;
       }
-      const config = setAutoAnalysisRuntimeConfig(coerceAutoAnalysisRuntimeConfig(body.config));
-      const status = startAutoAnalysis(chain);
+      if (!requireAllowedChain(chain)) return true;
+      const account = findUserAuthAccount(requestUserAuth, requestUsername);
+      const config = setAutoAnalysisRuntimeConfig(requestUsername, coerceAutoAnalysisRuntimeConfig(body.config));
+      const status = startAutoAnalysis(requestUsername, chain, {
+        backendApiKey: account?.aiApiKey || null,
+      });
       await broadcastStateSnapshot();
       sendJson(res, 200, { ok: true, status, config });
       return true;
     }
 
     if (reqPath === '/api/auto-analysis/stop' && method === 'POST') {
-      const status = stopAutoAnalysis();
+      const status = stopAutoAnalysis(requestUsername);
       await broadcastStateSnapshot();
       sendJson(res, 200, { ok: true, status });
       return true;
@@ -352,8 +366,9 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         'X-Accel-Buffering': 'no',
       });
       client.write(': connected\n\n');
+      client.__username = requestUsername;
       stateStreamClients.add(client);
-      writeSseEvent(client, 'state', await buildStatePayload());
+      writeSseEvent(client, 'state', await buildStatePayload(requestUsername));
 
       client.__stateHeartbeat = setInterval(() => {
         if (client.destroyed || client.writableEnded) return;
@@ -374,7 +389,8 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     }
 
     if (reqPath === '/api/dashboard' && method === 'GET') {
-      const chain = (url.searchParams.get('chain') ?? chains[0] ?? '').toLowerCase();
+      const chain = normalizeRequestedChain(url.searchParams.get('chain'));
+      if (!requireAllowedChain(chain)) return true;
       const run = resolveRun(chain);
       if (!run) {
         sendJson(res, 404, { error: 'No results for this chain yet' });
@@ -389,7 +405,8 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     }
 
     if (reqPath === '/api/contracts' && method === 'GET') {
-      const chain = (url.searchParams.get('chain') ?? chains[0] ?? '').toLowerCase();
+      const chain = normalizeRequestedChain(url.searchParams.get('chain'));
+      if (!requireAllowedChain(chain)) return true;
       const run = resolveRun(chain);
       if (!run) {
         sendJson(res, 404, { error: 'No results for this chain yet' });
@@ -416,7 +433,8 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     }
 
     if (reqPath === '/api/tokens' && method === 'GET') {
-      const chain = (url.searchParams.get('chain') ?? chains[0] ?? '').toLowerCase();
+      const chain = normalizeRequestedChain(url.searchParams.get('chain'));
+      if (!requireAllowedChain(chain)) return true;
       const run = resolveRun(chain);
       if (!run) {
         sendJson(res, 404, { error: 'No results for this chain yet' });
@@ -467,7 +485,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
 
     if (reqPath === '/api/seen-contract' && method === 'POST') {
       const body = await readJsonBody(req);
-      const chain = typeof body.chain === 'string' ? body.chain.toLowerCase() : '';
+      const chain = normalizeRequestedChain(body.chain, '');
       const address = typeof body.address === 'string' ? body.address.toLowerCase() : '';
       const targetKind = typeof body.target_kind === 'string' ? body.target_kind.toLowerCase() : 'auto';
       const label = typeof body.label === 'string' ? body.label.trim() : '';
@@ -475,6 +493,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         sendJson(res, 400, { error: 'chain, address, and label are required' });
         return true;
       }
+      if (!requireAllowedChain(chain)) return true;
       const hash = queueSeenContractReviewTarget(chain, address, label, targetKind);
       const status = await getPatternSyncStatus();
       sendJson(res, 200, { ok: true, hash, status });
@@ -489,7 +508,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
 
     if (reqPath === '/api/review' && method === 'POST') {
       const body = await readJsonBody(req);
-      const chain = typeof body.chain === 'string' ? body.chain.toLowerCase() : '';
+      const chain = normalizeRequestedChain(body.chain, '');
       const address = typeof body.address === 'string' ? body.address.toLowerCase() : '';
       const targetKind = typeof body.target_kind === 'string' ? body.target_kind.toLowerCase() : 'auto';
       const label = typeof body.label === 'string' ? body.label.trim() : '';
@@ -499,6 +518,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         sendJson(res, 400, { error: 'chain, address, and label are required' });
         return true;
       }
+      if (!requireAllowedChain(chain)) return true;
       const result = saveContractReview({ chain, address, targetKind, label, reviewText, exploitable });
       invalidateDerivedReadCaches(chain);
       const status = await getPatternSyncStatus();
@@ -514,12 +534,13 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
 
     if (reqPath === '/api/contract-analysis/request' && method === 'POST') {
       const body = await readJsonBody(req);
-      const chain = typeof body.chain === 'string' ? body.chain.toLowerCase() : '';
+      const chain = normalizeRequestedChain(body.chain, '');
       const contract = typeof body.contract === 'string' ? body.contract.toLowerCase() : '';
       if (!chain || !contract) {
         sendJson(res, 400, { error: 'chain and contract are required' });
         return true;
       }
+      if (!requireAllowedChain(chain)) return true;
       const title = typeof body.title === 'string' ? body.title.trim() : 'AI Auto Audit';
       const provider = normalizeAiAuditProvider(typeof body.provider === 'string' ? body.provider.trim() : getDefaultAiAuditProvider());
       const model = normalizeAiAuditModel(provider, typeof body.model === 'string' ? body.model.trim() : getDefaultAiAuditModel(provider));
@@ -530,7 +551,10 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       }
       const analysis = requestContractAiAudit({ chain, contractAddr: contract, title, provider, model });
       const account = findUserAuthAccount(requestUserAuth, requestUsername);
-      enqueueContractAiAudit(analysis, { backendApiKey: account?.aiApiKey || null });
+      enqueueContractAiAudit(analysis, {
+        backendApiKey: account?.aiApiKey || null,
+        ownerUsername: requestUsername,
+      });
       invalidateDerivedReadCaches(chain);
       sendJson(res, 200, { ok: true, analysis, plan });
       return true;
@@ -538,18 +562,22 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
 
     if (reqPath === '/api/token-analysis/request' && method === 'POST') {
       const body = await readJsonBody(req);
-      const chain = typeof body.chain === 'string' ? body.chain.toLowerCase() : '';
+      const chain = normalizeRequestedChain(body.chain, '');
       const token = typeof body.token === 'string' ? body.token.toLowerCase() : '';
       if (!chain || !token) {
         sendJson(res, 400, { error: 'chain and token are required' });
         return true;
       }
+      if (!requireAllowedChain(chain)) return true;
       const title = typeof body.title === 'string' ? body.title.trim() : 'AI Auto Audit';
       const provider = normalizeAiAuditProvider(typeof body.provider === 'string' ? body.provider.trim() : getDefaultAiAuditProvider());
       const model = normalizeAiAuditModel(provider, typeof body.model === 'string' ? body.model.trim() : getDefaultAiAuditModel(provider));
       const analysis = requestTokenAiAudit({ chain, tokenAddr: token, title, provider, model });
       const account = findUserAuthAccount(requestUserAuth, requestUsername);
-      enqueueTokenAiAudit(analysis, { backendApiKey: account?.aiApiKey || null });
+      enqueueTokenAiAudit(analysis, {
+        backendApiKey: account?.aiApiKey || null,
+        ownerUsername: requestUsername,
+      });
       invalidateDerivedReadCaches(chain);
       sendJson(res, 200, { ok: true, analysis });
       return true;
@@ -557,7 +585,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
 
     if ((reqPath === '/api/contract-analysis/result' || reqPath === '/api/token-analysis/result') && method === 'POST') {
       const body = await readJsonBody(req);
-      const chain = typeof body.chain === 'string' ? body.chain.toLowerCase() : '';
+      const chain = normalizeRequestedChain(body.chain, '');
       const isContract = reqPath.includes('/contract-');
       const targetKey = isContract ? 'contract' : 'token';
       const targetAddr = typeof body[targetKey] === 'string' ? String(body[targetKey]).toLowerCase() : '';
@@ -565,6 +593,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         sendJson(res, 400, { error: `chain and ${targetKey} are required` });
         return true;
       }
+      if (!requireAllowedChain(chain)) return true;
       const analysis = isContract
         ? saveContractAiAuditResult({
             chain,
@@ -619,13 +648,14 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
 
     if ((reqPath === '/api/contract-analysis/report' || reqPath === '/api/token-analysis/report') && method === 'GET') {
       const isContract = reqPath.includes('/contract-');
-      const chain = (url.searchParams.get('chain') ?? '').toLowerCase();
+      const chain = normalizeRequestedChain(url.searchParams.get('chain'), '');
       const targetKey = isContract ? 'contract' : 'token';
       const targetAddr = (url.searchParams.get(targetKey) ?? '').toLowerCase();
       if (!chain || !targetAddr) {
         sendJson(res, 400, { error: `chain and ${targetKey} are required` });
         return true;
       }
+      if (!requireAllowedChain(chain)) return true;
       const analysis = isContract ? getSingleContractAiAudit(chain, targetAddr) : getSingleTokenAiAudit(chain, targetAddr);
       const reportPath = analysis?.resultPath;
       if (!reportPath) {
@@ -657,7 +687,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     if (reqPath === '/api/run' && method === 'POST') {
       if (!requireAdmin()) return true;
       const body = await readJsonBody(req);
-      const chain = typeof body.chain === 'string' ? body.chain.toLowerCase() : chains[0];
+      const chain = normalizeRequestedChain(body.chain);
       if (!chain || !chains.includes(chain)) {
         sendJson(res, 400, { error: 'Invalid chain' });
         return true;
@@ -672,7 +702,8 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     }
 
     if (reqPath === '/api/results' && method === 'GET') {
-      const chain = (url.searchParams.get('chain') ?? chains[0] ?? '').toLowerCase();
+      const chain = normalizeRequestedChain(url.searchParams.get('chain'));
+      if (!requireAllowedChain(chain)) return true;
       const run = resolveRun(chain);
       if (!run) {
         sendJson(res, 404, { error: 'No results for this chain yet' });
@@ -683,8 +714,9 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     }
 
     if (reqPath === '/api/token' && method === 'GET') {
-      const chain = (url.searchParams.get('chain') ?? chains[0] ?? '').toLowerCase();
+      const chain = normalizeRequestedChain(url.searchParams.get('chain'));
       const token = (url.searchParams.get('token') ?? '').toLowerCase();
+      if (!requireAllowedChain(chain)) return true;
       const run = resolveRun(chain);
       if (!run) {
         sendJson(res, 404, { error: 'No results for this chain yet' });
@@ -744,7 +776,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
 
     if (reqPath === '/api/token-review' && method === 'POST') {
       const body = await readJsonBody(req);
-      const chain = typeof body.chain === 'string' ? body.chain.toLowerCase() : '';
+      const chain = normalizeRequestedChain(body.chain, '');
       const token = typeof body.token === 'string' ? body.token.toLowerCase() : '';
       const reviewText = typeof body.review_text === 'string' ? body.review_text.trim() : '';
       const exploitable = Boolean(body.exploitable);
@@ -752,6 +784,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         sendJson(res, 400, { error: 'chain and token are required' });
         return true;
       }
+      if (!requireAllowedChain(chain)) return true;
       const saved = saveTokenManualReview({ chain, token, reviewText, exploitable });
       invalidateDerivedReadCaches(chain);
       sendJson(res, 200, { ok: true, token: saved });
@@ -762,8 +795,9 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     }
 
     if (reqPath === '/api/contract' && method === 'GET') {
-      const chain = (url.searchParams.get('chain') ?? chains[0] ?? '').toLowerCase();
+      const chain = normalizeRequestedChain(url.searchParams.get('chain'));
       const contract = (url.searchParams.get('contract') ?? '').toLowerCase();
+      if (!requireAllowedChain(chain)) return true;
       const run = resolveRun(chain);
       if (!run) {
         sendJson(res, 404, { error: 'No results for this chain yet' });
@@ -788,7 +822,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
 
     if (reqPath === '/api/contract-linkage' && method === 'POST') {
       const body = await readJsonBody(req);
-      const chain = typeof body.chain === 'string' ? body.chain.toLowerCase() : '';
+      const chain = normalizeRequestedChain(body.chain, '');
       const contract = typeof body.contract === 'string' ? body.contract.toLowerCase() : '';
       const rawLinkType = typeof body.link_type === 'string' ? body.link_type.trim().toLowerCase() : '';
       const rawLinkage = typeof body.linkage === 'string' ? body.linkage.trim().toLowerCase() : '';
@@ -796,6 +830,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         sendJson(res, 400, { error: 'chain and contract are required' });
         return true;
       }
+      if (!requireAllowedChain(chain)) return true;
 
       const saved = await updateManualContractLinkage({
         chain,
@@ -826,11 +861,14 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     }
 
     if (reqPath === '/api/settings' && method === 'GET') {
-      const payload = await buildSettingsPayload() as Record<string, unknown>;
+      const payload = await buildSettingsPayload(requestUsername) as Record<string, unknown>;
       if (!requestIsAdmin) {
         sendJson(res, 200, {
           runtime_settings: {
             account: buildAccountPayload(),
+            auto_analysis: payload.runtime_settings && typeof payload.runtime_settings === 'object'
+              ? (payload.runtime_settings as Record<string, unknown>).auto_analysis
+              : {},
           },
           chain_configs: [],
           ai_providers: [],
@@ -851,6 +889,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       const pancakePrice = (typeof runtime.pancakeswap_price === 'object' && runtime.pancakeswap_price) ? runtime.pancakeswap_price as Record<string, unknown> : {};
       const aiAuditBackend = (typeof runtime.ai_audit_backend === 'object' && runtime.ai_audit_backend) ? runtime.ai_audit_backend as Record<string, unknown> : {};
       const access = (typeof runtime.access === 'object' && runtime.access) ? runtime.access as Record<string, unknown> : {};
+      const accessUsers = Array.isArray(access.users) ? access.users as Array<Record<string, unknown>> : [];
 
       const chainConfigs = Array.isArray(body.chain_configs) ? body.chain_configs as Array<Record<string, unknown>> : [];
       const aiProviders = Array.isArray(body.ai_providers) ? body.ai_providers as Array<Record<string, unknown>> : [];
@@ -910,6 +949,13 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         }
       }
 
+      updateUserAllowedChains(accessUsers.map((row) => ({
+        username: String(row.username || '').trim(),
+        allowedChains: coerceStringArray(row.allowed_chains)
+          .map((chain) => String(chain || '').trim().toLowerCase())
+          .filter((chain) => chains.includes(chain)),
+      })));
+
       setManyAppSettings([
         { key: 'chainbase_keys', value: JSON.stringify(coerceStringArray(runtime.chainbase_keys)) },
         { key: 'rpc_keys', value: JSON.stringify(coerceStringArray(runtime.rpc_keys)) },
@@ -956,7 +1002,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       })));
       reloadRuntimeConfig();
 
-      sendJson(res, 200, { ok: true, hot_applied: true, settings: await buildSettingsPayload() });
+      sendJson(res, 200, { ok: true, hot_applied: true, settings: await buildSettingsPayload(requestUsername) });
       return true;
     }
 

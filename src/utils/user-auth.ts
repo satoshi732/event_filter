@@ -19,6 +19,8 @@ interface UserFileShape {
     role?: string;
     ai_api_key?: string;
     aiApiKey?: string;
+    allowed_chains?: string[];
+    allowedChains?: string[];
   }>;
 }
 
@@ -29,6 +31,7 @@ export interface UserAuthAccount {
   passwordHash: string;
   role: UserRole;
   aiApiKey: string;
+  allowedChains: string[];
 }
 
 export interface UserAuthConfig {
@@ -58,9 +61,16 @@ function aiApiKeyFor(raw: { ai_api_key?: string; aiApiKey?: string }): string {
   return String(raw.ai_api_key ?? raw.aiApiKey ?? '').trim();
 }
 
+function allowedChainsFor(raw: { allowed_chains?: string[]; allowedChains?: string[] }): string[] {
+  const source = Array.isArray(raw.allowed_chains)
+    ? raw.allowed_chains
+    : (Array.isArray(raw.allowedChains) ? raw.allowedChains : []);
+  return [...new Set(source.map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean))];
+}
+
 function normalizeUserConfig(raw: UserFileShape): UserAuthConfig {
   const usersByName = new Map<string, UserAuthAccount>();
-  const addUser = (entry: { username?: string; password_hash?: string; password?: string; role?: string; ai_api_key?: string; aiApiKey?: string }) => {
+  const addUser = (entry: { username?: string; password_hash?: string; password?: string; role?: string; ai_api_key?: string; aiApiKey?: string; allowed_chains?: string[]; allowedChains?: string[] }) => {
     const username = normalizeUsername(String(entry.username || ''));
     if (!username) return;
     const passwordHash = passwordHashFor(entry);
@@ -70,6 +80,7 @@ function normalizeUserConfig(raw: UserFileShape): UserAuthConfig {
       passwordHash,
       role: normalizeUserRole(entry.role),
       aiApiKey: aiApiKeyFor(entry),
+      allowedChains: allowedChainsFor(entry),
     });
   };
 
@@ -83,6 +94,7 @@ function normalizeUserConfig(raw: UserFileShape): UserAuthConfig {
       password: raw.password,
       role: raw.role || 'admin',
       ai_api_key: raw.users?.find((item) => normalizeUsername(String(item.username || '')).toLowerCase() === normalizeUsername(String(raw.username || '')).toLowerCase())?.ai_api_key,
+      allowed_chains: raw.users?.find((item) => normalizeUsername(String(item.username || '')).toLowerCase() === normalizeUsername(String(raw.username || '')).toLowerCase())?.allowed_chains,
     });
   }
 
@@ -94,7 +106,7 @@ function normalizeUserConfig(raw: UserFileShape): UserAuthConfig {
     if (a.role !== b.role) return a.role === 'admin' ? -1 : 1;
     return a.username.localeCompare(b.username);
   });
-  const primary = users[0] || { username: '', passwordHash: '', role: 'user' as UserRole, aiApiKey: '' };
+  const primary = users[0] || { username: '', passwordHash: '', role: 'user' as UserRole, aiApiKey: '', allowedChains: [] };
   return {
     authEnabled: raw.auth_enabled !== false,
     username: primary.username,
@@ -112,6 +124,7 @@ function serializeUserConfig(config: UserAuthConfig) {
       role: user.role,
       password_hash: user.passwordHash,
       ai_api_key: user.aiApiKey,
+      allowed_chains: user.allowedChains,
     })),
   };
 }
@@ -125,6 +138,7 @@ function ensureDefaultUsers(config: UserAuthConfig): { config: UserAuthConfig; c
       role: 'user',
       passwordHash: hashPassword('kecheng'),
       aiApiKey: '',
+      allowedChains: [],
     });
     changed = true;
   }
@@ -136,7 +150,7 @@ function ensureDefaultUsers(config: UserAuthConfig): { config: UserAuthConfig; c
     if (a.role !== b.role) return a.role === 'admin' ? -1 : 1;
     return a.username.localeCompare(b.username);
   });
-  const primary = users[0] || { username: '', passwordHash: '', role: 'user' as UserRole, aiApiKey: '' };
+  const primary = users[0] || { username: '', passwordHash: '', role: 'user' as UserRole, aiApiKey: '', allowedChains: [] };
   return {
     changed,
     config: {
@@ -251,4 +265,60 @@ export function updateOwnUserAuthAccount(
     user: findUserAuthAccount(nextConfig, nextUsername) || nextUser,
     config: nextConfig,
   };
+}
+
+export function updateUserAllowedChains(
+  updates: Array<{ username?: string; allowedChains?: string[] }>,
+): UserAuthConfig {
+  const config = ensureUserAuthFile();
+  const updatesByName = new Map<string, string[]>();
+
+  (updates || []).forEach((entry) => {
+    const username = normalizeUsername(String(entry.username || '')).toLowerCase();
+    if (!username) return;
+    updatesByName.set(
+      username,
+      [...new Set((entry.allowedChains || []).map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean))],
+    );
+  });
+
+  if (!updatesByName.size) return config;
+
+  let changed = false;
+  const users = config.users.map((user) => {
+    const nextAllowedChains = updatesByName.get(user.username.toLowerCase());
+    if (!nextAllowedChains) return user;
+    const currentAllowedChains = [...new Set((user.allowedChains || []).map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean))];
+    if (
+      currentAllowedChains.length === nextAllowedChains.length
+      && currentAllowedChains.every((chain, index) => chain === nextAllowedChains[index])
+    ) {
+      return user;
+    }
+    changed = true;
+    return {
+      ...user,
+      allowedChains: nextAllowedChains,
+    };
+  });
+
+  if (!changed) return config;
+  return saveUserAuthConfig({
+    ...config,
+    users,
+  });
+}
+
+export function getAllowedChainsForUser(
+  config: UserAuthConfig,
+  username: string,
+  allChains: string[],
+): string[] {
+  const normalizedAll = [...new Set((allChains || []).map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean))];
+  const user = findUserAuthAccount(config, username);
+  if (!user) return normalizedAll;
+  if (user.role === 'admin') return normalizedAll;
+  if (!user.allowedChains.length) return normalizedAll;
+  const allowed = new Set(user.allowedChains);
+  return normalizedAll.filter((chain) => allowed.has(chain));
 }

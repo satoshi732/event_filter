@@ -29,6 +29,7 @@ const AUDIT_START_STAGGER_MS = 400;
 
 type QueuedAuditJob = BaseAiAuditRow & {
   backendApiKeyOverride?: string | null;
+  ownerUsername?: string | null;
 };
 type AuditMode = ProviderAuditMode;
 
@@ -92,6 +93,7 @@ interface ParsedAuditReport {
 }
 
 export interface AiAuditEvent {
+  ownerUsername: string | null;
   kind: 'queued' | 'started' | 'completed' | 'failed' | 'worker';
   chain: string;
   targetType: 'contract' | 'token';
@@ -161,6 +163,7 @@ let maxConcurrentAudits = 10;
 const queuedSessions = new Set<string>();
 const activeSessions = new Set<string>();
 const activeJobTypes = new Map<string, 'contract' | 'token'>();
+const activeJobOwners = new Map<string, string | null>();
 const queue: QueuedAuditJob[] = [];
 const aiAuditListeners = new Set<(event: AiAuditEvent) => void | Promise<void>>();
 let drainLoopRunning = false;
@@ -181,6 +184,7 @@ function publishAiAuditEvent(job: QueuedAuditJob, patch: {
 }): void {
   const worker = getAiAuditWorkerStatus();
   const event: AiAuditEvent = {
+    ownerUsername: String(job.ownerUsername || '').trim() || null,
     kind: patch.kind,
     chain: job.chain,
     targetType: job.targetType,
@@ -866,12 +870,14 @@ async function drainQueue(): Promise<void> {
       nextAuditStartAt = Date.now() + AUDIT_START_STAGGER_MS;
       activeSessions.add(job.requestSession);
       activeJobTypes.set(job.requestSession, job.targetType);
+      activeJobOwners.set(job.requestSession, String(job.ownerUsername || '').trim() || null);
       void (async () => {
         try {
           await executeAuditJob(job);
         } finally {
           activeSessions.delete(job.requestSession);
           activeJobTypes.delete(job.requestSession);
+          activeJobOwners.delete(job.requestSession);
           void drainQueue();
         }
       })();
@@ -901,12 +907,14 @@ function resumeAudit(job: QueuedAuditJob): void {
   if (queuedSessions.has(job.requestSession) || activeSessions.has(job.requestSession)) return;
   activeSessions.add(job.requestSession);
   activeJobTypes.set(job.requestSession, job.targetType);
+  activeJobOwners.set(job.requestSession, String(job.ownerUsername || '').trim() || null);
   void (async () => {
     try {
       await continueAuditJob(job, { reason: 'resume' });
     } finally {
       activeSessions.delete(job.requestSession);
       activeJobTypes.delete(job.requestSession);
+      activeJobOwners.delete(job.requestSession);
       void drainQueue();
     }
   })();
@@ -939,7 +947,7 @@ export function startAiAuditWorker(): void {
   }
 }
 
-export function getAiAuditWorkerStatus(): {
+export function getAiAuditWorkerStatus(ownerUsername?: string): {
   queued: number;
   active: number;
   capacity: number;
@@ -948,17 +956,25 @@ export function getAiAuditWorkerStatus(): {
   activeContracts: number;
   activeTokens: number;
 } {
-  const queuedContracts = queue.filter((job) => job.targetType === 'contract').length;
-  const queuedTokens = queue.filter((job) => job.targetType === 'token').length;
+  const ownerKey = String(ownerUsername || '').trim().toLowerCase();
+  const matchingQueue = ownerKey
+    ? queue.filter((job) => String(job.ownerUsername || '').trim().toLowerCase() === ownerKey)
+    : queue;
+  const queuedContracts = matchingQueue.filter((job) => job.targetType === 'contract').length;
+  const queuedTokens = matchingQueue.filter((job) => job.targetType === 'token').length;
   let activeContracts = 0;
   let activeTokens = 0;
-  for (const type of activeJobTypes.values()) {
+  let active = 0;
+  for (const [requestSession, type] of activeJobTypes.entries()) {
+    const jobOwner = String(activeJobOwners.get(requestSession) || '').trim().toLowerCase();
+    if (ownerKey && jobOwner !== ownerKey) continue;
+    active += 1;
     if (type === 'contract') activeContracts += 1;
     if (type === 'token') activeTokens += 1;
   }
   return {
-    queued: queue.length,
-    active: activeSessions.size,
+    queued: matchingQueue.length,
+    active,
     capacity: maxConcurrentAudits,
     queuedContracts,
     queuedTokens,
@@ -986,22 +1002,24 @@ export function subscribeAiAuditEvents(
 
 export function enqueueContractAiAudit(
   row: BaseAiAuditRow | null | undefined,
-  options: { backendApiKey?: string | null } = {},
+  options: { backendApiKey?: string | null; ownerUsername?: string | null } = {},
 ): void {
   if (!row || row.targetType !== 'contract') return;
   enqueueAudit({
     ...row,
     backendApiKeyOverride: String(options.backendApiKey || '').trim() || null,
+    ownerUsername: String(options.ownerUsername || '').trim() || null,
   });
 }
 
 export function enqueueTokenAiAudit(
   row: BaseAiAuditRow | null | undefined,
-  options: { backendApiKey?: string | null } = {},
+  options: { backendApiKey?: string | null; ownerUsername?: string | null } = {},
 ): void {
   if (!row || row.targetType !== 'token') return;
   enqueueAudit({
     ...row,
     backendApiKeyOverride: String(options.backendApiKey || '').trim() || null,
+    ownerUsername: String(options.ownerUsername || '').trim() || null,
   });
 }

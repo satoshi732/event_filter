@@ -338,6 +338,7 @@
             username: '',
             password: '',
             has_password: false,
+            users: [],
             https_enabled: false,
             tls_cert_path: '',
             tls_key_path: '',
@@ -347,6 +348,7 @@
             role: CURRENT_USER_ROLE,
             ai_api_key: '',
             has_ai_api_key: false,
+            allowed_chains: [],
             current_password: '',
             new_password: '',
             confirm_password: '',
@@ -487,12 +489,34 @@
 
       function applySettingsPayload(data) {
         if (!data) return;
+        const incomingAccess = data.runtime_settings?.access || {};
+        const normalizedAccessUsers = Array.isArray(incomingAccess.users)
+          ? incomingAccess.users.map((user) => {
+            const allowedChains = Array.isArray(user?.allowed_chains)
+              ? user.allowed_chains.map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean)
+              : [];
+            return {
+              ...user,
+              allowed_chains: allowedChains,
+              allowed_chains_text: allowedChains.join(', '),
+            };
+          })
+          : (state.settings.runtime_settings.access?.users || []);
+        const accountAllowedChains = Array.isArray(data.runtime_settings?.account?.allowed_chains)
+          ? data.runtime_settings.account.allowed_chains.map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean)
+          : (state.settings.runtime_settings.account?.allowed_chains || []);
         state.settings.runtime_settings = {
           ...state.settings.runtime_settings,
           ...(data.runtime_settings || {}),
+          access: {
+            ...(state.settings.runtime_settings.access || {}),
+            ...incomingAccess,
+            users: normalizedAccessUsers,
+          },
           account: {
             ...(state.settings.runtime_settings.account || {}),
             ...(data.runtime_settings?.account || {}),
+            allowed_chains: accountAllowedChains,
             current_password: '',
             new_password: '',
             confirm_password: '',

@@ -618,6 +618,10 @@
                     <span class="muted">Only your username, password, and AI audit API key are editable here.</span>
                   </div>
                   <div class="settings-inline-grid">
+                    <div class="stack-label">
+                      <span>Assigned Chains</span>
+                      <span class="mono">{{ ((settings.runtime_settings.account.allowed_chains || []).length ? settings.runtime_settings.account.allowed_chains.join(', ') : 'all visible chains') }}</span>
+                    </div>
                     <label class="stack-label">
                       <span>Username</span>
                       <input v-model="settings.runtime_settings.account.username" type="text" autocomplete="username">
@@ -768,6 +772,42 @@
                     <span>TLS Key Path</span>
                     <input v-model="settings.runtime_settings.access.tls_key_path" type="text" placeholder="/etc/ssl/private/app.key">
                   </label>
+                </div>
+
+                <h3>User Chain Access</h3>
+                <p class="muted">Use comma-separated chain names. Leave blank to allow every supported chain for that user. Supported chains: <span class="mono">{{ chains.join(', ') || '--' }}</span></p>
+                <div class="table-wrap compact">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>User</th>
+                        <th>Role</th>
+                        <th>Assigned Chains</th>
+                        <th>API Key</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-if="!(settings.runtime_settings.access.users || []).length">
+                        <td colspan="4" class="muted">No users</td>
+                      </tr>
+                      <tr v-for="user in settings.runtime_settings.access.users" :key="`access-user-${user.username}`">
+                        <td class="mono">{{ user.username }}</td>
+                        <td>{{ user.role }}</td>
+                        <td>
+                          <input
+                            v-model="user.allowed_chains_text"
+                            type="text"
+                            placeholder="ethereum, bsc, base"
+                          >
+                        </td>
+                        <td>
+                          <span class="chip small" :class="user.has_ai_api_key ? 'ok' : 'plain'">
+                            {{ user.has_ai_api_key ? 'stored' : 'none' }}
+                          </span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
               </div>
 

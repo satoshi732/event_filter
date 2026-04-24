@@ -30,6 +30,91 @@ const LOOP_INTERVAL_MS = 2_500;
 const FAILURE_BACKOFF_MS = 10_000;
 const DEFAULT_AUTO_ANALYSIS_PROVIDER = getDefaultAiAuditProvider();
 
+export interface AutoAnalysisStatus {
+  enabled: boolean;
+  stopping: boolean;
+  chain: string | null;
+  phase: AutoAnalysisPhase;
+  queued: number;
+  active: number;
+  capacity: number;
+  cycle: number;
+  lastAction: string;
+  updatedAt: string;
+}
+
+export interface AutoAnalysisRuntimeConfig {
+  queueCapacity: number;
+  roundAuditLimit: number;
+  roundRestSeconds: number;
+  continueOnEmptyRound: boolean;
+  stopAtDateTime: string | null;
+  tokenSharePercent: number;
+  contractSharePercent: number;
+  provider: string;
+  model: string;
+  contractMinTvlUsd: number;
+  tokenMinPriceUsd: number;
+  requireTokenSync: boolean;
+  requireContractSelectors: boolean;
+  skipSeenContracts: boolean;
+  onePerContractPattern: boolean;
+  retryFailedAudits: boolean;
+  excludeAuditedContracts: boolean;
+  excludeAuditedTokens: boolean;
+}
+
+interface AutoAnalysisControls {
+  runRound: (chain: string) => Promise<unknown>;
+  isRoundRunning: () => boolean;
+}
+
+export interface AutoAnalysisStatusEvent extends AutoAnalysisStatus {
+  username: string;
+}
+
+type AutoAnalysisListener = (event: AutoAnalysisStatusEvent) => void | Promise<void>;
+
+interface AutoAnalysisContext {
+  username: string;
+  runtimeConfig: AutoAnalysisRuntimeConfig;
+  state: AutoAnalysisStatus;
+  loopPromise: Promise<void> | null;
+  roundQueuedSinceRest: number;
+  roundRestUntilMs: number;
+  backendApiKey: string;
+}
+
+const listeners = new Set<AutoAnalysisListener>();
+const contexts = new Map<string, AutoAnalysisContext>();
+
+const DEFAULT_AUTO_ANALYSIS_CONFIG: AutoAnalysisRuntimeConfig = {
+  queueCapacity: 10,
+  roundAuditLimit: 5,
+  roundRestSeconds: 60,
+  continueOnEmptyRound: false,
+  stopAtDateTime: null,
+  tokenSharePercent: 40,
+  contractSharePercent: 60,
+  provider: DEFAULT_AUTO_ANALYSIS_PROVIDER,
+  model: getDefaultAiAuditModel(DEFAULT_AUTO_ANALYSIS_PROVIDER),
+  contractMinTvlUsd: 10_000,
+  tokenMinPriceUsd: 0.001,
+  requireTokenSync: true,
+  requireContractSelectors: true,
+  skipSeenContracts: true,
+  onePerContractPattern: true,
+  retryFailedAudits: true,
+  excludeAuditedContracts: true,
+  excludeAuditedTokens: true,
+};
+
+let controls: AutoAnalysisControls | null = null;
+
+function normalizeUsernameKey(value: unknown): string {
+  return String(value || '').trim().toLowerCase();
+}
+
 function parsePositiveInt(value: unknown, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -70,91 +155,72 @@ function normalizeDateTimeLocal(value: unknown): string | null {
   return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
-export interface AutoAnalysisStatus {
-  enabled: boolean;
-  stopping: boolean;
-  chain: string | null;
-  phase: AutoAnalysisPhase;
-  queued: number;
-  active: number;
-  capacity: number;
-  cycle: number;
-  lastAction: string;
-  updatedAt: string;
+function normalizeRuntimeConfig(input: Partial<AutoAnalysisRuntimeConfig> | null | undefined, base: AutoAnalysisRuntimeConfig): AutoAnalysisRuntimeConfig {
+  const merged = {
+    ...DEFAULT_AUTO_ANALYSIS_CONFIG,
+    ...base,
+    ...(input || {}),
+  };
+  const provider = normalizeAiAuditProvider(merged.provider);
+  return {
+    queueCapacity: parsePositiveInt(merged.queueCapacity, DEFAULT_AUTO_ANALYSIS_CONFIG.queueCapacity),
+    roundAuditLimit: parsePositiveInt(merged.roundAuditLimit, DEFAULT_AUTO_ANALYSIS_CONFIG.roundAuditLimit),
+    roundRestSeconds: parsePositiveInt(merged.roundRestSeconds, DEFAULT_AUTO_ANALYSIS_CONFIG.roundRestSeconds),
+    continueOnEmptyRound: parseBoolean(merged.continueOnEmptyRound, DEFAULT_AUTO_ANALYSIS_CONFIG.continueOnEmptyRound),
+    stopAtDateTime: normalizeDateTimeLocal(merged.stopAtDateTime),
+    tokenSharePercent: parsePositiveInt(merged.tokenSharePercent, DEFAULT_AUTO_ANALYSIS_CONFIG.tokenSharePercent),
+    contractSharePercent: parsePositiveInt(merged.contractSharePercent, DEFAULT_AUTO_ANALYSIS_CONFIG.contractSharePercent),
+    provider,
+    model: normalizeAiAuditModel(provider, merged.model),
+    contractMinTvlUsd: parsePositiveFloat(merged.contractMinTvlUsd, DEFAULT_AUTO_ANALYSIS_CONFIG.contractMinTvlUsd),
+    tokenMinPriceUsd: parsePositiveFloat(merged.tokenMinPriceUsd, DEFAULT_AUTO_ANALYSIS_CONFIG.tokenMinPriceUsd),
+    requireTokenSync: parseBoolean(merged.requireTokenSync, DEFAULT_AUTO_ANALYSIS_CONFIG.requireTokenSync),
+    requireContractSelectors: parseBoolean(merged.requireContractSelectors, DEFAULT_AUTO_ANALYSIS_CONFIG.requireContractSelectors),
+    skipSeenContracts: parseBoolean(merged.skipSeenContracts, DEFAULT_AUTO_ANALYSIS_CONFIG.skipSeenContracts),
+    onePerContractPattern: parseBoolean(merged.onePerContractPattern, DEFAULT_AUTO_ANALYSIS_CONFIG.onePerContractPattern),
+    retryFailedAudits: parseBoolean(merged.retryFailedAudits, DEFAULT_AUTO_ANALYSIS_CONFIG.retryFailedAudits),
+    excludeAuditedContracts: parseBoolean(merged.excludeAuditedContracts, DEFAULT_AUTO_ANALYSIS_CONFIG.excludeAuditedContracts),
+    excludeAuditedTokens: parseBoolean(merged.excludeAuditedTokens, DEFAULT_AUTO_ANALYSIS_CONFIG.excludeAuditedTokens),
+  };
 }
 
-export interface AutoAnalysisRuntimeConfig {
-  queueCapacity: number;
-  roundAuditLimit: number;
-  roundRestSeconds: number;
-  continueOnEmptyRound: boolean;
-  stopAtDateTime: string | null;
-  tokenSharePercent: number;
-  contractSharePercent: number;
-  provider: string;
-  model: string;
-  contractMinTvlUsd: number;
-  tokenMinPriceUsd: number;
-  requireTokenSync: boolean;
-  requireContractSelectors: boolean;
-  skipSeenContracts: boolean;
-  onePerContractPattern: boolean;
-  retryFailedAudits: boolean;
-  excludeAuditedContracts: boolean;
-  excludeAuditedTokens: boolean;
+function createDefaultState(): AutoAnalysisStatus {
+  const persisted = loadPersistedAutoAnalysisState();
+  return {
+    enabled: persisted.enabled,
+    stopping: persisted.stopping,
+    chain: persisted.chain,
+    phase: persisted.phase,
+    queued: 0,
+    active: 0,
+    capacity: getAiAuditWorkerStatus().capacity,
+    cycle: persisted.cycle,
+    lastAction: persisted.lastAction,
+    updatedAt: new Date().toISOString(),
+  };
 }
 
-interface AutoAnalysisControls {
-  runRound: (chain: string) => Promise<unknown>;
-  isRoundRunning: () => boolean;
+function ensureContext(username: string): AutoAnalysisContext {
+  const key = normalizeUsernameKey(username);
+  const existing = contexts.get(key);
+  if (existing) return existing;
+  const context: AutoAnalysisContext = {
+    username: key,
+    runtimeConfig: { ...DEFAULT_AUTO_ANALYSIS_CONFIG },
+    state: createDefaultState(),
+    loopPromise: null,
+    roundQueuedSinceRest: 0,
+    roundRestUntilMs: 0,
+    backendApiKey: '',
+  };
+  context.state.enabled = false;
+  context.state.stopping = false;
+  context.state.chain = null;
+  context.state.phase = 'idle';
+  context.state.lastAction = 'Auto analysis is idle';
+  contexts.set(key, context);
+  return context;
 }
-
-type AutoAnalysisListener = (status: AutoAnalysisStatus) => void | Promise<void>;
-
-const listeners = new Set<AutoAnalysisListener>();
-
-const DEFAULT_AUTO_ANALYSIS_CONFIG: AutoAnalysisRuntimeConfig = {
-  queueCapacity: 10,
-  roundAuditLimit: 5,
-  roundRestSeconds: 60,
-  continueOnEmptyRound: false,
-  stopAtDateTime: null,
-  tokenSharePercent: 40,
-  contractSharePercent: 60,
-  provider: DEFAULT_AUTO_ANALYSIS_PROVIDER,
-  model: getDefaultAiAuditModel(DEFAULT_AUTO_ANALYSIS_PROVIDER),
-  contractMinTvlUsd: 10_000,
-  tokenMinPriceUsd: 0.001,
-  requireTokenSync: true,
-  requireContractSelectors: true,
-  skipSeenContracts: true,
-  onePerContractPattern: true,
-  retryFailedAudits: true,
-  excludeAuditedContracts: true,
-  excludeAuditedTokens: true,
-};
-
-let runtimeConfig: AutoAnalysisRuntimeConfig = { ...DEFAULT_AUTO_ANALYSIS_CONFIG };
-
-const persistedState = loadPersistedAutoAnalysisState();
-
-const state: AutoAnalysisStatus = {
-  enabled: persistedState.enabled,
-  stopping: persistedState.stopping,
-  chain: persistedState.chain,
-  phase: persistedState.phase,
-  queued: 0,
-  active: 0,
-  capacity: getAiAuditWorkerStatus().capacity,
-  cycle: persistedState.cycle,
-  lastAction: persistedState.lastAction,
-  updatedAt: new Date().toISOString(),
-};
-
-let controls: AutoAnalysisControls | null = null;
-let loopPromise: Promise<void> | null = null;
-let roundQueuedSinceRest = 0;
-let roundRestUntilMs = 0;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -196,91 +262,69 @@ function shouldTreatAuditAsHandled(
   return false;
 }
 
-function persistState(): void {
+function persistState(_context: AutoAnalysisContext): void {
   persistAutoAnalysisState({
-    enabled: state.enabled,
-    stopping: state.stopping,
-    chain: state.chain,
-    phase: state.phase,
-    cycle: state.cycle,
-    lastAction: state.lastAction,
+    enabled: false,
+    stopping: false,
+    chain: null,
+    phase: 'idle',
+    cycle: 0,
+    lastAction: 'Auto analysis is idle',
   });
 }
 
-function refreshWorkerStatus(): void {
-  const worker = getAiAuditWorkerStatus();
-  state.queued = worker.queued;
-  state.active = worker.active;
-  state.capacity = worker.capacity;
+function recomputeWorkerCapacity(): void {
+  const capacities = Array.from(contexts.values())
+    .map((context) => Number(context.runtimeConfig.queueCapacity || 0))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  setAiAuditWorkerCapacity(capacities.length ? Math.max(...capacities) : DEFAULT_AUTO_ANALYSIS_CONFIG.queueCapacity);
 }
 
-function publish(): void {
-  refreshWorkerStatus();
-  state.updatedAt = new Date().toISOString();
+function refreshWorkerStatus(context: AutoAnalysisContext): void {
+  const worker = getAiAuditWorkerStatus(context.username);
+  context.state.queued = worker.queued;
+  context.state.active = worker.active;
+  context.state.capacity = worker.capacity;
+}
+
+function publish(context: AutoAnalysisContext): void {
+  refreshWorkerStatus(context);
+  context.state.updatedAt = new Date().toISOString();
+  const payload: AutoAnalysisStatusEvent = {
+    username: context.username,
+    ...context.state,
+  };
   for (const listener of listeners) {
     try {
-      void listener({ ...state });
+      void listener(payload);
     } catch {
       // no-op
     }
   }
 }
 
-function normalizeRuntimeConfig(input: Partial<AutoAnalysisRuntimeConfig> | null | undefined): AutoAnalysisRuntimeConfig {
-  const merged = {
-    ...DEFAULT_AUTO_ANALYSIS_CONFIG,
-    ...runtimeConfig,
-    ...(input || {}),
-  };
-  const provider = normalizeAiAuditProvider(merged.provider);
-  return {
-    queueCapacity: parsePositiveInt(merged.queueCapacity, DEFAULT_AUTO_ANALYSIS_CONFIG.queueCapacity),
-    roundAuditLimit: parsePositiveInt(merged.roundAuditLimit, DEFAULT_AUTO_ANALYSIS_CONFIG.roundAuditLimit),
-    roundRestSeconds: parsePositiveInt(merged.roundRestSeconds, DEFAULT_AUTO_ANALYSIS_CONFIG.roundRestSeconds),
-    continueOnEmptyRound: parseBoolean(merged.continueOnEmptyRound, DEFAULT_AUTO_ANALYSIS_CONFIG.continueOnEmptyRound),
-    stopAtDateTime: normalizeDateTimeLocal(merged.stopAtDateTime),
-    tokenSharePercent: parsePositiveInt(merged.tokenSharePercent, DEFAULT_AUTO_ANALYSIS_CONFIG.tokenSharePercent),
-    contractSharePercent: parsePositiveInt(merged.contractSharePercent, DEFAULT_AUTO_ANALYSIS_CONFIG.contractSharePercent),
-    provider,
-    model: normalizeAiAuditModel(provider, merged.model),
-    contractMinTvlUsd: parsePositiveFloat(merged.contractMinTvlUsd, DEFAULT_AUTO_ANALYSIS_CONFIG.contractMinTvlUsd),
-    tokenMinPriceUsd: parsePositiveFloat(merged.tokenMinPriceUsd, DEFAULT_AUTO_ANALYSIS_CONFIG.tokenMinPriceUsd),
-    requireTokenSync: parseBoolean(merged.requireTokenSync, DEFAULT_AUTO_ANALYSIS_CONFIG.requireTokenSync),
-    requireContractSelectors: parseBoolean(merged.requireContractSelectors, DEFAULT_AUTO_ANALYSIS_CONFIG.requireContractSelectors),
-    skipSeenContracts: parseBoolean(merged.skipSeenContracts, DEFAULT_AUTO_ANALYSIS_CONFIG.skipSeenContracts),
-    onePerContractPattern: parseBoolean(merged.onePerContractPattern, DEFAULT_AUTO_ANALYSIS_CONFIG.onePerContractPattern),
-    retryFailedAudits: parseBoolean(merged.retryFailedAudits, DEFAULT_AUTO_ANALYSIS_CONFIG.retryFailedAudits),
-    excludeAuditedContracts: parseBoolean(merged.excludeAuditedContracts, DEFAULT_AUTO_ANALYSIS_CONFIG.excludeAuditedContracts),
-    excludeAuditedTokens: parseBoolean(merged.excludeAuditedTokens, DEFAULT_AUTO_ANALYSIS_CONFIG.excludeAuditedTokens),
-  };
+function setStatus(context: AutoAnalysisContext, patch: Partial<AutoAnalysisStatus>): void {
+  Object.assign(context.state, patch);
+  persistState(context);
+  publish(context);
 }
 
-function getRuntimeConfig(): AutoAnalysisRuntimeConfig {
-  return runtimeConfig;
+function totalInFlight(context: AutoAnalysisContext): number {
+  refreshWorkerStatus(context);
+  return context.state.queued + context.state.active;
 }
 
-function setStatus(patch: Partial<AutoAnalysisStatus>): void {
-  Object.assign(state, patch);
-  persistState();
-  publish();
-}
-
-function totalInFlight(): number {
-  refreshWorkerStatus();
-  return state.queued + state.active;
-}
-
-function currentWorkerStatus() {
-  const worker = getAiAuditWorkerStatus();
-  state.queued = worker.queued;
-  state.active = worker.active;
-  state.capacity = worker.capacity;
+function currentWorkerStatus(context: AutoAnalysisContext) {
+  const worker = getAiAuditWorkerStatus(context.username);
+  context.state.queued = worker.queued;
+  context.state.active = worker.active;
+  context.state.capacity = worker.capacity;
   return worker;
 }
 
-function resetRoundWindow(): void {
-  roundQueuedSinceRest = 0;
-  roundRestUntilMs = 0;
+function resetRoundWindow(context: AutoAnalysisContext): void {
+  context.roundQueuedSinceRest = 0;
+  context.roundRestUntilMs = 0;
 }
 
 function parseDateTimeLocal(value: string | null | undefined): { timestamp: number; label: string } | null {
@@ -314,8 +358,8 @@ function hasReachedConfiguredStopTime(stopAtDateTime: string | null | undefined,
   };
 }
 
-function selectEligibleContracts(chain: string, limit: number): ContractRegistryRow[] {
-  const config = getRuntimeConfig();
+function selectEligibleContracts(context: AutoAnalysisContext, chain: string, limit: number): ContractRegistryRow[] {
+  const config = context.runtimeConfig;
   const contracts = listDashboardContractsRegistry(chain);
   if (!contracts.length) return [];
 
@@ -367,8 +411,8 @@ function selectEligibleContracts(chain: string, limit: number): ContractRegistry
   return selected.slice(0, Math.max(0, limit));
 }
 
-function selectEligibleTokens(chain: string, limit: number) {
-  const config = getRuntimeConfig();
+function selectEligibleTokens(context: AutoAnalysisContext, chain: string, limit: number) {
+  const config = context.runtimeConfig;
   const tokens = listDashboardStoredTokens(chain);
   if (!tokens.length) return [];
   const audits = getLatestTokenAiAudits(chain, tokens.map((row) => row.token));
@@ -391,35 +435,37 @@ function selectEligibleTokens(chain: string, limit: number) {
     .slice(0, Math.max(0, limit));
 }
 
-function computeTargetSlots(capacity: number) {
-  const config = getRuntimeConfig();
+function computeTargetSlots(context: AutoAnalysisContext, capacity: number) {
   const safeCapacity = Math.max(1, capacity);
-  const tokenShare = Math.max(0, config.tokenSharePercent);
-  const contractShare = Math.max(0, config.contractSharePercent);
+  const tokenShare = Math.max(0, context.runtimeConfig.tokenSharePercent);
+  const contractShare = Math.max(0, context.runtimeConfig.contractSharePercent);
   const totalShare = tokenShare + contractShare || 100;
   const contractSlots = Math.max(0, Math.round((safeCapacity * contractShare) / totalShare));
   const tokenSlots = Math.max(0, safeCapacity - contractSlots);
   return { contractSlots, tokenSlots };
 }
 
-async function fillAuditPool(chain: string): Promise<number> {
-  const config = getRuntimeConfig();
-  setAiAuditWorkerCapacity(config.queueCapacity);
-  const worker = currentWorkerStatus();
-  const availableSlots = Math.max(0, worker.capacity - (worker.queued + worker.active));
+async function fillAuditPool(context: AutoAnalysisContext, chain: string): Promise<number> {
+  recomputeWorkerCapacity();
+  const worker = currentWorkerStatus(context);
+  const globalAvailable = Math.max(0, worker.capacity - (getAiAuditWorkerStatus().queued + getAiAuditWorkerStatus().active));
+  const personalCapacity = Math.max(1, context.runtimeConfig.queueCapacity);
+  const ownInFlight = worker.queued + worker.active;
+  const personalAvailable = Math.max(0, personalCapacity - ownInFlight);
+  const availableSlots = Math.max(0, Math.min(globalAvailable, personalAvailable));
   if (!availableSlots) return 0;
-  const roundLimit = Math.max(1, config.roundAuditLimit);
-  const roundRemaining = Math.max(0, roundLimit - roundQueuedSinceRest);
+  const roundLimit = Math.max(1, context.runtimeConfig.roundAuditLimit);
+  const roundRemaining = Math.max(0, roundLimit - context.roundQueuedSinceRest);
   if (!roundRemaining) return 0;
   const queueableSlots = Math.min(availableSlots, roundRemaining);
   if (!queueableSlots) return 0;
 
-  const targets = computeTargetSlots(queueableSlots);
+  const targets = computeTargetSlots(context, queueableSlots);
   const contractNeed = Math.max(0, Math.min(queueableSlots, targets.contractSlots));
   const tokenNeed = Math.max(0, Math.min(queueableSlots - contractNeed, targets.tokenSlots));
 
-  const contractCandidates = selectEligibleContracts(chain, contractNeed);
-  const tokenCandidates = selectEligibleTokens(chain, tokenNeed);
+  const contractCandidates = selectEligibleContracts(context, chain, contractNeed);
+  const tokenCandidates = selectEligibleTokens(context, chain, tokenNeed);
 
   let queuedContracts = 0;
   let queuedTokens = 0;
@@ -429,10 +475,13 @@ async function fillAuditPool(chain: string): Promise<number> {
       chain,
       contractAddr: candidate.contractAddr,
       title: 'AI Auto Audit',
-      provider: config.provider,
-      model: config.model,
+      provider: context.runtimeConfig.provider,
+      model: context.runtimeConfig.model,
     });
-    enqueueContractAiAudit(row);
+    enqueueContractAiAudit(row, {
+      backendApiKey: context.backendApiKey || null,
+      ownerUsername: context.username,
+    });
     queuedContracts += 1;
   }
 
@@ -441,53 +490,55 @@ async function fillAuditPool(chain: string): Promise<number> {
       chain,
       tokenAddr: candidate.token,
       title: 'AI Auto Audit',
-      provider: config.provider,
-      model: config.model,
+      provider: context.runtimeConfig.provider,
+      model: context.runtimeConfig.model,
     });
-    enqueueTokenAiAudit(row);
+    enqueueTokenAiAudit(row, {
+      backendApiKey: context.backendApiKey || null,
+      ownerUsername: context.username,
+    });
     queuedTokens += 1;
   }
 
   const used = queuedContracts + queuedTokens;
   if (!used) return 0;
-  roundQueuedSinceRest = Math.min(roundLimit, roundQueuedSinceRest + used);
-  const shouldRestAfterBatch = roundQueuedSinceRest >= roundLimit;
+  context.roundQueuedSinceRest = Math.min(roundLimit, context.roundQueuedSinceRest + used);
+  const shouldRestAfterBatch = context.roundQueuedSinceRest >= roundLimit;
   if (shouldRestAfterBatch) {
-    roundRestUntilMs = Date.now() + (Math.max(1, config.roundRestSeconds) * 1000);
+    context.roundRestUntilMs = Date.now() + (Math.max(1, context.runtimeConfig.roundRestSeconds) * 1000);
   }
 
-  setStatus({
+  setStatus(context, {
     phase: 'auditing',
-    lastAction: `Queued ${queuedContracts} contract / ${queuedTokens} token audit${used === 1 ? '' : 's'} on ${chain.toUpperCase()}${shouldRestAfterBatch ? `. Cooling down for ${Math.max(1, config.roundRestSeconds)}s after this batch` : ''}`,
+    lastAction: `Queued ${queuedContracts} contract / ${queuedTokens} token audit${used === 1 ? '' : 's'} on ${chain.toUpperCase()}${shouldRestAfterBatch ? `. Cooling down for ${Math.max(1, context.runtimeConfig.roundRestSeconds)}s after this batch` : ''}`,
   });
   return used;
 }
 
-async function runLoop(): Promise<void> {
+async function runLoop(context: AutoAnalysisContext): Promise<void> {
   try {
-    while (state.enabled || state.stopping) {
-      const chain = state.chain;
+    while (context.state.enabled || context.state.stopping) {
+      const chain = context.state.chain;
       if (!chain) {
-        setStatus({
+        setStatus(context, {
           enabled: false,
           stopping: false,
           phase: 'idle',
           lastAction: 'Auto analysis stopped: no chain selected',
         });
-        persistState();
         return;
       }
 
-      if (!state.enabled) {
-        if (totalInFlight() > 0) {
-          setStatus({
+      if (!context.state.enabled) {
+        if (totalInFlight(context) > 0) {
+          setStatus(context, {
             phase: 'draining',
-            lastAction: `Draining ${totalInFlight()} in-flight audit${totalInFlight() === 1 ? '' : 's'} on ${chain.toUpperCase()}`,
+            lastAction: `Draining ${totalInFlight(context)} in-flight audit${totalInFlight(context) === 1 ? '' : 's'} on ${chain.toUpperCase()}`,
           });
           await sleep(LOOP_INTERVAL_MS);
           continue;
         }
-        setStatus({
+        setStatus(context, {
           stopping: false,
           phase: 'idle',
           lastAction: 'Auto analysis stopped',
@@ -496,7 +547,7 @@ async function runLoop(): Promise<void> {
       }
 
       if (!controls) {
-        setStatus({
+        setStatus(context, {
           phase: 'idle',
           lastAction: 'Auto analysis controls not configured yet',
         });
@@ -504,15 +555,15 @@ async function runLoop(): Promise<void> {
         continue;
       }
 
-      const stopTimeState = hasReachedConfiguredStopTime(getRuntimeConfig().stopAtDateTime);
+      const stopTimeState = hasReachedConfiguredStopTime(context.runtimeConfig.stopAtDateTime);
       if (stopTimeState.reached) {
-        stopAutoAnalysis(`Auto analysis stop time ${stopTimeState.label || 'configured cutoff'} reached on ${chain.toUpperCase()}`);
+        stopAutoAnalysis(context.username, stopTimeState.label ? `Auto analysis stop time ${stopTimeState.label} reached on ${chain.toUpperCase()}` : 'Configured cutoff reached');
         await sleep(LOOP_INTERVAL_MS);
         continue;
       }
 
       if (controls.isRoundRunning()) {
-        setStatus({
+        setStatus(context, {
           phase: 'round',
           lastAction: `Waiting for the current ${chain.toUpperCase()} round to finish`,
         });
@@ -521,58 +572,58 @@ async function runLoop(): Promise<void> {
       }
 
       const now = Date.now();
-      if (roundRestUntilMs > now) {
-        const remainingSeconds = Math.max(1, Math.ceil((roundRestUntilMs - now) / 1000));
-        setStatus({
+      if (context.roundRestUntilMs > now) {
+        const remainingSeconds = Math.max(1, Math.ceil((context.roundRestUntilMs - now) / 1000));
+        setStatus(context, {
           phase: 'resting',
           lastAction: `Cooling down for ${remainingSeconds}s before the next auto-analysis batch on ${chain.toUpperCase()}`,
         });
-        await sleep(Math.min(LOOP_INTERVAL_MS, roundRestUntilMs - now));
+        await sleep(Math.min(LOOP_INTERVAL_MS, context.roundRestUntilMs - now));
         continue;
       }
-      if (roundRestUntilMs > 0) {
-        resetRoundWindow();
+      if (context.roundRestUntilMs > 0) {
+        resetRoundWindow(context);
       }
 
-      setStatus({
+      setStatus(context, {
         phase: 'screening',
         lastAction: `Scanning ${chain.toUpperCase()} for eligible auto-analysis candidates`,
       });
-      const enqueued = await fillAuditPool(chain);
+      const enqueued = await fillAuditPool(context, chain);
       if (enqueued > 0) {
         await sleep(LOOP_INTERVAL_MS);
         continue;
       }
 
-      if (totalInFlight() > 0) {
-        setStatus({
+      if (totalInFlight(context) > 0) {
+        setStatus(context, {
           phase: 'auditing',
-          lastAction: `Watching ${totalInFlight()} in-flight audit${totalInFlight() === 1 ? '' : 's'} on ${chain.toUpperCase()}`,
+          lastAction: `Watching ${totalInFlight(context)} in-flight audit${totalInFlight(context) === 1 ? '' : 's'} on ${chain.toUpperCase()}`,
         });
         await sleep(LOOP_INTERVAL_MS);
         continue;
       }
 
-      if (!getRuntimeConfig().continueOnEmptyRound) {
-        stopAutoAnalysis(`No eligible candidates left on ${chain.toUpperCase()}. Auto analysis stopped because next-round continuation is disabled`);
+      if (!context.runtimeConfig.continueOnEmptyRound) {
+        stopAutoAnalysis(context.username, `No eligible candidates left on ${chain.toUpperCase()}. Auto analysis stopped because next-round continuation is disabled`);
         await sleep(LOOP_INTERVAL_MS);
         continue;
       }
 
-      setStatus({
+      setStatus(context, {
         phase: 'round',
         lastAction: `No eligible contracts left on ${chain.toUpperCase()}. Starting the next round`,
       });
       try {
         await controls.runRound(chain);
-        setStatus({
-          cycle: state.cycle + 1,
+        setStatus(context, {
+          cycle: context.state.cycle + 1,
           phase: 'screening',
           lastAction: `Round finished on ${chain.toUpperCase()}. Screening new contracts`,
         });
       } catch (error) {
-        logger.error(`[auto-analysis] Round failed for ${chain}`, error);
-        setStatus({
+        logger.error(`[auto-analysis] Round failed for ${context.username}/${chain}`, error);
+        setStatus(context, {
           phase: 'idle',
           lastAction: `Round failed on ${chain.toUpperCase()}: ${(error as Error).message}`,
         });
@@ -580,66 +631,85 @@ async function runLoop(): Promise<void> {
       }
     }
   } finally {
-    loopPromise = null;
-    publish();
+    context.loopPromise = null;
+    publish(context);
   }
 }
 
-function ensureLoop(): void {
-  if (loopPromise) return;
-  loopPromise = runLoop();
+function ensureLoop(context: AutoAnalysisContext): void {
+  if (context.loopPromise) return;
+  context.loopPromise = runLoop(context);
 }
 
 export function configureAutoAnalysisEngine(nextControls: AutoAnalysisControls): void {
   controls = nextControls;
 }
 
-export function getAutoAnalysisRuntimeConfig(): AutoAnalysisRuntimeConfig {
-  return { ...runtimeConfig };
+export function getAutoAnalysisRuntimeConfig(username: string): AutoAnalysisRuntimeConfig {
+  const context = ensureContext(username);
+  return { ...context.runtimeConfig };
 }
 
-export function setAutoAnalysisRuntimeConfig(input: Partial<AutoAnalysisRuntimeConfig> | null | undefined): AutoAnalysisRuntimeConfig {
-  runtimeConfig = normalizeRuntimeConfig(input);
-  setAiAuditWorkerCapacity(runtimeConfig.queueCapacity);
-  refreshWorkerStatus();
-  publish();
-  return getAutoAnalysisRuntimeConfig();
+export function setAutoAnalysisRuntimeConfig(
+  username: string,
+  input: Partial<AutoAnalysisRuntimeConfig> | null | undefined,
+): AutoAnalysisRuntimeConfig {
+  const context = ensureContext(username);
+  context.runtimeConfig = normalizeRuntimeConfig(input, context.runtimeConfig);
+  recomputeWorkerCapacity();
+  refreshWorkerStatus(context);
+  publish(context);
+  return { ...context.runtimeConfig };
 }
 
-export function getAutoAnalysisStatus(): AutoAnalysisStatus {
-  refreshWorkerStatus();
-  return { ...state };
+export function getAutoAnalysisStatus(username: string): AutoAnalysisStatus {
+  const context = ensureContext(username);
+  refreshWorkerStatus(context);
+  return { ...context.state };
 }
 
 export function subscribeAutoAnalysisStatus(listener: AutoAnalysisListener): () => void {
   listeners.add(listener);
-  void listener({ ...getAutoAnalysisStatus() });
+  for (const context of contexts.values()) {
+    void listener({
+      username: context.username,
+      ...getAutoAnalysisStatus(context.username),
+    });
+  }
   return () => {
     listeners.delete(listener);
   };
 }
 
-export function startAutoAnalysis(chain: string): AutoAnalysisStatus {
+export function startAutoAnalysis(
+  username: string,
+  chain: string,
+  options: { backendApiKey?: string | null } = {},
+): AutoAnalysisStatus {
+  const context = ensureContext(username);
   const normalizedChain = String(chain || '').trim().toLowerCase();
   if (!normalizedChain) {
     throw new Error('Auto analysis requires a chain');
   }
-  resetRoundWindow();
-  setStatus({
+  if (options.backendApiKey !== undefined) {
+    context.backendApiKey = String(options.backendApiKey || '').trim();
+  }
+  resetRoundWindow(context);
+  setStatus(context, {
     enabled: true,
     stopping: false,
     chain: normalizedChain,
     phase: 'screening',
     lastAction: `Auto analysis started on ${normalizedChain.toUpperCase()}`,
   });
-  persistState();
-  ensureLoop();
-  return getAutoAnalysisStatus();
+  ensureLoop(context);
+  return getAutoAnalysisStatus(username);
 }
 
-export function stopAutoAnalysis(reason?: string): AutoAnalysisStatus {
-  const inflight = totalInFlight();
-  resetRoundWindow();
+export function stopAutoAnalysis(username: string, reason?: string): AutoAnalysisStatus {
+  const context = ensureContext(username);
+  const inflight = totalInFlight(context);
+  resetRoundWindow(context);
   const message = reason
     ? (inflight > 0
       ? `${reason}. Letting ${inflight} in-flight audit${inflight === 1 ? '' : 's'} finish`
@@ -647,21 +717,20 @@ export function stopAutoAnalysis(reason?: string): AutoAnalysisStatus {
     : (inflight > 0
       ? `Stop requested. Letting ${inflight} in-flight audit${inflight === 1 ? '' : 's'} finish`
       : 'Auto analysis stopped');
-  setStatus({
+  setStatus(context, {
     enabled: false,
     stopping: inflight > 0,
     phase: inflight > 0 ? 'draining' : 'idle',
     lastAction: message,
   });
-  persistState();
-  if (inflight > 0) ensureLoop();
-  return getAutoAnalysisStatus();
+  if (inflight > 0) ensureLoop(context);
+  return getAutoAnalysisStatus(username);
 }
 
 export function startAutoAnalysisEngine(): void {
-  runtimeConfig = normalizeRuntimeConfig(runtimeConfig);
-  const config = getRuntimeConfig();
-  setAiAuditWorkerCapacity(config.queueCapacity);
-  refreshWorkerStatus();
-  publish();
+  recomputeWorkerCapacity();
+  for (const context of contexts.values()) {
+    refreshWorkerStatus(context);
+    publish(context);
+  }
 }

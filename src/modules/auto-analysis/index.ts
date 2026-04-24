@@ -34,6 +34,8 @@ export interface AutoAnalysisStatus {
   enabled: boolean;
   stopping: boolean;
   chain: string | null;
+  chains: string[];
+  chainRatios: Record<string, number>;
   phase: AutoAnalysisPhase;
   queued: number;
   active: number;
@@ -44,6 +46,8 @@ export interface AutoAnalysisStatus {
 }
 
 export interface AutoAnalysisRuntimeConfig {
+  selectedChains: string[];
+  chainRatios: Record<string, number>;
   queueCapacity: number;
   roundAuditLimit: number;
   roundRestSeconds: number;
@@ -82,6 +86,7 @@ interface AutoAnalysisContext {
   loopPromise: Promise<void> | null;
   roundQueuedSinceRest: number;
   roundRestUntilMs: number;
+  roundChainCursor: number;
   backendApiKey: string;
 }
 
@@ -89,6 +94,8 @@ const listeners = new Set<AutoAnalysisListener>();
 const contexts = new Map<string, AutoAnalysisContext>();
 
 const DEFAULT_AUTO_ANALYSIS_CONFIG: AutoAnalysisRuntimeConfig = {
+  selectedChains: [],
+  chainRatios: {},
   queueCapacity: 10,
   roundAuditLimit: 5,
   roundRestSeconds: 60,
@@ -112,6 +119,10 @@ const DEFAULT_AUTO_ANALYSIS_CONFIG: AutoAnalysisRuntimeConfig = {
 let controls: AutoAnalysisControls | null = null;
 
 function normalizeUsernameKey(value: unknown): string {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeChainKey(value: unknown): string {
   return String(value || '').trim().toLowerCase();
 }
 
@@ -155,6 +166,32 @@ function normalizeDateTimeLocal(value: unknown): string | null {
   return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
+function normalizeSelectedChains(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((entry) => normalizeChainKey(entry)).filter(Boolean))];
+}
+
+function normalizeChainRatios(
+  value: unknown,
+  selectedChains: string[],
+  fallback: Record<string, number> = {},
+): Record<string, number> {
+  const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const next: Record<string, number> = {};
+  for (const chain of selectedChains) {
+    const fallbackValue = Number(fallback[chain]);
+    const rawValue = source[chain] ?? source[normalizeChainKey(chain)] ?? fallbackValue;
+    const parsed = Number(rawValue);
+    next[chain] = Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.floor(parsed)) : 100;
+  }
+  return next;
+}
+
+function describeChainSet(chains: string[]): string {
+  if (!chains.length) return '--';
+  return chains.map((chain) => chain.toUpperCase()).join(', ');
+}
+
 function normalizeRuntimeConfig(input: Partial<AutoAnalysisRuntimeConfig> | null | undefined, base: AutoAnalysisRuntimeConfig): AutoAnalysisRuntimeConfig {
   const merged = {
     ...DEFAULT_AUTO_ANALYSIS_CONFIG,
@@ -162,7 +199,11 @@ function normalizeRuntimeConfig(input: Partial<AutoAnalysisRuntimeConfig> | null
     ...(input || {}),
   };
   const provider = normalizeAiAuditProvider(merged.provider);
+  const selectedChains = normalizeSelectedChains(merged.selectedChains);
+  const chainRatios = normalizeChainRatios(merged.chainRatios, selectedChains, base.chainRatios);
   return {
+    selectedChains,
+    chainRatios,
     queueCapacity: parsePositiveInt(merged.queueCapacity, DEFAULT_AUTO_ANALYSIS_CONFIG.queueCapacity),
     roundAuditLimit: parsePositiveInt(merged.roundAuditLimit, DEFAULT_AUTO_ANALYSIS_CONFIG.roundAuditLimit),
     roundRestSeconds: parsePositiveInt(merged.roundRestSeconds, DEFAULT_AUTO_ANALYSIS_CONFIG.roundRestSeconds),
@@ -190,6 +231,8 @@ function createDefaultState(): AutoAnalysisStatus {
     enabled: persisted.enabled,
     stopping: persisted.stopping,
     chain: persisted.chain,
+    chains: [],
+    chainRatios: {},
     phase: persisted.phase,
     queued: 0,
     active: 0,
@@ -211,11 +254,14 @@ function ensureContext(username: string): AutoAnalysisContext {
     loopPromise: null,
     roundQueuedSinceRest: 0,
     roundRestUntilMs: 0,
+    roundChainCursor: 0,
     backendApiKey: '',
   };
   context.state.enabled = false;
   context.state.stopping = false;
   context.state.chain = null;
+  context.state.chains = [];
+  context.state.chainRatios = {};
   context.state.phase = 'idle';
   context.state.lastAction = 'Auto analysis is idle';
   contexts.set(key, context);
@@ -320,6 +366,31 @@ function currentWorkerStatus(context: AutoAnalysisContext) {
   context.state.active = worker.active;
   context.state.capacity = worker.capacity;
   return worker;
+}
+
+function getConfiguredChains(context: AutoAnalysisContext): string[] {
+  return context.runtimeConfig.selectedChains.length
+    ? [...context.runtimeConfig.selectedChains]
+    : (context.state.chain ? [context.state.chain] : []);
+}
+
+function syncContextChainState(context: AutoAnalysisContext): void {
+  const chains = getConfiguredChains(context);
+  context.state.chains = [...chains];
+  context.state.chainRatios = normalizeChainRatios(
+    context.runtimeConfig.chainRatios,
+    chains,
+    context.state.chainRatios,
+  );
+  if (!chains.length) {
+    context.state.chain = null;
+    context.roundChainCursor = 0;
+    return;
+  }
+  if (!context.state.chain || !chains.includes(context.state.chain)) {
+    context.state.chain = chains[0];
+  }
+  context.roundChainCursor = Math.max(0, Math.min(context.roundChainCursor, chains.length - 1));
 }
 
 function resetRoundWindow(context: AutoAnalysisContext): void {
@@ -445,25 +516,50 @@ function computeTargetSlots(context: AutoAnalysisContext, capacity: number) {
   return { contractSlots, tokenSlots };
 }
 
-async function fillAuditPool(context: AutoAnalysisContext, chain: string): Promise<number> {
-  recomputeWorkerCapacity();
-  const worker = currentWorkerStatus(context);
-  const globalAvailable = Math.max(0, worker.capacity - (getAiAuditWorkerStatus().queued + getAiAuditWorkerStatus().active));
-  const personalCapacity = Math.max(1, context.runtimeConfig.queueCapacity);
-  const ownInFlight = worker.queued + worker.active;
-  const personalAvailable = Math.max(0, personalCapacity - ownInFlight);
-  const availableSlots = Math.max(0, Math.min(globalAvailable, personalAvailable));
-  if (!availableSlots) return 0;
-  const roundLimit = Math.max(1, context.runtimeConfig.roundAuditLimit);
-  const roundRemaining = Math.max(0, roundLimit - context.roundQueuedSinceRest);
-  if (!roundRemaining) return 0;
-  const queueableSlots = Math.min(availableSlots, roundRemaining);
-  if (!queueableSlots) return 0;
+function allocateSlotsByRatio(chains: string[], ratios: Record<string, number>, totalSlots: number): Map<string, number> {
+  const allocations = new Map<string, number>();
+  if (!chains.length || totalSlots <= 0) return allocations;
+  const weighted = chains.map((chain) => ({
+    chain,
+    ratio: Math.max(1, Number(ratios[chain]) || 100),
+  }));
+  const ratioTotal = weighted.reduce((sum, entry) => sum + entry.ratio, 0) || weighted.length;
+  let used = 0;
+  const remainders = weighted.map((entry) => {
+    const exact = (totalSlots * entry.ratio) / ratioTotal;
+    const base = Math.floor(exact);
+    allocations.set(entry.chain, base);
+    used += base;
+    return {
+      chain: entry.chain,
+      remainder: exact - base,
+      ratio: entry.ratio,
+    };
+  });
+  const remaining = Math.max(0, totalSlots - used);
+  remainders
+    .sort((a, b) => {
+      if (b.remainder !== a.remainder) return b.remainder - a.remainder;
+      return b.ratio - a.ratio;
+    })
+    .slice(0, remaining)
+    .forEach((entry) => {
+      allocations.set(entry.chain, (allocations.get(entry.chain) || 0) + 1);
+    });
+  return allocations;
+}
 
-  const targets = computeTargetSlots(context, queueableSlots);
-  const contractNeed = Math.max(0, Math.min(queueableSlots, targets.contractSlots));
-  const tokenNeed = Math.max(0, Math.min(queueableSlots - contractNeed, targets.tokenSlots));
-
+function queueChainBatch(
+  context: AutoAnalysisContext,
+  chain: string,
+  totalSlots: number,
+): { used: number; queuedContracts: number; queuedTokens: number } {
+  if (totalSlots <= 0) {
+    return { used: 0, queuedContracts: 0, queuedTokens: 0 };
+  }
+  const targets = computeTargetSlots(context, totalSlots);
+  const contractNeed = Math.max(0, Math.min(totalSlots, targets.contractSlots));
+  const tokenNeed = Math.max(0, Math.min(totalSlots - contractNeed, targets.tokenSlots));
   const contractCandidates = selectEligibleContracts(context, chain, contractNeed);
   const tokenCandidates = selectEligibleTokens(context, chain, tokenNeed);
 
@@ -500,6 +596,60 @@ async function fillAuditPool(context: AutoAnalysisContext, chain: string): Promi
     queuedTokens += 1;
   }
 
+  return {
+    used: queuedContracts + queuedTokens,
+    queuedContracts,
+    queuedTokens,
+  };
+}
+
+async function fillAuditPool(context: AutoAnalysisContext): Promise<number> {
+  recomputeWorkerCapacity();
+  const worker = currentWorkerStatus(context);
+  const globalAvailable = Math.max(0, worker.capacity - (getAiAuditWorkerStatus().queued + getAiAuditWorkerStatus().active));
+  const personalCapacity = Math.max(1, context.runtimeConfig.queueCapacity);
+  const ownInFlight = worker.queued + worker.active;
+  const personalAvailable = Math.max(0, personalCapacity - ownInFlight);
+  const availableSlots = Math.max(0, Math.min(globalAvailable, personalAvailable));
+  if (!availableSlots) return 0;
+  const chains = getConfiguredChains(context);
+  if (!chains.length) return 0;
+  const roundLimit = Math.max(1, context.runtimeConfig.roundAuditLimit);
+  const roundRemaining = Math.max(0, roundLimit - context.roundQueuedSinceRest);
+  if (!roundRemaining) return 0;
+  const queueableSlots = Math.min(availableSlots, roundRemaining);
+  if (!queueableSlots) return 0;
+
+  let queuedContracts = 0;
+  let queuedTokens = 0;
+  const perChainQueued = new Map<string, number>();
+  const allocations = allocateSlotsByRatio(chains, context.state.chainRatios, queueableSlots);
+  let remainingSlots = queueableSlots;
+
+  for (const chain of chains) {
+    const allocation = allocations.get(chain) || 0;
+    if (!allocation) continue;
+    const result = queueChainBatch(context, chain, allocation);
+    if (!result.used) continue;
+    perChainQueued.set(chain, (perChainQueued.get(chain) || 0) + result.used);
+    queuedContracts += result.queuedContracts;
+    queuedTokens += result.queuedTokens;
+    remainingSlots -= result.used;
+  }
+
+  if (remainingSlots > 0) {
+    const refillOrder = [...chains].sort((a, b) => (context.state.chainRatios[b] || 0) - (context.state.chainRatios[a] || 0));
+    for (const chain of refillOrder) {
+      if (remainingSlots <= 0) break;
+      const result = queueChainBatch(context, chain, remainingSlots);
+      if (!result.used) continue;
+      perChainQueued.set(chain, (perChainQueued.get(chain) || 0) + result.used);
+      queuedContracts += result.queuedContracts;
+      queuedTokens += result.queuedTokens;
+      remainingSlots -= result.used;
+    }
+  }
+
   const used = queuedContracts + queuedTokens;
   if (!used) return 0;
   context.roundQueuedSinceRest = Math.min(roundLimit, context.roundQueuedSinceRest + used);
@@ -508,9 +658,11 @@ async function fillAuditPool(context: AutoAnalysisContext, chain: string): Promi
     context.roundRestUntilMs = Date.now() + (Math.max(1, context.runtimeConfig.roundRestSeconds) * 1000);
   }
 
+  const activeChain = [...perChainQueued.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || chains[0] || null;
   setStatus(context, {
+    chain: activeChain,
     phase: 'auditing',
-    lastAction: `Queued ${queuedContracts} contract / ${queuedTokens} token audit${used === 1 ? '' : 's'} on ${chain.toUpperCase()}${shouldRestAfterBatch ? `. Cooling down for ${Math.max(1, context.runtimeConfig.roundRestSeconds)}s after this batch` : ''}`,
+    lastAction: `Queued ${queuedContracts} contract / ${queuedTokens} token audit${used === 1 ? '' : 's'} across ${Array.from(perChainQueued.entries()).map(([chain, count]) => `${chain.toUpperCase()} x${count}`).join(', ')}${shouldRestAfterBatch ? `. Cooling down for ${Math.max(1, context.runtimeConfig.roundRestSeconds)}s after this batch` : ''}`,
   });
   return used;
 }
@@ -518,13 +670,16 @@ async function fillAuditPool(context: AutoAnalysisContext, chain: string): Promi
 async function runLoop(context: AutoAnalysisContext): Promise<void> {
   try {
     while (context.state.enabled || context.state.stopping) {
-      const chain = context.state.chain;
-      if (!chain) {
+      syncContextChainState(context);
+      const chains = getConfiguredChains(context);
+      const chainSummary = describeChainSet(chains);
+      const activeChain = context.state.chain;
+      if (!chains.length) {
         setStatus(context, {
           enabled: false,
           stopping: false,
           phase: 'idle',
-          lastAction: 'Auto analysis stopped: no chain selected',
+          lastAction: 'Auto analysis stopped: no auto chains selected',
         });
         return;
       }
@@ -533,7 +688,7 @@ async function runLoop(context: AutoAnalysisContext): Promise<void> {
         if (totalInFlight(context) > 0) {
           setStatus(context, {
             phase: 'draining',
-            lastAction: `Draining ${totalInFlight(context)} in-flight audit${totalInFlight(context) === 1 ? '' : 's'} on ${chain.toUpperCase()}`,
+            lastAction: `Draining ${totalInFlight(context)} in-flight audit${totalInFlight(context) === 1 ? '' : 's'} across ${chainSummary}`,
           });
           await sleep(LOOP_INTERVAL_MS);
           continue;
@@ -557,7 +712,10 @@ async function runLoop(context: AutoAnalysisContext): Promise<void> {
 
       const stopTimeState = hasReachedConfiguredStopTime(context.runtimeConfig.stopAtDateTime);
       if (stopTimeState.reached) {
-        stopAutoAnalysis(context.username, stopTimeState.label ? `Auto analysis stop time ${stopTimeState.label} reached on ${chain.toUpperCase()}` : 'Configured cutoff reached');
+        stopAutoAnalysis(
+          context.username,
+          stopTimeState.label ? `Auto analysis stop time ${stopTimeState.label} reached for ${chainSummary}` : 'Configured cutoff reached',
+        );
         await sleep(LOOP_INTERVAL_MS);
         continue;
       }
@@ -565,7 +723,7 @@ async function runLoop(context: AutoAnalysisContext): Promise<void> {
       if (controls.isRoundRunning()) {
         setStatus(context, {
           phase: 'round',
-          lastAction: `Waiting for the current ${chain.toUpperCase()} round to finish`,
+          lastAction: `Waiting for the current pipeline round to finish before scanning ${chainSummary}`,
         });
         await sleep(LOOP_INTERVAL_MS);
         continue;
@@ -576,7 +734,7 @@ async function runLoop(context: AutoAnalysisContext): Promise<void> {
         const remainingSeconds = Math.max(1, Math.ceil((context.roundRestUntilMs - now) / 1000));
         setStatus(context, {
           phase: 'resting',
-          lastAction: `Cooling down for ${remainingSeconds}s before the next auto-analysis batch on ${chain.toUpperCase()}`,
+          lastAction: `Cooling down for ${remainingSeconds}s before the next auto-analysis batch across ${chainSummary}`,
         });
         await sleep(Math.min(LOOP_INTERVAL_MS, context.roundRestUntilMs - now));
         continue;
@@ -586,10 +744,11 @@ async function runLoop(context: AutoAnalysisContext): Promise<void> {
       }
 
       setStatus(context, {
+        chain: activeChain || chains[0] || null,
         phase: 'screening',
-        lastAction: `Scanning ${chain.toUpperCase()} for eligible auto-analysis candidates`,
+        lastAction: `Scanning ${chainSummary} for eligible auto-analysis candidates`,
       });
-      const enqueued = await fillAuditPool(context, chain);
+      const enqueued = await fillAuditPool(context);
       if (enqueued > 0) {
         await sleep(LOOP_INTERVAL_MS);
         continue;
@@ -598,34 +757,40 @@ async function runLoop(context: AutoAnalysisContext): Promise<void> {
       if (totalInFlight(context) > 0) {
         setStatus(context, {
           phase: 'auditing',
-          lastAction: `Watching ${totalInFlight(context)} in-flight audit${totalInFlight(context) === 1 ? '' : 's'} on ${chain.toUpperCase()}`,
+          lastAction: `Watching ${totalInFlight(context)} in-flight audit${totalInFlight(context) === 1 ? '' : 's'} across ${chainSummary}`,
         });
         await sleep(LOOP_INTERVAL_MS);
         continue;
       }
 
       if (!context.runtimeConfig.continueOnEmptyRound) {
-        stopAutoAnalysis(context.username, `No eligible candidates left on ${chain.toUpperCase()}. Auto analysis stopped because next-round continuation is disabled`);
+        stopAutoAnalysis(context.username, `No eligible candidates left across ${chainSummary}. Auto analysis stopped because next-round continuation is disabled`);
         await sleep(LOOP_INTERVAL_MS);
         continue;
       }
 
+      const nextRoundChain = chains[context.roundChainCursor % chains.length] || chains[0];
+      context.roundChainCursor = (context.roundChainCursor + 1) % Math.max(1, chains.length);
+
       setStatus(context, {
+        chain: nextRoundChain,
         phase: 'round',
-        lastAction: `No eligible contracts left on ${chain.toUpperCase()}. Starting the next round`,
+        lastAction: `No eligible candidates left across ${chainSummary}. Starting the next ${nextRoundChain.toUpperCase()} round`,
       });
       try {
-        await controls.runRound(chain);
+        await controls.runRound(nextRoundChain);
         setStatus(context, {
+          chain: nextRoundChain,
           cycle: context.state.cycle + 1,
           phase: 'screening',
-          lastAction: `Round finished on ${chain.toUpperCase()}. Screening new contracts`,
+          lastAction: `Round finished on ${nextRoundChain.toUpperCase()}. Screening ${chainSummary} again`,
         });
       } catch (error) {
-        logger.error(`[auto-analysis] Round failed for ${context.username}/${chain}`, error);
+        logger.error(`[auto-analysis] Round failed for ${context.username}/${nextRoundChain}`, error);
         setStatus(context, {
+          chain: nextRoundChain,
           phase: 'idle',
-          lastAction: `Round failed on ${chain.toUpperCase()}: ${(error as Error).message}`,
+          lastAction: `Round failed on ${nextRoundChain.toUpperCase()}: ${(error as Error).message}`,
         });
         await sleep(FAILURE_BACKOFF_MS);
       }
@@ -647,6 +812,7 @@ export function configureAutoAnalysisEngine(nextControls: AutoAnalysisControls):
 
 export function getAutoAnalysisRuntimeConfig(username: string): AutoAnalysisRuntimeConfig {
   const context = ensureContext(username);
+  syncContextChainState(context);
   return { ...context.runtimeConfig };
 }
 
@@ -656,6 +822,7 @@ export function setAutoAnalysisRuntimeConfig(
 ): AutoAnalysisRuntimeConfig {
   const context = ensureContext(username);
   context.runtimeConfig = normalizeRuntimeConfig(input, context.runtimeConfig);
+  syncContextChainState(context);
   recomputeWorkerCapacity();
   refreshWorkerStatus(context);
   publish(context);
@@ -664,6 +831,7 @@ export function setAutoAnalysisRuntimeConfig(
 
 export function getAutoAnalysisStatus(username: string): AutoAnalysisStatus {
   const context = ensureContext(username);
+  syncContextChainState(context);
   refreshWorkerStatus(context);
   return { ...context.state };
 }
@@ -683,14 +851,17 @@ export function subscribeAutoAnalysisStatus(listener: AutoAnalysisListener): () 
 
 export function startAutoAnalysis(
   username: string,
-  chain: string,
-  options: { backendApiKey?: string | null } = {},
+  options: { backendApiKey?: string | null; chains?: string[] | null } = {},
 ): AutoAnalysisStatus {
   const context = ensureContext(username);
-  const normalizedChain = String(chain || '').trim().toLowerCase();
-  if (!normalizedChain) {
-    throw new Error('Auto analysis requires a chain');
+  if (Array.isArray(options.chains)) {
+    context.runtimeConfig = normalizeRuntimeConfig({
+      selectedChains: options.chains,
+    }, context.runtimeConfig);
   }
+  syncContextChainState(context);
+  const chains = getConfiguredChains(context);
+  if (!chains.length) throw new Error('Auto analysis requires at least one chain');
   if (options.backendApiKey !== undefined) {
     context.backendApiKey = String(options.backendApiKey || '').trim();
   }
@@ -698,9 +869,9 @@ export function startAutoAnalysis(
   setStatus(context, {
     enabled: true,
     stopping: false,
-    chain: normalizedChain,
+    chain: chains[0],
     phase: 'screening',
-    lastAction: `Auto analysis started on ${normalizedChain.toUpperCase()}`,
+    lastAction: `Auto analysis started across ${describeChainSet(chains)}`,
   });
   ensureLoop(context);
   return getAutoAnalysisStatus(username);
@@ -708,14 +879,16 @@ export function startAutoAnalysis(
 
 export function stopAutoAnalysis(username: string, reason?: string): AutoAnalysisStatus {
   const context = ensureContext(username);
+  syncContextChainState(context);
   const inflight = totalInFlight(context);
   resetRoundWindow(context);
+  const chainSummary = describeChainSet(getConfiguredChains(context));
   const message = reason
     ? (inflight > 0
       ? `${reason}. Letting ${inflight} in-flight audit${inflight === 1 ? '' : 's'} finish`
       : reason)
     : (inflight > 0
-      ? `Stop requested. Letting ${inflight} in-flight audit${inflight === 1 ? '' : 's'} finish`
+      ? `Stop requested for ${chainSummary}. Letting ${inflight} in-flight audit${inflight === 1 ? '' : 's'} finish`
       : 'Auto analysis stopped');
   setStatus(context, {
     enabled: false,
@@ -730,6 +903,7 @@ export function stopAutoAnalysis(username: string, reason?: string): AutoAnalysi
 export function startAutoAnalysisEngine(): void {
   recomputeWorkerCapacity();
   for (const context of contexts.values()) {
+    syncContextChainState(context);
     refreshWorkerStatus(context);
     publish(context);
   }

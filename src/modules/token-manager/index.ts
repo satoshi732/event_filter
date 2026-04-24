@@ -79,8 +79,13 @@ export async function syncTokenRegistryForRound(input: {
       isAutoAudited: false,
       isManualAudited: false,
     };
-    const price = sanitizeTokenPriceUsd(prices.get(token) ?? meta.priceUsd ?? null);
     const existingRow = existing.get(token);
+    const price = sanitizeTokenPriceUsd(
+      prices.get(token)
+      ?? meta.priceUsd
+      ?? existingRow?.priceUsd
+      ?? null,
+    );
     const isExisting = Boolean(existingRow);
     const info = infoMap.get(token);
     const bytecode = String(info?.bytecode || '').trim().toLowerCase();

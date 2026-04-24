@@ -233,9 +233,13 @@
     }
 
     async function toggleAutoAnalysis() {
-      if (!state.selectedChain && !autoAnalysisEnabled.value) return;
+      const wasEnabled = autoAnalysisEnabled.value;
+      const selectedAutoChains = Array.isArray(state.settings.runtime_settings.auto_analysis?.selected_chains)
+        ? state.settings.runtime_settings.auto_analysis.selected_chains
+        : [];
+      if (!selectedAutoChains.length && !wasEnabled) return;
       try {
-        const data = autoAnalysisEnabled.value
+        const data = wasEnabled
           ? await apiFetch('/api/auto-analysis/stop', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -245,13 +249,12 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              chain: state.selectedChain,
               config: state.settings.runtime_settings.auto_analysis,
             }),
           });
         state.autoAnalysis = data.status || state.autoAnalysis;
         pushNotification(
-          autoAnalysisEnabled.value ? 'Auto analysis stopped' : 'Auto analysis started',
+          wasEnabled ? 'Auto analysis stopped' : 'Auto analysis started',
           'success',
         );
       } catch (err) {
@@ -630,6 +633,30 @@
       };
     }
 
+    function addAutoAnalysisChain() {
+      const auto = state.settings.runtime_settings.auto_analysis || {};
+      const candidate = String(auto.chain_candidate || '').trim().toLowerCase();
+      if (!candidate) return;
+      const availableChains = Array.isArray(state.chains) && state.chains.length
+        ? state.chains.map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean)
+        : (Array.isArray(state.settings.runtime_settings.account?.available_chains)
+          ? state.settings.runtime_settings.account.available_chains.map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean)
+          : []);
+      if (!availableChains.includes(candidate)) return;
+      const nextSelectedChains = [...new Set([...(auto.selected_chains || []), candidate])];
+      state.settings.runtime_settings.auto_analysis = {
+        ...auto,
+        selected_chains: nextSelectedChains,
+        chain_ratios: {
+          ...(auto.chain_ratios || {}),
+          [candidate]: Number.isFinite(Number(auto.chain_ratios?.[candidate])) && Number(auto.chain_ratios[candidate]) > 0
+            ? Math.max(1, Math.floor(Number(auto.chain_ratios[candidate])))
+            : 100,
+        },
+        chain_candidate: availableChains.find((chain) => !nextSelectedChains.includes(chain)) || '',
+      };
+    }
+
     function removeAccountAllowedChain(chain) {
       const account = state.settings.runtime_settings.account || {};
       const normalized = String(chain || '').trim().toLowerCase();
@@ -644,6 +671,25 @@
         ...account,
         allowed_chains: nextAllowedChains,
         allowed_chain_candidate: nextCandidate,
+      };
+    }
+
+    function removeAutoAnalysisChain(chain) {
+      const auto = state.settings.runtime_settings.auto_analysis || {};
+      const normalized = String(chain || '').trim().toLowerCase();
+      const nextSelectedChains = (auto.selected_chains || []).filter((entry) => String(entry || '').trim().toLowerCase() !== normalized);
+      const nextChainRatios = { ...(auto.chain_ratios || {}) };
+      delete nextChainRatios[normalized];
+      const availableChains = Array.isArray(state.chains) && state.chains.length
+        ? state.chains.map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean)
+        : (Array.isArray(state.settings.runtime_settings.account?.available_chains)
+          ? state.settings.runtime_settings.account.available_chains.map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean)
+          : []);
+      state.settings.runtime_settings.auto_analysis = {
+        ...auto,
+        selected_chains: nextSelectedChains,
+        chain_ratios: nextChainRatios,
+        chain_candidate: availableChains.find((entry) => !nextSelectedChains.includes(entry)) || '',
       };
     }
 
@@ -939,7 +985,9 @@
       openAiReport,
       openTokenAiReport,
       addAccountAllowedChain,
+      addAutoAnalysisChain,
       removeAccountAllowedChain,
+      removeAutoAnalysisChain,
       addChainConfigRow,
       removeChainConfigRow,
       addAiProviderRow,

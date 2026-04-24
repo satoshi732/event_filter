@@ -178,7 +178,21 @@ function coerceAutoAnalysisRuntimeConfig(input: unknown) {
     return fallback;
   };
   const provider = normalizeAiAuditProvider(String(source.provider || '').trim());
+  const selectedChains = Array.isArray(source.selected_chains)
+    ? [...new Set(source.selected_chains.map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean))]
+    : [];
+  const rawChainRatios = source.chain_ratios && typeof source.chain_ratios === 'object'
+    ? source.chain_ratios as Record<string, unknown>
+    : {};
+  const chainRatios = Object.fromEntries(
+    selectedChains.map((chain) => {
+      const parsed = Number(rawChainRatios[chain]);
+      return [chain, Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.floor(parsed)) : 100];
+    }),
+  );
   return {
+    selectedChains,
+    chainRatios,
     queueCapacity: toPositiveInt(source.queue_capacity, 10),
     roundAuditLimit: toPositiveInt(source.round_audit_limit, 5),
     roundRestSeconds: toPositiveInt(source.round_rest_seconds, 60),
@@ -340,16 +354,37 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
 
     if (reqPath === '/api/auto-analysis/start' && method === 'POST') {
       const body = await readJsonBody(req);
-      const chain = normalizeRequestedChain(body.chain);
-      if (!chain || !requestKnownChains.includes(chain)) {
-        sendJson(res, 400, { error: 'Unknown chain' });
+      const configInput = coerceAutoAnalysisRuntimeConfig(body.config);
+      const requestedChains = configInput.selectedChains.length
+        ? configInput.selectedChains
+        : coerceStringArray(body.chains).map((chain) => normalizeRequestedChain(chain)).filter(Boolean);
+      const fallbackChain = normalizeRequestedChain(body.chain);
+      const selectedChains = requestedChains.length
+        ? requestedChains
+        : (fallbackChain ? [fallbackChain] : []);
+      if (!selectedChains.length) {
+        sendJson(res, 400, { error: 'At least one auto-analysis chain is required' });
         return true;
       }
-      if (!requireAllowedChain(chain)) return true;
+      const unknownChain = selectedChains.find((chain) => !requestKnownChains.includes(chain));
+      if (unknownChain) {
+        sendJson(res, 400, { error: `Unknown chain: ${unknownChain}` });
+        return true;
+      }
+      for (const chain of selectedChains) {
+        if (!requireAllowedChain(chain)) return true;
+      }
       const account = findUserAuthAccount(requestUserAuth, requestUsername);
-      const config = setAutoAnalysisRuntimeConfig(requestUsername, coerceAutoAnalysisRuntimeConfig(body.config));
-      const status = startAutoAnalysis(requestUsername, chain, {
+      const config = setAutoAnalysisRuntimeConfig(requestUsername, {
+        ...configInput,
+        selectedChains,
+        chainRatios: Object.fromEntries(
+          selectedChains.map((chain) => [chain, Number(configInput.chainRatios?.[chain]) > 0 ? Number(configInput.chainRatios[chain]) : 100]),
+        ),
+      });
+      const status = startAutoAnalysis(requestUsername, {
         backendApiKey: account?.aiApiKey || null,
+        chains: selectedChains,
       });
       await broadcastStateSnapshot();
       sendJson(res, 200, { ok: true, status, config });
@@ -893,7 +928,6 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       const body = await readJsonBody(req);
       const runtime = (typeof body.runtime_settings === 'object' && body.runtime_settings) ? body.runtime_settings as Record<string, unknown> : {};
       const patternSync = (typeof runtime.pattern_sync === 'object' && runtime.pattern_sync) ? runtime.pattern_sync as Record<string, unknown> : {};
-      const pancakePrice = (typeof runtime.pancakeswap_price === 'object' && runtime.pancakeswap_price) ? runtime.pancakeswap_price as Record<string, unknown> : {};
       const aiAuditBackend = (typeof runtime.ai_audit_backend === 'object' && runtime.ai_audit_backend) ? runtime.ai_audit_backend as Record<string, unknown> : {};
       const access = (typeof runtime.access === 'object' && runtime.access) ? runtime.access as Record<string, unknown> : {};
 
@@ -1031,8 +1065,6 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         { key: 'pattern_sync.remote_name', value: String(patternSync.remote_name || 'default').trim() || 'default' },
         { key: 'pattern_sync.auto_pull', value: coerceBoolean(patternSync.auto_pull, true) ? '1' : '0' },
         { key: 'pattern_sync.ssl', value: coerceBoolean(patternSync.ssl, false) ? '1' : '0' },
-        { key: 'pancakeswap_price.max_req_per_second', value: String(coercePositiveInt(pancakePrice.max_req_per_second, 2)) },
-        { key: 'pancakeswap_price.max_req_per_minute', value: String(coercePositiveInt(pancakePrice.max_req_per_minute, 90)) },
         { key: 'ai_audit_backend.base_url', value: String(aiAuditBackend.base_url || 'https://127.0.0.1:5000').trim() },
         { key: 'ai_audit_backend.api_key', value: String(aiAuditBackend.api_key || '').trim() },
         { key: 'ai_audit_backend.etherscan_api_key', value: String(aiAuditBackend.etherscan_api_key || '').trim() },

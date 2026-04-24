@@ -237,6 +237,47 @@
     return selectedChains.length ? selectedChains : availableChains;
   }
 
+  function normalizeAutoAnalysisChainRatios(value, selectedChains) {
+    const source = value && typeof value === 'object' ? value : {};
+    return Object.fromEntries(
+      selectedChains.map((chain) => {
+        const parsed = Number(source[chain]);
+        return [chain, Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.floor(parsed)) : 100];
+      }),
+    );
+  }
+
+  function normalizeAutoAnalysisConfig(config = {}, availableChains = []) {
+    const selectedChains = normalizeAllowedChains(config.selected_chains)
+      .filter((chain) => !availableChains.length || availableChains.includes(chain));
+    const chainRatios = normalizeAutoAnalysisChainRatios(config.chain_ratios, selectedChains);
+    return {
+      ...config,
+      selected_chains: selectedChains,
+      chain_ratios: chainRatios,
+      chain_candidate: availableChains.find((chain) => !selectedChains.includes(chain)) || '',
+    };
+  }
+
+  function normalizeAutoAnalysisStatus(status = {}, availableChains = []) {
+    const normalizedChains = normalizeAllowedChains(status.chains || status.selected_chains)
+      .filter((chain) => !availableChains.length || availableChains.includes(chain));
+    return {
+      enabled: Boolean(status.enabled),
+      stopping: Boolean(status.stopping),
+      chain: String(status.chain || '').trim().toLowerCase() || null,
+      chains: normalizedChains,
+      chain_ratios: normalizeAutoAnalysisChainRatios(status.chain_ratios || status.chainRatios, normalizedChains),
+      phase: String(status.phase || 'idle'),
+      queued: Number(status.queued) || 0,
+      active: Number(status.active) || 0,
+      capacity: Number(status.capacity) || 10,
+      cycle: Number(status.cycle) || 0,
+      lastAction: String(status.lastAction || status.last_action || 'Auto analysis is idle'),
+      updatedAt: status.updatedAt || status.updated_at || null,
+    };
+  }
+
   const useDashboardStore = defineStore('eventFilterDashboard', () => {
     const storedFilters = readStoredFilters();
     const storedCollapsedGroups = readStoredCollapsedGroups();
@@ -249,7 +290,7 @@
       runningChain: null,
       progress: null,
       dashboardTab: queryOrDefault('tab', 'tokens', ['tokens', 'auto', 'settings']),
-      settingsSection: queryOrDefault('st', IS_ADMIN ? 'keys' : 'account', ['account', 'keys', 'runtime', 'access', 'pattern-sync', 'chains', 'whitelist', 'ai']),
+      settingsSection: queryOrDefault('st', IS_ADMIN ? 'keys' : 'account', ['account', 'keys', 'access', 'pattern-sync', 'chains', 'whitelist', 'ai']),
       dashboard: {
         run: null,
         tokens: [],
@@ -333,10 +374,6 @@
             auto_pull: true,
             ssl: false,
           },
-          pancakeswap_price: {
-            max_req_per_second: 2,
-            max_req_per_minute: 90,
-          },
           ai_audit_backend: {
             base_url: 'https://127.0.0.1:5000',
             api_key: '',
@@ -346,6 +383,9 @@
             insecure_tls: true,
           },
           auto_analysis: {
+            selected_chains: [],
+            chain_ratios: {},
+            chain_candidate: '',
             queue_capacity: 10,
             round_audit_limit: 5,
             round_rest_seconds: 60,
@@ -404,6 +444,8 @@
         enabled: false,
         stopping: false,
         chain: null,
+        chains: [],
+        chain_ratios: {},
         phase: 'idle',
         queued: 0,
         active: 0,
@@ -546,6 +588,20 @@
           || accountAvailableChains[0]
           || ''
         );
+        const incomingChainConfigs = Array.isArray(data.chain_configs)
+          ? data.chain_configs.map((row) => normalizeChainConfigRow(row))
+          : [];
+        const visibleAccountChains = buildVisibleChainsForAccount({
+          available_chains: accountAvailableChains,
+          allowed_chains: accountAllowedChains,
+        });
+        const autoAnalysisAvailableChains = visibleAccountChains.length
+          ? visibleAccountChains
+          : incomingChainConfigs.map((row) => String(row.chain || '').trim().toLowerCase()).filter(Boolean);
+        const normalizedAutoAnalysis = normalizeAutoAnalysisConfig(
+          data.runtime_settings?.auto_analysis || state.settings.runtime_settings.auto_analysis || {},
+          autoAnalysisAvailableChains,
+        );
         state.settings.runtime_settings = {
           ...state.settings.runtime_settings,
           ...(data.runtime_settings || {}),
@@ -564,6 +620,10 @@
             new_password: '',
             confirm_password: '',
           },
+          auto_analysis: {
+            ...(state.settings.runtime_settings.auto_analysis || {}),
+            ...normalizedAutoAnalysis,
+          },
           chainbase_keys: Array.isArray(data.runtime_settings?.chainbase_keys)
             ? data.runtime_settings.chainbase_keys.join('\n')
             : String(data.runtime_settings?.chainbase_keys || ''),
@@ -576,9 +636,7 @@
           state.settings.runtime_settings.auto_analysis.provider,
           state.settings.runtime_settings.auto_analysis.model,
         );
-        state.settings.chain_configs = Array.isArray(data.chain_configs)
-          ? data.chain_configs.map((row) => normalizeChainConfigRow(row))
-          : [];
+        state.settings.chain_configs = incomingChainConfigs;
         state.settings.ai_providers = data.ai_providers || [];
         state.settings.ai_models = data.ai_models || [];
         state.settings.whitelist_patterns = data.whitelist_patterns || [];
@@ -744,7 +802,7 @@
         state.settingsSection = routeValueOrDefault(
           String(routeQuery.st || ''),
           state.isAdmin ? 'keys' : 'account',
-          ['account', 'keys', 'runtime', 'access', 'pattern-sync', 'chains', 'whitelist', 'ai'],
+          ['account', 'keys', 'access', 'pattern-sync', 'chains', 'whitelist', 'ai'],
         );
         const nextChain = String(routeQuery.chain || '').toLowerCase();
         if (nextChain) state.selectedChain = nextChain;
@@ -859,6 +917,10 @@
       const aiModelOptions = computed(() => getConfiguredAiModels(state.analysisForm.provider));
       const autoAnalysisProviderOptions = computed(() => getConfiguredAiProviders());
       const autoAnalysisModelOptions = computed(() => getConfiguredAiModels(state.settings.runtime_settings.auto_analysis.provider));
+      const autoAnalysisAvailableChains = computed(() => {
+        return Array.isArray(state.chains) && state.chains.length ? state.chains : normalizeAllowedChains(state.settings.runtime_settings.account?.available_chains);
+      });
+      const autoAnalysisSelectedChains = computed(() => normalizeAllowedChains(state.settings.runtime_settings.auto_analysis.selected_chains));
 
       const runMetaText = computed(() => {
         const active = state.latestRuns.find((row) => row.chain === state.selectedChain);
@@ -881,12 +943,20 @@
       const autoAnalysisMetaText = computed(() => {
         const source = state.autoAnalysis;
         if (!source?.enabled && !source?.stopping) return 'auto analysis off';
-        const chain = String(source.chain || '').toUpperCase() || '--';
+        const chain = (source.chains || []).map((entry) => String(entry || '').toUpperCase()).join(', ') || '--';
         const inflight = `${source.active || 0} active / ${source.queued || 0} queued`;
         return `${chain} | ${source.phase || 'idle'} | ${inflight} | pool ${source.capacity || 10}`;
       });
       const autoAnalysisDetailText = computed(() => (
         String(state.autoAnalysis?.lastAction || '').trim() || 'Auto analysis is idle'
+      ));
+      const autoAnalysisChainSummaryText = computed(() => (
+        autoAnalysisSelectedChains.value.length
+          ? autoAnalysisSelectedChains.value.map((chain) => chain.toUpperCase()).join(', ')
+          : 'No auto chains selected'
+      ));
+      const autoAnalysisFocusChainText = computed(() => (
+        String(state.autoAnalysis?.chain || '').trim().toUpperCase() || '--'
       ));
       const progressPercent = computed(() => {
         const value = Number(state.progress?.percent);
@@ -1296,7 +1366,7 @@
         state.runningChain = data.running_chain || null;
         state.progress = data.progress || null;
         state.syncStatus = data.sync_status || null;
-        state.autoAnalysis = data.auto_analysis || state.autoAnalysis;
+        state.autoAnalysis = normalizeAutoAnalysisStatus(data.auto_analysis || state.autoAnalysis, state.chains);
 
         if (wasRunning && !state.running) {
           const completedChain = previousRunningChain || state.selectedChain;
@@ -1422,7 +1492,9 @@
         openTokenAiReport,
         saveAccountSettings,
         addAccountAllowedChain,
+        addAutoAnalysisChain,
         removeAccountAllowedChain,
+        removeAutoAnalysisChain,
         addChainConfigRow,
         removeChainConfigRow,
         addAiProviderRow,
@@ -1647,6 +1719,10 @@
         autoAnalysisChipTone,
         autoAnalysisMetaText,
         autoAnalysisDetailText,
+        autoAnalysisAvailableChains,
+        autoAnalysisSelectedChains,
+        autoAnalysisChainSummaryText,
+        autoAnalysisFocusChainText,
         authEnabled: computed(() => state.authEnabled),
         currentUser: computed(() => state.currentUser),
         currentUserRole: computed(() => state.currentUserRole),
@@ -1781,7 +1857,9 @@
         saveSettings,
         saveAccountSettings,
         addAccountAllowedChain,
+        addAutoAnalysisChain,
         removeAccountAllowedChain,
+        removeAutoAnalysisChain,
         addChainConfigRow,
         removeChainConfigRow,
         addAiProviderRow,

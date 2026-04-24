@@ -360,14 +360,53 @@
                 </div>
                 <h3>Night Shift Operations</h3>
                 <p class="muted auto-mode-status-text">{{ autoAnalysisDetailText }}</p>
+                <div class="stack-label">
+                  <span>Auto Chains</span>
+                  <div class="chain-selector-row">
+                    <select v-model="settings.runtime_settings.auto_analysis.chain_candidate">
+                      <option value="">Select chain</option>
+                      <option
+                        v-for="chain in autoAnalysisAvailableChains.filter((chain) => !autoAnalysisSelectedChains.includes(chain))"
+                        :key="`auto-chain-option-${chain}`"
+                        :value="chain"
+                      >
+                        {{ chain }}
+                      </option>
+                    </select>
+                    <button
+                      class="btn ghost btn-small"
+                      type="button"
+                      :disabled="!settings.runtime_settings.auto_analysis.chain_candidate"
+                      @click="addAutoAnalysisChain"
+                    >
+                      Add
+                    </button>
+                  </div>
+                  <div class="auto-chain-ratio-list">
+                    <div
+                      v-for="chain in autoAnalysisSelectedChains"
+                      :key="`auto-chain-ratio-${chain}`"
+                      class="auto-chain-ratio-item"
+                    >
+                      <span class="auto-chain-ratio-label mono">{{ chain }}</span>
+                      <label class="auto-chain-ratio-field">
+                        <span>Ratio</span>
+                        <input v-model.number="settings.runtime_settings.auto_analysis.chain_ratios[chain]" type="number" min="1" step="1">
+                      </label>
+                      <button class="btn subtle btn-small" type="button" @click="removeAutoAnalysisChain(chain)">Remove</button>
+                    </div>
+                    <span v-if="!autoAnalysisSelectedChains.length" class="chip small plain">No auto chains selected</span>
+                  </div>
+                  <span class="muted">One engine splits queue slots across these chains using the relative ratios above.</span>
+                </div>
                 <div class="auto-command-strip">
                   <div class="auto-command-item">
-                    <span>Target Chain</span>
-                    <strong>{{ (autoAnalysisStatus.chain || selectedChain || '--').toUpperCase() }}</strong>
+                    <span>Target Chains</span>
+                    <strong>{{ autoAnalysisChainSummaryText }}</strong>
                   </div>
                   <div class="auto-command-item">
-                    <span>Phase</span>
-                    <strong>{{ autoAnalysisStatus.phase || 'idle' }}</strong>
+                    <span>Focus Chain</span>
+                    <strong>{{ autoAnalysisFocusChainText }}</strong>
                   </div>
                   <div class="auto-command-item">
                     <span>Queued</span>
@@ -379,7 +418,7 @@
                     class="btn"
                     :class="autoAnalysisEnabled ? 'secondary' : 'primary'"
                     type="button"
-                    :disabled="!selectedChain && !autoAnalysisEnabled"
+                    :disabled="!autoAnalysisSelectedChains.length && !autoAnalysisEnabled"
                     @click="toggleAutoAnalysis"
                   >
                     {{ autoAnalysisButtonLabel }}
@@ -392,6 +431,10 @@
                   <div class="auto-telemetry-card">
                     <span>Pool Capacity</span>
                     <strong>{{ autoAnalysisStatus.capacity || settings.runtime_settings.auto_analysis.queue_capacity || 10 }}</strong>
+                  </div>
+                  <div class="auto-telemetry-card">
+                    <span>Phase</span>
+                    <strong>{{ autoAnalysisStatus.phase || 'idle' }}</strong>
                   </div>
                   <div class="auto-telemetry-card">
                     <span>Running Now</span>
@@ -682,13 +725,13 @@
 
             <template v-else>
             <aside class="settings-sidebar">
+              <button class="settings-nav-btn" :class="{ active: settingsSection === 'account' }" type="button" @click="openSettings('account')">
+                <strong>Account</strong>
+                <span>{{ settings.runtime_settings.account.role || 'admin' }} / personal API</span>
+              </button>
               <button class="settings-nav-btn" :class="{ active: settingsSection === 'keys' }" type="button" @click="openSettings('keys')">
                 <strong>Keys</strong>
                 <span>{{ (settings.runtime_settings.chainbase_keys || '').split(/\r?\n/).filter(Boolean).length }} chainbase / {{ (settings.runtime_settings.rpc_keys || '').split(/\r?\n/).filter(Boolean).length }} rpc</span>
-              </button>
-              <button class="settings-nav-btn" :class="{ active: settingsSection === 'runtime' }" type="button" @click="openSettings('runtime')">
-                <strong>Runtime</strong>
-                <span>{{ (settings.runtime_settings.monitored_chains || []).length }} chains monitored</span>
               </button>
               <button class="settings-nav-btn" :class="{ active: settingsSection === 'access' }" type="button" @click="openSettings('access')">
                 <strong>Access</strong>
@@ -714,7 +757,76 @@
             </aside>
 
             <section class="settings-content">
-              <div v-if="settingsSection === 'keys'" class="settings-panel">
+              <div v-if="settingsSection === 'account'" class="settings-panel">
+                <div class="card-head compact">
+                  <h3>My Account</h3>
+                  <span class="muted">Choose your own chains here along with your username, password, and AI audit API key.</span>
+                </div>
+                <div class="settings-inline-grid">
+                  <div class="stack-label">
+                    <span>My Chains</span>
+                    <div class="chain-selector-row">
+                      <select v-model="settings.runtime_settings.account.allowed_chain_candidate">
+                        <option value="">Select chain</option>
+                        <option
+                          v-for="chain in (settings.runtime_settings.account.available_chains || []).filter((chain) => !(settings.runtime_settings.account.allowed_chains || []).includes(chain))"
+                          :key="`admin-account-chain-option-${chain}`"
+                          :value="chain"
+                        >
+                          {{ chain }}
+                        </option>
+                      </select>
+                      <button
+                        class="btn ghost btn-small"
+                        type="button"
+                        :disabled="!settings.runtime_settings.account.allowed_chain_candidate"
+                        @click="addAccountAllowedChain"
+                      >
+                        Add
+                      </button>
+                    </div>
+                    <div class="chain-badge-list">
+                      <button
+                        v-for="chain in settings.runtime_settings.account.allowed_chains || []"
+                        :key="`admin-account-chain-${chain}`"
+                        class="chain-badge"
+                        type="button"
+                        @click="removeAccountAllowedChain(chain)"
+                      >
+                        <span>{{ chain }}</span>
+                        <span class="chain-badge-remove" aria-hidden="true">×</span>
+                      </button>
+                      <span v-if="!(settings.runtime_settings.account.allowed_chains || []).length" class="chip small plain">all supported chains</span>
+                    </div>
+                    <span class="muted">Select the chains you want in your workspace. Leave the list empty to keep all supported chains visible.</span>
+                  </div>
+                  <label class="stack-label">
+                    <span>Username</span>
+                    <input v-model="settings.runtime_settings.account.username" type="text" autocomplete="username">
+                  </label>
+                  <label class="stack-label">
+                    <span>AI API Key</span>
+                    <input v-model="settings.runtime_settings.account.ai_api_key" type="password" placeholder="tkc_...">
+                  </label>
+                  <label class="stack-label">
+                    <span>Current Password</span>
+                    <input v-model="settings.runtime_settings.account.current_password" type="password" autocomplete="current-password" placeholder="required for username/password changes">
+                  </label>
+                  <label class="stack-label">
+                    <span>New Password</span>
+                    <input v-model="settings.runtime_settings.account.new_password" type="password" autocomplete="new-password" placeholder="leave blank to keep current">
+                  </label>
+                  <label class="stack-label">
+                    <span>Confirm New Password</span>
+                    <input v-model="settings.runtime_settings.account.confirm_password" type="password" autocomplete="new-password">
+                  </label>
+                </div>
+                <div class="button-row">
+                  <button class="btn primary" type="button" @click="saveAccountSettings">Save Account</button>
+                </div>
+              </div>
+
+              <div v-else-if="settingsSection === 'keys'" class="settings-panel">
                 <div class="card-head compact">
                   <h3>Shared Keys</h3>
                   <span class="muted">Current DB values</span>
@@ -727,44 +839,6 @@
                   <span>RPC Keys</span>
                   <textarea v-model="settings.runtime_settings.rpc_keys" class="code-box compact-area keys-area" placeholder="one key per line"></textarea>
                 </label>
-              </div>
-
-              <div v-else-if="settingsSection === 'runtime'" class="settings-panel">
-                <h3>Runtime</h3>
-                <label class="stack-label">
-                  <span>Monitored Chains</span>
-                  <div class="checkbox-grid">
-                    <label v-for="chain in chains" :key="`monitor-${chain}`" class="stack-label inline">
-                      <input
-                        :checked="settings.runtime_settings.monitored_chains.includes(chain)"
-                        type="checkbox"
-                        @change="settings.runtime_settings.monitored_chains = $event.target.checked ? [...new Set([...settings.runtime_settings.monitored_chains, chain])] : settings.runtime_settings.monitored_chains.filter((value) => value !== chain)"
-                      >
-                      <span>{{ chain }}</span>
-                    </label>
-                  </div>
-                </label>
-                <div class="settings-inline-grid">
-                  <label class="stack-label">
-                    <span>Poll Interval (ms)</span>
-                    <input v-model.number="settings.runtime_settings.poll_interval_ms" type="number" min="1000" step="1000">
-                  </label>
-                  <label class="stack-label inline">
-                    <input v-model="settings.runtime_settings.debug" type="checkbox">
-                    <span>Debug Logging</span>
-                  </label>
-                </div>
-                <h3>Price Limiter</h3>
-                <div class="settings-inline-grid">
-                  <label class="stack-label">
-                    <span>Req / Second</span>
-                    <input v-model.number="settings.runtime_settings.pancakeswap_price.max_req_per_second" type="number" min="1">
-                  </label>
-                  <label class="stack-label">
-                    <span>Req / Minute</span>
-                    <input v-model.number="settings.runtime_settings.pancakeswap_price.max_req_per_minute" type="number" min="1">
-                  </label>
-                </div>
               </div>
 
               <div v-else-if="settingsSection === 'access'" class="settings-panel">

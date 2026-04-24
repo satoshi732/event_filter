@@ -11,11 +11,9 @@ import { TokenKind } from '../db/types.js';
 const RPC_TIMEOUT_MS = 20_000;
 const MULTICALL_MAX_SUBCALLS = 96;
 const AGGREGATE3_SELECTOR = '82ad56cb';
-const PANCAKESWAP_PRICE_API_BASE = 'https://wallet-api.pancakeswap.com/v1/prices/list';
-const PANCAKESWAP_NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
-const PANCAKESWAP_PRICE_BATCH_SIZE = 50;
-let pancakeLimiterLock: Promise<void> = Promise.resolve();
-const pancakePriceRequestTimestamps: number[] = [];
+const DEXSCREENER_TOKEN_API_BASE = 'https://api.dexscreener.com/latest/dex/tokens';
+let dexScreenerLimiterLock: Promise<void> = Promise.resolve();
+const dexScreenerPriceRequestTimestamps: number[] = [];
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -408,41 +406,41 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function withPancakeLimiter<T>(task: () => Promise<T>): Promise<T> {
-  const run = pancakeLimiterLock.then(task, task);
-  pancakeLimiterLock = run.then(() => undefined, () => undefined);
+function withDexScreenerLimiter<T>(task: () => Promise<T>): Promise<T> {
+  const run = dexScreenerLimiterLock.then(task, task);
+  dexScreenerLimiterLock = run.then(() => undefined, () => undefined);
   return run;
 }
 
-async function acquirePancakePriceRateSlot(): Promise<void> {
-  await withPancakeLimiter(async () => {
+async function acquireDexScreenerPriceRateSlot(): Promise<void> {
+  await withDexScreenerLimiter(async () => {
     while (true) {
       const limiterConfig = getPancakeSwapPriceLimiterConfig();
       const maxReqPerSecond = limiterConfig.maxReqPerSecond;
       const maxReqPerMinute = limiterConfig.maxReqPerMinute;
       const now = Date.now();
       const minuteWindowStart = now - 60_000;
-      while (pancakePriceRequestTimestamps.length && pancakePriceRequestTimestamps[0] <= minuteWindowStart) {
-        pancakePriceRequestTimestamps.shift();
+      while (dexScreenerPriceRequestTimestamps.length && dexScreenerPriceRequestTimestamps[0] <= minuteWindowStart) {
+        dexScreenerPriceRequestTimestamps.shift();
       }
 
       const secondWindowStart = now - 1_000;
-      const firstSecondIndex = pancakePriceRequestTimestamps.findIndex((ts) => ts > secondWindowStart);
+      const firstSecondIndex = dexScreenerPriceRequestTimestamps.findIndex((ts) => ts > secondWindowStart);
       const secondCount = firstSecondIndex === -1
         ? 0
-        : pancakePriceRequestTimestamps.length - firstSecondIndex;
+        : dexScreenerPriceRequestTimestamps.length - firstSecondIndex;
 
-      const minuteCount = pancakePriceRequestTimestamps.length;
+      const minuteCount = dexScreenerPriceRequestTimestamps.length;
       const secondWaitMs = secondCount >= maxReqPerSecond && firstSecondIndex !== -1
-        ? Math.max(0, pancakePriceRequestTimestamps[firstSecondIndex] + 1_000 - now)
+        ? Math.max(0, dexScreenerPriceRequestTimestamps[firstSecondIndex] + 1_000 - now)
         : 0;
       const minuteWaitMs = minuteCount >= maxReqPerMinute
-        ? Math.max(0, pancakePriceRequestTimestamps[0] + 60_000 - now)
+        ? Math.max(0, dexScreenerPriceRequestTimestamps[0] + 60_000 - now)
         : 0;
       const waitMs = Math.max(secondWaitMs, minuteWaitMs);
 
       if (waitMs <= 0) {
-        pancakePriceRequestTimestamps.push(Date.now());
+        dexScreenerPriceRequestTimestamps.push(Date.now());
         return;
       }
 
@@ -451,23 +449,26 @@ async function acquirePancakePriceRateSlot(): Promise<void> {
   });
 }
 
-async function fetchPancakePriceBatch(url: string): Promise<Record<string, unknown>> {
+async function fetchDexScreenerTokenPrice(address: string): Promise<number | null> {
+  const url = `${DEXSCREENER_TOKEN_API_BASE}/${encodeURIComponent(address)}`;
   let lastErr: unknown;
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
-      await acquirePancakePriceRateSlot();
-      const res = await axios.get<Record<string, unknown>>(url, {
+      await acquireDexScreenerPriceRateSlot();
+      const res = await axios.get<{ pairs?: Array<{ priceUsd?: unknown }> }>(url, {
         timeout: RPC_TIMEOUT_MS,
         headers: { accept: 'application/json' },
       });
-      return res.data ?? {};
+      const firstPair = Array.isArray(res.data?.pairs) ? res.data.pairs[0] : null;
+      const numeric = typeof firstPair?.priceUsd === 'number' ? firstPair.priceUsd : Number(firstPair?.priceUsd);
+      return sanitizeTokenPriceUsd(numeric);
     } catch (err) {
       lastErr = err;
       if (attempt === 4) throw err;
 
       if (isRateLimitError(err)) {
         const backoffMs = getRetryAfterMs(err, 1_500 * (attempt + 1));
-        logger.warn(`PancakeSwap price API rate-limited (429), backing off ${backoffMs}ms`);
+        logger.warn(`Dexscreener price API rate-limited (429), backing off ${backoffMs}ms`);
         await sleep(backoffMs);
         continue;
       }
@@ -567,34 +568,19 @@ export async function getTokenPricesBatch(
   const out = new Map<string, number | null>(normalized.map((token) => [token, null]));
   if (!normalized.length) return out;
 
-  const chainId = getChainConfig(chain).chainId;
   const entries = normalized
-    .map((token) => ({
-      token,
-      address: isNativeToken(chain, token) ? PANCAKESWAP_NATIVE_TOKEN_ADDRESS : token,
-    }))
+    .filter((token) => !isNativeToken(chain, token))
+    .map((token) => ({ token, address: token }))
     .filter((entry) => isAddressLike(entry.address));
 
   if (!entries.length) return out;
 
-  for (const batch of chunk(entries, PANCAKESWAP_PRICE_BATCH_SIZE)) {
-    const pairs = batch.map(({ address }) => `${chainId}:${address}`);
-    const encodedPairs = encodeURIComponent(pairs.join(','));
-    const url = `${PANCAKESWAP_PRICE_API_BASE}/${encodedPairs}`;
-
+  for (const { token, address } of entries) {
     try {
-      const payload = await fetchPancakePriceBatch(url);
-      const normalizedPayload = new Map<string, unknown>(
-        Object.entries(payload).map(([key, value]) => [key.toLowerCase(), value]),
-      );
-
-      for (const { token, address } of batch) {
-        const raw = normalizedPayload.get(`${chainId}:${address}`.toLowerCase());
-        const numeric = typeof raw === 'number' ? raw : Number(raw);
-        out.set(token, sanitizeTokenPriceUsd(numeric));
-      }
+      const price = await fetchDexScreenerTokenPrice(address);
+      out.set(token, price);
     } catch (err) {
-      logger.warn(`[${chain}] PancakeSwap price fetch failed (${batch.length} token(s)): ${errorMessage(err)}`);
+      logger.warn(`[${chain}] Dexscreener price fetch failed for ${address}: ${errorMessage(err)}`);
     }
   }
 

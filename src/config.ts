@@ -19,6 +19,10 @@ const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const LEGACY_CONFIG_FILE = path.join(ROOT, 'config.json');
 const LEGACY_KEYS_FILE = path.join(ROOT, 'keys.json');
 const DEFAULT_MULTICALL3_ADDRESS = '0xca11bde05977b3631167028862be2a173976ca11';
+const STATIC_PANCAKESWAP_PRICE_LIMITER = {
+  max_req_per_second: 2,
+  max_req_per_minute: 90,
+} as const;
 
 export interface AppConfig {
   chainbase_keys?: string[];
@@ -723,10 +727,7 @@ function loadRuntimeConfigFromDb(): RuntimeConfigCache {
       auto_pull: parseBool(getAppSetting('pattern_sync.auto_pull'), true),
       ssl: parseBool(getAppSetting('pattern_sync.ssl'), false),
     },
-    pancakeswap_price: {
-      max_req_per_second: parsePositiveInt(getAppSetting('pancakeswap_price.max_req_per_second'), 2),
-      max_req_per_minute: parsePositiveInt(getAppSetting('pancakeswap_price.max_req_per_minute'), 90),
-    },
+    pancakeswap_price: { ...STATIC_PANCAKESWAP_PRICE_LIMITER },
     ai_audit: {
       providers: aiProviders.map((row) => ({
         provider: row.provider,
@@ -848,10 +849,9 @@ export function getPatternSyncConfig(): PatternSyncConfig | undefined {
 }
 
 export function getPancakeSwapPriceLimiterConfig(): { maxReqPerSecond: number; maxReqPerMinute: number } {
-  const raw = ensureRuntimeCache().appConfig.pancakeswap_price ?? {};
   return {
-    maxReqPerSecond: parsePositiveInt(raw.max_req_per_second, 2),
-    maxReqPerMinute: parsePositiveInt(raw.max_req_per_minute, 90),
+    maxReqPerSecond: STATIC_PANCAKESWAP_PRICE_LIMITER.max_req_per_second,
+    maxReqPerMinute: STATIC_PANCAKESWAP_PRICE_LIMITER.max_req_per_minute,
   };
 }
 

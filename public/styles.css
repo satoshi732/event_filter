@@ -1668,6 +1668,8 @@ hr {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
   gap: 14px;
+  align-items: stretch;
+  min-height: calc(100vh - 220px);
 }
 
 .settings-sidebar {
@@ -1725,6 +1727,9 @@ hr {
 
 .settings-content {
   min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .settings-grid.single {
@@ -1859,12 +1864,15 @@ hr {
 .chain-settings-panel {
   display: flex;
   flex-direction: column;
-  min-height: calc(100vh - 260px);
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
 }
 
 .chain-settings-table {
   flex: 1 1 auto;
   min-height: 0;
+  height: 100%;
   max-height: none;
 }
 
@@ -2709,6 +2717,67 @@ hr {
   gap: 8px;
 }
 
+.auto-chain-ratio-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.auto-chain-ratio-item {
+  display: grid;
+  grid-template-columns: minmax(0, 0.92fr) minmax(118px, 0.42fr) minmax(116px, 0.5fr);
+  gap: 12px;
+  align-items: center;
+  min-height: 76px;
+  padding: 12px 14px;
+  border: 1px solid rgba(50, 109, 147, 0.82);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(10, 22, 33, 0.98) 0%, rgba(7, 16, 25, 0.95) 100%);
+  box-shadow: inset 0 0 0 1px rgba(93, 181, 231, 0.04);
+}
+
+.auto-chain-ratio-label {
+  display: block;
+  min-width: 0;
+  align-self: center;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #e8f6ff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.auto-chain-ratio-field {
+  display: grid;
+  gap: 6px;
+  align-self: stretch;
+}
+
+.auto-chain-ratio-field span {
+  display: block;
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.auto-chain-ratio-field input {
+  min-width: 0;
+  text-align: center;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.auto-chain-ratio-item .btn {
+  margin-top: 0;
+  width: 100%;
+  min-height: 42px;
+}
+
 .chip.token-tone {
   background: rgba(25, 211, 197, 0.12);
   border-color: rgba(25, 211, 197, 0.32);
@@ -2835,6 +2904,17 @@ hr {
 
   .auto-command-strip,
   .auto-strategy-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .auto-chain-ratio-item {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+}
+
+@media (max-width: 1180px) {
+  .auto-chain-ratio-list {
     grid-template-columns: 1fr;
   }
 }

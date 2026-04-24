@@ -199,6 +199,8 @@ function isAiAuditRateLimitFailure(event: AiAuditEvent): boolean {
 function serializeAutoAnalysisRuntimeConfig(username = '') {
   const config = getAutoAnalysisRuntimeConfig(username);
   return {
+    selected_chains: config.selectedChains,
+    chain_ratios: config.chainRatios,
     queue_capacity: config.queueCapacity,
     round_audit_limit: config.roundAuditLimit,
     round_rest_seconds: config.roundRestSeconds,
@@ -409,6 +411,7 @@ async function buildSettingsPayload(username = '') {
         ai_api_key: currentUserRecord?.aiApiKey || '',
         has_ai_api_key: Boolean(currentUserRecord?.aiApiKey),
         allowed_chains: allowedChains,
+        available_chains: allowedChains,
       },
       access: {
         auth_enabled: userAuth.authEnabled,

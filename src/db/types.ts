@@ -21,6 +21,10 @@ export interface TokenMetadataCacheRow {
   is_native: boolean;
   tokenCreatedAt: string | null;
   tokenCallsSync: boolean | null;
+  selectorHash: string | null;
+  selectors: string[];
+  codeSize: number;
+  seenLabel: string;
 }
 
 export interface PatternPushQueueRow {
@@ -107,6 +111,10 @@ export interface PrimitiveDbSnapshot {
     is_native: number;
     created: string | null;
     calls_sync: number | null;
+    selector_hash: string | null;
+    selectors: string;
+    code_size: number;
+    seen_label: string;
     updated_at: string;
   }>;
   pattern_sync_state: Array<{
@@ -166,6 +174,10 @@ export interface TokenRegistryRow {
   isAutoAudited: boolean;
   isManualAudited: boolean;
   isNative: boolean;
+  selectorHash: string | null;
+  selectors: string[];
+  codeSize: number;
+  seenLabel: string;
   updatedAt: string;
 }
 

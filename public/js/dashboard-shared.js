@@ -296,11 +296,18 @@
     );
   }
 
+  function tokenHasSeenPattern(row) {
+    return Boolean(
+      row?.is_seen_pattern
+      || row?.seen_label
+    );
+  }
+
   function tokenToneClass(row) {
     if (row?.is_exploitable) {
       return 'contract-row-tone-exploitable';
     }
-    if (tokenHasManualReview(row)) {
+    if (tokenHasManualReview(row) || tokenHasSeenPattern(row)) {
       return 'contract-row-tone-reviewed';
     }
     return '';

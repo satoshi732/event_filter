@@ -28,6 +28,10 @@ export interface DashboardStoredTokenRow {
   isNative: boolean;
   tokenCreatedAt: string | null;
   tokenCallsSync: boolean | null;
+  selectorHash: string | null;
+  selectors: string[];
+  codeSize: number;
+  seenLabel: string;
 }
 
 export interface DashboardTokenBalanceRow {
@@ -159,7 +163,11 @@ export function listDashboardStoredTokens(chain: string): DashboardStoredTokenRo
       is_manual_audited,
       is_native,
       created AS token_created_at,
-      calls_sync AS token_calls_sync
+      calls_sync AS token_calls_sync,
+      selector_hash,
+      selectors,
+      code_size,
+      seen_label
     FROM tokens_registry
     WHERE chain = ?
     ORDER BY token ASC
@@ -177,6 +185,10 @@ export function listDashboardStoredTokens(chain: string): DashboardStoredTokenRo
     is_native: number;
     token_created_at: string | null;
     token_calls_sync: number | null;
+    selector_hash: string | null;
+    selectors: string;
+    code_size: number;
+    seen_label: string | null;
   }>;
 
   return rows.map((row) => ({
@@ -193,6 +205,10 @@ export function listDashboardStoredTokens(chain: string): DashboardStoredTokenRo
     isNative: Boolean(row.is_native),
     tokenCreatedAt: row.token_created_at ?? null,
     tokenCallsSync: row.token_calls_sync == null ? null : Boolean(row.token_calls_sync),
+    selectorHash: row.selector_hash ?? null,
+    selectors: (row.selectors ?? '').split(',').map((value) => value.trim()).filter(Boolean),
+    codeSize: row.code_size ?? 0,
+    seenLabel: row.seen_label ?? '',
   }));
 }
 

@@ -33,6 +33,8 @@ export function persistSelectorsTempRows(chain: string, rows: SelectorTempRow[])
   storeSelectorsTempRows(chain, rows);
 }
 
+export { listSeenSelectorEntries } from './repository.js';
+
 export function matchSeenLabelBySimilarity(
   selectors: string[],
   codeSize: number,

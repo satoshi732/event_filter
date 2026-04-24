@@ -8,7 +8,22 @@ export function getTokenMetadataCache(chain: string, tokens: string[]): Map<stri
 
   const placeholders = normalized.map(() => '?').join(', ');
   const rows = getDb().prepare(`
-    SELECT address AS token, name, symbol, decimals, price_usd, is_auto_audited, is_manual_audited, is_native, created, calls_sync, token_kind
+    SELECT
+      address AS token,
+      name,
+      symbol,
+      decimals,
+      price_usd,
+      is_auto_audited,
+      is_manual_audited,
+      is_native,
+      created,
+      calls_sync,
+      token_kind,
+      selector_hash,
+      selectors,
+      code_size,
+      seen_label
     FROM tokens_registry
     WHERE chain = ?
       AND address IN (${placeholders})
@@ -24,6 +39,10 @@ export function getTokenMetadataCache(chain: string, tokens: string[]): Map<stri
     is_native: number;
     created: string | null;
     calls_sync: number | null;
+    selector_hash: string | null;
+    selectors: string;
+    code_size: number;
+    seen_label: string | null;
   }>;
 
   return new Map(rows.map((row) => [
@@ -40,6 +59,10 @@ export function getTokenMetadataCache(chain: string, tokens: string[]): Map<stri
       is_native: Boolean(row.is_native),
       tokenCreatedAt: row.created ?? null,
       tokenCallsSync: row.calls_sync == null ? null : Boolean(row.calls_sync),
+      selectorHash: row.selector_hash ?? null,
+      selectors: (row.selectors ?? '').split(',').map((value) => value.trim()).filter(Boolean),
+      codeSize: row.code_size ?? 0,
+      seenLabel: row.seen_label ?? '',
     },
   ]));
 }
@@ -260,7 +283,8 @@ export function getTokenRegistry(chain: string, addresses: string[]): Map<string
   const rows = getDb().prepare(`
     SELECT
       id, chain, address, name, symbol, price_usd, created, calls_sync, review, is_exploitable,
-      decimals, token_kind, is_auto_audited, is_manual_audited, is_native, updated_at
+      decimals, token_kind, is_auto_audited, is_manual_audited, is_native,
+      selector_hash, selectors, code_size, seen_label, updated_at
     FROM tokens_registry
     WHERE chain = ?
       AND address IN (${placeholders})
@@ -280,6 +304,10 @@ export function getTokenRegistry(chain: string, addresses: string[]): Map<string
     is_auto_audited: number;
     is_manual_audited: number;
     is_native: number;
+    selector_hash: string | null;
+    selectors: string;
+    code_size: number;
+    seen_label: string | null;
     updated_at: string;
   }>;
 
@@ -301,6 +329,10 @@ export function getTokenRegistry(chain: string, addresses: string[]): Map<string
       isAutoAudited: Boolean(row.is_auto_audited),
       isManualAudited: Boolean(row.is_manual_audited),
       isNative: Boolean(row.is_native),
+      selectorHash: row.selector_hash ?? null,
+      selectors: (row.selectors ?? '').split(',').map((value) => value.trim()).filter(Boolean),
+      codeSize: row.code_size ?? 0,
+      seenLabel: row.seen_label ?? '',
       updatedAt: row.updated_at,
     },
   ]));
@@ -317,6 +349,10 @@ export function upsertTokenRegistryBatch(
     priceUsd: number | null;
     created: string | null;
     callsSync: boolean | null;
+    selectorHash?: string | null;
+    selectors?: string[];
+    codeSize?: number;
+    seenLabel?: string;
     isAutoAudited?: boolean;
     isManualAudited?: boolean;
     isNative?: boolean;
@@ -327,10 +363,10 @@ export function upsertTokenRegistryBatch(
   const insert = getDb().prepare(`
     INSERT INTO tokens_registry (
       id, chain, address, name, symbol, decimals, token_kind, price_usd, created, calls_sync, review, is_exploitable,
-      is_auto_audited, is_manual_audited, is_native, updated_at
+      is_auto_audited, is_manual_audited, is_native, selector_hash, selectors, code_size, seen_label, updated_at
     ) VALUES (
       @id, @chain, @address, @name, @symbol, @decimals, @token_kind, @price_usd, @created, @calls_sync, @review, @is_exploitable,
-      @is_auto_audited, @is_manual_audited, @is_native, datetime('now')
+      @is_auto_audited, @is_manual_audited, @is_native, @selector_hash, @selectors, @code_size, @seen_label, datetime('now')
     )
     ON CONFLICT(chain, address) DO UPDATE SET
       name = CASE WHEN excluded.name IS NOT NULL THEN excluded.name ELSE tokens_registry.name END,
@@ -357,6 +393,19 @@ export function upsertTokenRegistryBatch(
         WHEN excluded.is_native = 1 THEN 1
         ELSE tokens_registry.is_native
       END,
+      selector_hash = COALESCE(excluded.selector_hash, tokens_registry.selector_hash),
+      selectors = CASE
+        WHEN excluded.selectors != '' THEN excluded.selectors
+        ELSE tokens_registry.selectors
+      END,
+      code_size = CASE
+        WHEN excluded.code_size > 0 THEN excluded.code_size
+        ELSE tokens_registry.code_size
+      END,
+      seen_label = CASE
+        WHEN excluded.seen_label != '' THEN excluded.seen_label
+        ELSE ''
+      END,
       updated_at = datetime('now')
   `);
 
@@ -379,6 +428,10 @@ export function upsertTokenRegistryBatch(
         is_auto_audited: row.isAutoAudited ? 1 : 0,
         is_manual_audited: row.isManualAudited ? 1 : 0,
         is_native: row.isNative ? 1 : 0,
+        selector_hash: row.selectorHash ?? null,
+        selectors: [...new Set((row.selectors ?? []).map((value) => value.toLowerCase()))].join(','),
+        code_size: row.codeSize ?? 0,
+        seen_label: String(row.seenLabel || '').trim(),
       });
     }
   });

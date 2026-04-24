@@ -106,6 +106,11 @@ export interface TokenResult {
   is_exploitable?: boolean;
   is_auto_audit: boolean;
   is_manual_audit: boolean;
+  selector_hash?: string | null;
+  selectors?: string[];
+  code_size?: number;
+  seen_label?: string;
+  is_seen_pattern?: boolean;
   related_contract_count: number;
   total_transfer_count: number;
   total_transfer_amount: string;

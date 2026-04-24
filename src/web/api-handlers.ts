@@ -26,6 +26,7 @@ import {
 } from '../db.js';
 import {
   getPatternSyncStatus,
+  prepareTokenPatternReview,
   pullPatterns,
   pushPatterns,
   queueSeenContractReviewTarget,
@@ -786,8 +787,9 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       }
       if (!requireAllowedChain(chain)) return true;
       const saved = saveTokenManualReview({ chain, token, reviewText, exploitable });
+      const patternPrep = prepareTokenPatternReview({ chain, token });
       invalidateDerivedReadCaches(chain);
-      sendJson(res, 200, { ok: true, token: saved });
+      sendJson(res, 200, { ok: true, token: saved, pattern: patternPrep });
       broadcastNamedEvent('review-updated', {
         kind: 'saved-token-review', chain, targetType: 'token', targetAddr: token, exploitable, ts: new Date().toISOString(),
       });

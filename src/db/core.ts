@@ -153,6 +153,10 @@ function initSchema(db: Database.Database): void {
       is_auto_audited   INTEGER NOT NULL DEFAULT 0,
       is_manual_audited INTEGER NOT NULL DEFAULT 0,
       is_native         INTEGER NOT NULL DEFAULT 0,
+      selector_hash     TEXT DEFAULT NULL,
+      selectors         TEXT NOT NULL DEFAULT '',
+      code_size         INTEGER NOT NULL DEFAULT 0,
+      seen_label        TEXT DEFAULT '',
       updated_at        TEXT DEFAULT (datetime('now')),
       UNIQUE(chain, address)
     );
@@ -321,6 +325,18 @@ function ensureTokensRegistrySchema(db: Database.Database): void {
   }
   if (!cols.some((col) => col.name === 'is_native')) {
     db.exec(`ALTER TABLE tokens_registry ADD COLUMN is_native INTEGER NOT NULL DEFAULT 0;`);
+  }
+  if (!cols.some((col) => col.name === 'selector_hash')) {
+    db.exec(`ALTER TABLE tokens_registry ADD COLUMN selector_hash TEXT DEFAULT NULL;`);
+  }
+  if (!cols.some((col) => col.name === 'selectors')) {
+    db.exec(`ALTER TABLE tokens_registry ADD COLUMN selectors TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!cols.some((col) => col.name === 'code_size')) {
+    db.exec(`ALTER TABLE tokens_registry ADD COLUMN code_size INTEGER NOT NULL DEFAULT 0;`);
+  }
+  if (!cols.some((col) => col.name === 'seen_label')) {
+    db.exec(`ALTER TABLE tokens_registry ADD COLUMN seen_label TEXT DEFAULT '';`);
   }
 }
 

@@ -13,6 +13,8 @@ import { getPatternSyncConfig } from '../../config.js';
 import { logger } from '../../utils/logger.js';
 import { selectorHash } from '../../utils/selector-pattern.js';
 import { getContractsRegistry, upsertContractsRegistryBatch } from '../../db/contracts.js';
+import { getTokenRegistry } from '../../db/tokens.js';
+import { upsertSelectorsTempBatch } from '../../db/selectors.js';
 
 interface RemotePatternRow {
   hash: string;
@@ -231,6 +233,49 @@ export function saveContractReview(input: {
     hash: registry?.selectorHash ?? null,
     persistedOnly: true,
   };
+}
+
+export function prepareTokenPatternReview(input: {
+  chain: string;
+  token: string;
+  label?: string;
+}): { prepared: boolean; reason?: string; hash: string | null } {
+  const chain = String(input.chain || '').trim().toLowerCase();
+  const token = String(input.token || '').trim().toLowerCase();
+  if (!chain || !token) {
+    throw new Error('chain and token are required');
+  }
+
+  const registry = getTokenRegistry(chain, [token]).get(token);
+  if (!registry) {
+    return { prepared: false, reason: 'token was not found in registry', hash: null };
+  }
+  if (registry.isNative) {
+    return { prepared: false, reason: 'native tokens do not have selector patterns', hash: null };
+  }
+  if (!registry.selectorHash || !registry.selectors.length) {
+    return { prepared: false, reason: 'token selector metadata is not available yet', hash: registry.selectorHash ?? null };
+  }
+  if (registry.seenLabel) {
+    return { prepared: false, reason: 'token pattern already matches an existing seen pattern', hash: registry.selectorHash };
+  }
+
+  const label = String(
+    input.label
+    || registry.symbol
+    || registry.name
+    || `token:${token}`,
+  ).trim();
+  upsertSelectorsTempBatch(chain, [{
+    contractAddr: token,
+    selectorHash: registry.selectorHash,
+    selectors: registry.selectors,
+    label,
+    bytecodeSize: registry.codeSize,
+    status: 'prepared',
+    lastError: null,
+  }]);
+  return { prepared: true, hash: registry.selectorHash };
 }
 
 export async function pullPatterns(): Promise<{ pulled: number; lastPullAt: string | null }> {

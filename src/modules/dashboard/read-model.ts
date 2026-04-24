@@ -14,6 +14,7 @@ import {
   ContractAiAuditRow,
   ContractRegistryRow,
   SeenContractRow,
+  SeenSelectorEntry,
   DashboardStoredTokenRow,
   getDashboardContractAutoAnalysis,
   getDashboardContractRegistry,
@@ -28,6 +29,7 @@ import {
   listDashboardStoredTokens,
   listDashboardTokenBalances,
 } from './repository.js';
+import { matchSeenEntryBySimilarity } from '../selectors-manager/index.js';
 
 export interface LatestRunMeta {
   chain: string;
@@ -59,6 +61,8 @@ export interface DashboardTokenSummary {
   auto_audit_medium: number | null;
   is_auto_audit: boolean;
   is_manual_audit: boolean;
+  is_seen_pattern: boolean;
+  seen_label: string;
   related_contract_count: number;
   total_transfer_count: number;
   total_transfer_amount: string;
@@ -119,9 +123,42 @@ export function tokenSummary(token: TokenResult, audit?: TokenAiAuditRow | null)
     auto_audit_medium: audit?.medium ?? null,
     is_auto_audit: token.is_auto_audit,
     is_manual_audit: token.is_manual_audit,
+    is_seen_pattern: false,
+    seen_label: '',
     related_contract_count: token.related_contract_count,
     total_transfer_count: token.total_transfer_count,
     total_transfer_amount: token.total_transfer_amount,
+  };
+}
+
+function resolveTokenPatternState(
+  token: TokenResult,
+  registry: DashboardStoredTokenRow | undefined,
+  seenEntries: SeenSelectorEntry[],
+) {
+  const selectors = registry?.selectors?.length
+    ? registry.selectors
+    : (Array.isArray(token.selectors) ? token.selectors : []);
+  const codeSize = registry?.codeSize && registry.codeSize > 0
+    ? registry.codeSize
+    : (token.code_size ?? 0);
+  const seenEntry = selectors.length ? matchSeenEntryBySimilarity(selectors, codeSize, seenEntries) : undefined;
+  const seenLabel = String(
+    seenEntry?.label
+    || registry?.seenLabel
+    || token.seen_label
+    || '',
+  ).trim();
+  const selectorHash = seenEntry?.hash
+    ?? registry?.selectorHash
+    ?? token.selector_hash
+    ?? null;
+  return {
+    selectorHash,
+    selectors,
+    codeSize,
+    seenLabel,
+    isSeenPattern: Boolean(seenLabel) || Boolean(token.is_seen_pattern),
   };
 }
 
@@ -129,6 +166,7 @@ export function buildDashboardTokens(chain: string, run: PipelineRunResult): Das
   const tokenRegistryMap = new Map(
     listDashboardStoredTokens(chain).map((token) => [token.token.toLowerCase(), token] as const),
   );
+  const seenEntries = listDashboardSeenSelectors();
   const auditMap = getDashboardTokenAutoAnalysis(chain, run.tokens.map((token) => token.token));
   return run.tokens.map((token) => {
     const registry = tokenRegistryMap.get(token.token.toLowerCase());
@@ -139,7 +177,12 @@ export function buildDashboardTokens(chain: string, run: PipelineRunResult): Das
       is_auto_audit: registry.isAutoAudited,
       is_manual_audit: registry.isManualAudited,
     } : token;
-    return tokenSummary(resolvedToken, auditMap.get(token.token.toLowerCase()) ?? null);
+    const patternState = resolveTokenPatternState(resolvedToken, registry, seenEntries);
+    return {
+      ...tokenSummary(resolvedToken, auditMap.get(token.token.toLowerCase()) ?? null),
+      is_seen_pattern: patternState.isSeenPattern,
+      seen_label: patternState.seenLabel,
+    };
   });
 }
 
@@ -210,6 +253,11 @@ function toStoredTokenSummary(chain: string, token: DashboardStoredTokenRow): To
     is_exploitable: token.isExploitable,
     is_auto_audit: token.isAutoAudited,
     is_manual_audit: token.isManualAudited,
+    selector_hash: token.selectorHash,
+    selectors: token.selectors,
+    code_size: token.codeSize,
+    seen_label: token.seenLabel || undefined,
+    is_seen_pattern: Boolean(token.seenLabel),
     related_contract_count: 0,
     total_transfer_count: 0,
     total_transfer_amount: '0',
@@ -383,6 +431,10 @@ export function buildPersistedRun(chain: string): PipelineRunResult | null {
       isNative: token === getNativeTokenRef(chain),
       tokenCreatedAt: null,
       tokenCallsSync: null,
+      selectorHash: null,
+      selectors: [],
+      codeSize: 0,
+      seenLabel: '',
     };
     const contractAddresses = [...(tokenContractIndex.get(token) ?? new Set(tokenAgg.contracts.keys()))];
     const contracts: TokenContractResult[] = contractAddresses.map((contractAddr) => {
@@ -506,19 +558,24 @@ export function latestPersistedRunMeta(chain: string): LatestRunMeta | null {
 }
 
 interface LiveReviewContext {
+  seenEntries: SeenSelectorEntry[];
   liveSeenLabelByHash: Map<string, string>;
   reviewMap: ReturnType<typeof getDashboardSeenContractReviews>;
   registryMap: ReturnType<typeof getDashboardContractRegistry>;
   autoAnalysisMap: ReturnType<typeof getDashboardContractAutoAnalysis>;
+  tokenRegistryMap: Map<string, DashboardStoredTokenRow>;
 }
 
 function buildLiveReviewContext(chain: string, tokens: TokenResult[]): LiveReviewContext {
+  const seenEntries = listDashboardSeenSelectors();
   const liveSeenLabelByHash = new Map(
-    listDashboardSeenSelectors().map((entry) => [entry.hash, entry.label]),
+    seenEntries.map((entry) => [entry.hash, entry.label]),
   );
   const reviewHashes = new Set<string>();
   const contractAddresses = new Set<string>();
+  const tokenAddresses = new Set<string>();
   for (const token of tokens) {
+    tokenAddresses.add(token.token.toLowerCase());
     for (const group of token.groups) {
       for (const contract of group.contracts) {
         contractAddresses.add(contract.contract.toLowerCase());
@@ -530,10 +587,16 @@ function buildLiveReviewContext(chain: string, tokens: TokenResult[]): LiveRevie
   }
 
   return {
+    seenEntries,
     liveSeenLabelByHash,
     reviewMap: getDashboardSeenContractReviews([...reviewHashes]),
     registryMap: getDashboardContractRegistry(chain, [...contractAddresses]),
     autoAnalysisMap: getDashboardContractAutoAnalysis(chain, [...contractAddresses]),
+    tokenRegistryMap: new Map(
+      listDashboardStoredTokens(chain)
+        .filter((row) => tokenAddresses.has(row.token.toLowerCase()))
+        .map((row) => [row.token.toLowerCase(), row] as const),
+    ),
   };
 }
 
@@ -543,10 +606,12 @@ function applyLiveReviewsToToken(
   context: LiveReviewContext,
 ): TokenResult {
   const {
+    seenEntries,
     liveSeenLabelByHash,
     reviewMap,
     registryMap,
     autoAnalysisMap,
+    tokenRegistryMap,
   } = context;
 
   const refreshedContracts = token.groups.flatMap((group) => group.contracts.map((contract) => {
@@ -612,9 +677,19 @@ function applyLiveReviewsToToken(
     const { seen_label: _droppedSeenLabel, ...rest } = nextContract as typeof nextContract & { seen_label?: string };
     return rest;
   }));
+  const tokenPatternState = resolveTokenPatternState(
+    token,
+    tokenRegistryMap.get(token.token.toLowerCase()),
+    seenEntries,
+  );
 
   return {
     ...token,
+    selector_hash: tokenPatternState.selectorHash,
+    selectors: tokenPatternState.selectors,
+    code_size: tokenPatternState.codeSize,
+    seen_label: tokenPatternState.seenLabel || undefined,
+    is_seen_pattern: tokenPatternState.isSeenPattern,
     groups: groupBySimilarity(refreshedContracts).map((group) => ({
       id: group.id,
       kind: group.kind,

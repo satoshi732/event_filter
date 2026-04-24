@@ -118,7 +118,7 @@ export function getPrimitiveDbSnapshot(): PrimitiveDbSnapshot {
     SELECT
       chain, address, name, symbol, decimals, token_kind,
       price_usd, is_auto_audited, is_manual_audited, is_native,
-      created, calls_sync, updated_at
+      created, calls_sync, selector_hash, selectors, code_size, seen_label, updated_at
     FROM tokens_registry
     ORDER BY chain ASC, address ASC
   `).all() as PrimitiveDbSnapshot['tokens_registry'];

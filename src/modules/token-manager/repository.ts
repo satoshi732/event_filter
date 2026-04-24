@@ -15,6 +15,10 @@ export function storeTokenRegistryRows(
     priceUsd: number | null;
     created: string | null;
     callsSync: boolean | null;
+    selectorHash?: string | null;
+    selectors?: string[];
+    codeSize?: number;
+    seenLabel?: string;
     isNative?: boolean;
   }>,
 ): void {

@@ -572,6 +572,54 @@
       window.open(targetUrl, '_blank', 'noopener');
     }
 
+    function buildChainConfigDraft() {
+      return {
+        chain: '',
+        name: '',
+        chain_id: '',
+        table_prefix: '',
+        blocks_per_scan: 75,
+        rpc_urls: [],
+        rpc_urls_text: '',
+        multicall3: '',
+        native_currency_name: '',
+        native_currency_symbol: '',
+        native_currency_decimals: 18,
+      };
+    }
+
+    function normalizeChainConfigPayload(row) {
+      const rpcUrls = Array.isArray(row?.rpc_urls)
+        ? row.rpc_urls
+        : String(row?.rpc_urls_text || row?.rpc_urls || '')
+          .split(/[\r\n,]/)
+          .map((entry) => entry.trim())
+          .filter(Boolean);
+      return {
+        chain: String(row?.chain || '').trim().toLowerCase(),
+        name: String(row?.name || '').trim(),
+        chain_id: Number.isFinite(Number(row?.chain_id)) ? Number(row.chain_id) : '',
+        table_prefix: String(row?.table_prefix || '').trim(),
+        blocks_per_scan: Number.isFinite(Number(row?.blocks_per_scan)) ? Number(row.blocks_per_scan) : 75,
+        rpc_urls: [...new Set(rpcUrls)],
+        multicall3: String(row?.multicall3 || '').trim().toLowerCase(),
+        native_currency_name: String(row?.native_currency_name || '').trim(),
+        native_currency_symbol: String(row?.native_currency_symbol || '').trim(),
+        native_currency_decimals: Number.isFinite(Number(row?.native_currency_decimals))
+          ? Number(row.native_currency_decimals)
+          : 18,
+      };
+    }
+
+    function addChainConfigRow() {
+      state.settings.chain_configs.push(buildChainConfigDraft());
+    }
+
+    function removeChainConfigRow(index) {
+      if (index < 0 || index >= (state.settings.chain_configs || []).length) return;
+      state.settings.chain_configs.splice(index, 1);
+    }
+
     function addAiProviderRow() {
       const nextIndex = (state.settings.ai_providers || []).length;
       state.settings.ai_providers.push({
@@ -666,6 +714,9 @@
           )],
         }))
         .filter((user) => user.username);
+      const chainConfigs = (state.settings.chain_configs || [])
+        .map((row) => normalizeChainConfigPayload(row))
+        .filter((row) => row.chain);
 
       try {
         const autoAnalysisDraft = {
@@ -687,7 +738,7 @@
                 users: accessUsers,
               },
             },
-            chain_configs: state.settings.chain_configs,
+            chain_configs: chainConfigs,
             ai_providers: aiProviders,
             ai_models: aiModels,
             whitelist_patterns: whitelistPatterns,
@@ -846,6 +897,8 @@
       requestTokenAnalysis,
       openAiReport,
       openTokenAiReport,
+      addChainConfigRow,
+      removeChainConfigRow,
       addAiProviderRow,
       removeAiProviderRow,
       addAiModelRow,

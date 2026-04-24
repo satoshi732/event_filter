@@ -853,24 +853,53 @@
 
               <div v-else-if="settingsSection === 'chains'" class="settings-panel">
                 <h3>Chain Config</h3>
+                <div class="settings-panel-actions">
+                  <p class="muted">Admins can add supported chains here. New chains should include chain key, chain ID, table prefix, native currency, and at least one RPC URL.</p>
+                  <button class="ghost-button" @click="addChainConfigRow">Add Chain</button>
+                </div>
                 <div class="table-wrap compact">
                   <table>
                     <thead>
                       <tr>
                         <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'chain') }" @click="toggleTableSort('chainConfig', 'chain')">Chain <span>{{ sortIndicator('chainConfig', 'chain') }}</span></button></th>
+                        <th>Name</th>
                         <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'chain_id') }" @click="toggleTableSort('chainConfig', 'chain_id')">Chain ID <span>{{ sortIndicator('chainConfig', 'chain_id') }}</span></button></th>
+                        <th>Table Prefix</th>
                         <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'blocks_per_scan') }" @click="toggleTableSort('chainConfig', 'blocks_per_scan')">Blocks/Scan <span>{{ sortIndicator('chainConfig', 'blocks_per_scan') }}</span></button></th>
                         <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'rpc_url_count') }" @click="toggleTableSort('chainConfig', 'rpc_url_count')">RPC URLs <span>{{ sortIndicator('chainConfig', 'rpc_url_count') }}</span></button></th>
                         <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'multicall3') }" @click="toggleTableSort('chainConfig', 'multicall3')">Multicall <span>{{ sortIndicator('chainConfig', 'multicall3') }}</span></button></th>
+                        <th>Native Currency</th>
+                        <th>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
-                      <tr v-for="cfg in sortedChainConfigs" :key="cfg.chain">
-                        <td>{{ cfg.chain }}</td>
-                        <td>{{ cfg.chain_id }}</td>
+                      <tr v-if="!sortedChainConfigs.length">
+                        <td colspan="9" class="muted">No chain configs</td>
+                      </tr>
+                      <tr v-for="cfg in sortedChainConfigs" :key="cfg.chain || `chain-row-${state.settings.chain_configs.indexOf(cfg)}`">
+                        <td><input v-model="cfg.chain" type="text" placeholder="base-sepolia"></td>
+                        <td><input v-model="cfg.name" type="text" placeholder="Base Sepolia"></td>
+                        <td><input v-model.number="cfg.chain_id" type="number" min="1"></td>
+                        <td><input v-model="cfg.table_prefix" type="text" placeholder="base_sepolia"></td>
                         <td><input v-model.number="cfg.blocks_per_scan" type="number" min="1"></td>
-                        <td>{{ Array.isArray(cfg.rpc_urls) ? cfg.rpc_urls.length : 0 }}</td>
+                        <td>
+                          <textarea
+                            v-model="cfg.rpc_urls_text"
+                            rows="3"
+                            placeholder="https://rpc1.example.org&#10;https://rpc2.example.org"
+                          ></textarea>
+                        </td>
                         <td class="mono"><input v-model="cfg.multicall3" type="text" class="mono"></td>
+                        <td>
+                          <div class="settings-inline-grid compact">
+                            <input v-model="cfg.native_currency_name" type="text" placeholder="Ether">
+                            <input v-model="cfg.native_currency_symbol" type="text" placeholder="ETH">
+                            <input v-model.number="cfg.native_currency_decimals" type="number" min="1" placeholder="18">
+                          </div>
+                        </td>
+                        <td>
+                          <button class="ghost-button danger" @click="removeChainConfigRow(state.settings.chain_configs.indexOf(cfg))">Remove</button>
+                        </td>
                       </tr>
                     </tbody>
                   </table>

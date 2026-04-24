@@ -251,6 +251,15 @@ function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
+function titleCaseSlug(value: string): string {
+  return String(value || '')
+    .split(/[-_\s]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
 function parsePositiveInt(value: unknown, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -388,6 +397,14 @@ function buildInfuraRpcUrls(chain: string, infuraKeys: string[]): string[] {
   return infuraKeys.map((key) => `https://${network}.infura.io/v3/${key}`);
 }
 
+function fallbackChainName(chain: string): string {
+  return titleCaseSlug(chain) || chain || 'Unknown';
+}
+
+function fallbackNativeSymbol(chain: string): string {
+  return String(chain || '').replace(/[^a-z0-9]/gi, '').slice(0, 6).toUpperCase() || 'NATIVE';
+}
+
 function readLegacyFileConfig(): LegacyFileConfig {
   if (!existsSync(LEGACY_CONFIG_FILE)) return {};
   try {
@@ -485,6 +502,7 @@ function seedRuntimeConfigIfNeeded(): void {
   const existingChains = listChainSettings();
   if (!existingChains.length) {
     const rows = Object.keys(BASE_CHAIN_CONFIGS).map((chain) => {
+      const base = BASE_CHAIN_CONFIGS[chain];
       const multicall3Address = String(
         legacy.multicall3?.[chain]
         ?? legacy.multicall3?.[chain.toLowerCase()]
@@ -494,10 +512,16 @@ function seedRuntimeConfigIfNeeded(): void {
       ).trim().toLowerCase();
       return {
         chain,
+        name: base.name,
+        chainId: base.chainId,
+        tablePrefix: base.tablePrefix,
         blocksPerScan: DEFAULT_BLOCKS_PER_SCAN[chain] ?? 75,
         chainbaseKeys: [],
         rpcUrls: [],
         multicall3Address: multicall3Address || DEFAULT_MULTICALL3_ADDRESS,
+        nativeCurrencyName: base.nativeCurrency.name,
+        nativeCurrencySymbol: base.nativeCurrency.symbol,
+        nativeCurrencyDecimals: base.nativeCurrency.decimals,
       };
     });
     upsertChainSettings(rows);
@@ -628,14 +652,29 @@ function buildChainConfigs(rows: ChainSettingRow[]): Record<string, ChainConfig>
   const map: Record<string, ChainConfig> = {};
   const sharedChainbaseKeys = parseStringList(getAppSetting('chainbase_keys'));
   const sharedRpcKeys = parseStringList(getAppSetting('rpc_keys'));
-  for (const [chain, base] of Object.entries(BASE_CHAIN_CONFIGS)) {
+  const allChains = [...new Set([
+    ...Object.keys(BASE_CHAIN_CONFIGS),
+    ...rows.map((entry) => String(entry.chain || '').trim().toLowerCase()).filter(Boolean),
+  ])];
+
+  for (const chain of allChains) {
+    const base = BASE_CHAIN_CONFIGS[chain];
     const row = rows.find((entry) => entry.chain === chain);
+    const configuredChainbaseKeys = uniqueStrings((row?.chainbaseKeys ?? []).map((entry) => String(entry || '').trim()));
+    const configuredRpcUrls = uniqueStrings((row?.rpcUrls ?? []).map((entry) => String(entry || '').trim()));
     map[chain] = {
-      ...base,
+      name: String(row?.name || base?.name || fallbackChainName(chain)).trim(),
+      chainId: parsePositiveInt(row?.chainId, base?.chainId ?? 0),
+      tablePrefix: String(row?.tablePrefix || base?.tablePrefix || chain).trim(),
       blocksPerScan: parsePositiveInt(row?.blocksPerScan, DEFAULT_BLOCKS_PER_SCAN[chain] ?? 75),
-      chainbaseKeys: sharedChainbaseKeys,
-      rpcUrls: buildInfuraRpcUrls(chain, sharedRpcKeys),
+      chainbaseKeys: configuredChainbaseKeys.length ? configuredChainbaseKeys : sharedChainbaseKeys,
+      rpcUrls: configuredRpcUrls.length ? configuredRpcUrls : buildInfuraRpcUrls(chain, sharedRpcKeys),
       multicall3Address: (row?.multicall3Address || DEFAULT_MULTICALL3_ADDRESS).trim().toLowerCase(),
+      nativeCurrency: {
+        name: String(row?.nativeCurrencyName || base?.nativeCurrency.name || fallbackChainName(chain)).trim(),
+        symbol: String(row?.nativeCurrencySymbol || base?.nativeCurrency.symbol || fallbackNativeSymbol(chain)).trim(),
+        decimals: parsePositiveInt(row?.nativeCurrencyDecimals, base?.nativeCurrency.decimals ?? 18),
+      },
     };
   }
   return map;

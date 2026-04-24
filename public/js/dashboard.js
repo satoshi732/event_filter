@@ -199,10 +199,37 @@
   function countSettingLines(value) {
     if (Array.isArray(value)) return value.filter(Boolean).length;
     return String(value || '')
-      .split(/\r?\n/)
+      .split(/[\r\n,]/)
       .map((entry) => entry.trim())
       .filter(Boolean)
       .length;
+  }
+
+  function normalizeChainConfigRow(row = {}) {
+    const nativeCurrency = row.native_currency && typeof row.native_currency === 'object'
+      ? row.native_currency
+      : {};
+    const rpcUrls = Array.isArray(row.rpc_urls)
+      ? row.rpc_urls
+      : String(row.rpc_urls_text || row.rpc_urls || '')
+        .split(/[\r\n,]/)
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+    return {
+      chain: String(row.chain || '').trim().toLowerCase(),
+      name: String(row.name || '').trim(),
+      chain_id: Number.isFinite(Number(row.chain_id)) ? Number(row.chain_id) : '',
+      table_prefix: String(row.table_prefix || '').trim(),
+      blocks_per_scan: Number.isFinite(Number(row.blocks_per_scan)) ? Number(row.blocks_per_scan) : 75,
+      rpc_urls: rpcUrls,
+      rpc_urls_text: rpcUrls.join('\n'),
+      multicall3: String(row.multicall3 || '').trim().toLowerCase(),
+      native_currency_name: String(row.native_currency_name || nativeCurrency.name || '').trim(),
+      native_currency_symbol: String(row.native_currency_symbol || nativeCurrency.symbol || '').trim(),
+      native_currency_decimals: Number.isFinite(Number(row.native_currency_decimals ?? nativeCurrency.decimals))
+        ? Number(row.native_currency_decimals ?? nativeCurrency.decimals)
+        : 18,
+    };
   }
 
   const useDashboardStore = defineStore('eventFilterDashboard', () => {
@@ -533,7 +560,9 @@
           state.settings.runtime_settings.auto_analysis.provider,
           state.settings.runtime_settings.auto_analysis.model,
         );
-        state.settings.chain_configs = data.chain_configs || [];
+        state.settings.chain_configs = Array.isArray(data.chain_configs)
+          ? data.chain_configs.map((row) => normalizeChainConfigRow(row))
+          : [];
         state.settings.ai_providers = data.ai_providers || [];
         state.settings.ai_models = data.ai_models || [];
         state.settings.whitelist_patterns = data.whitelist_patterns || [];
@@ -1156,7 +1185,7 @@
             case 'blocks_per_scan':
               return compareNumber(a.blocks_per_scan, b.blocks_per_scan);
             case 'rpc_url_count':
-              return compareNumber(countSettingLines(a.rpc_urls), countSettingLines(b.rpc_urls));
+              return compareNumber(countSettingLines(a.rpc_urls_text || a.rpc_urls), countSettingLines(b.rpc_urls_text || b.rpc_urls));
             case 'multicall3':
               return compareString(a.multicall3 || '', b.multicall3 || '');
             case 'chain':
@@ -1371,6 +1400,8 @@
         requestTokenAnalysis,
         openAiReport,
         openTokenAiReport,
+        addChainConfigRow,
+        removeChainConfigRow,
         addAiProviderRow,
         removeAiProviderRow,
         addAiModelRow,
@@ -1725,6 +1756,8 @@
         openTokenAiReport,
         toggleTokenReviewEditor,
         saveSettings,
+        addChainConfigRow,
+        removeChainConfigRow,
         addAiProviderRow,
         removeAiProviderRow,
         addAiModelRow,

@@ -73,10 +73,16 @@ function initSchema(db: Database.Database): void {
 
     CREATE TABLE IF NOT EXISTS chain_settings (
       chain                     TEXT PRIMARY KEY,
+      name                      TEXT NOT NULL DEFAULT '',
+      chain_id                  INTEGER NOT NULL DEFAULT 0,
+      table_prefix              TEXT NOT NULL DEFAULT '',
       blocks_per_scan           INTEGER NOT NULL DEFAULT 12,
       chainbase_keys            TEXT NOT NULL DEFAULT '[]',
       rpc_urls                  TEXT NOT NULL DEFAULT '[]',
       multicall3_address        TEXT NOT NULL DEFAULT '',
+      native_currency_name      TEXT NOT NULL DEFAULT '',
+      native_currency_symbol    TEXT NOT NULL DEFAULT '',
+      native_currency_decimals  INTEGER NOT NULL DEFAULT 18,
       updated_at                TEXT DEFAULT (datetime('now'))
     );
 
@@ -458,6 +464,15 @@ function migrateLegacyContractAiAudits(db: Database.Database): void {
 
 function ensureRuntimeSettingsSchema(db: Database.Database): void {
   let cols = db.prepare(`PRAGMA table_info(chain_settings)`).all() as Array<{ name: string }>;
+  if (!cols.some((col) => col.name === 'name')) {
+    db.exec(`ALTER TABLE chain_settings ADD COLUMN name TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!cols.some((col) => col.name === 'chain_id')) {
+    db.exec(`ALTER TABLE chain_settings ADD COLUMN chain_id INTEGER NOT NULL DEFAULT 0;`);
+  }
+  if (!cols.some((col) => col.name === 'table_prefix')) {
+    db.exec(`ALTER TABLE chain_settings ADD COLUMN table_prefix TEXT NOT NULL DEFAULT '';`);
+  }
   if (!cols.some((col) => col.name === 'chainbase_keys')) {
     db.exec(`ALTER TABLE chain_settings ADD COLUMN chainbase_keys TEXT NOT NULL DEFAULT '[]';`);
   }
@@ -466,6 +481,15 @@ function ensureRuntimeSettingsSchema(db: Database.Database): void {
   }
   if (!cols.some((col) => col.name === 'multicall3_address')) {
     db.exec(`ALTER TABLE chain_settings ADD COLUMN multicall3_address TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!cols.some((col) => col.name === 'native_currency_name')) {
+    db.exec(`ALTER TABLE chain_settings ADD COLUMN native_currency_name TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!cols.some((col) => col.name === 'native_currency_symbol')) {
+    db.exec(`ALTER TABLE chain_settings ADD COLUMN native_currency_symbol TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!cols.some((col) => col.name === 'native_currency_decimals')) {
+    db.exec(`ALTER TABLE chain_settings ADD COLUMN native_currency_decimals INTEGER NOT NULL DEFAULT 18;`);
   }
   if (!cols.some((col) => col.name === 'updated_at')) {
     db.exec(`ALTER TABLE chain_settings ADD COLUMN updated_at TEXT DEFAULT (datetime('now'));`);

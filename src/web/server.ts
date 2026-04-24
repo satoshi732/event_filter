@@ -24,6 +24,7 @@ import {
   getAiAuditModelConfigs,
   getAiAuditBackendConfig,
   getAiAuditProviderConfigs,
+  getAvailableChains,
   getChainConfigsSnapshot,
   getDefaultAiAuditModel,
   getDefaultAiAuditProvider,
@@ -535,7 +536,7 @@ async function renderPage(res: ServerResponse, viewPath: string, data: Record<st
 }
 
 export async function startWebServer(
-  chains: string[],
+  _chains: string[],
   host: string,
   port: number,
 ): Promise<void> {
@@ -608,7 +609,8 @@ export async function startWebServer(
   async function buildStatePayload(username = '') {
     const syncStatus = await getPatternSyncStatus();
     const userAuth = getUserAuthConfig();
-    const visibleChains = getAllowedChainsForUser(userAuth, username, chains);
+    const runtimeChains = getAvailableChains();
+    const visibleChains = getAllowedChainsForUser(userAuth, username, runtimeChains);
     const latestRuns = visibleChains.flatMap((chain) => {
       const inMemory = state.latestRuns.get(chain);
       if (inMemory) return [latestRunMeta(inMemory)];
@@ -638,6 +640,7 @@ export async function startWebServer(
   function broadcastNamedEvent(event: string, payload: unknown): void {
     if (!stateStreamClients.size) return;
     const userAuth = getUserAuthConfig();
+    const runtimeChains = getAvailableChains();
     const payloadChain = String((payload as { chain?: string } | null)?.chain || '').trim().toLowerCase();
     const payloadUsername = String((payload as { username?: string; ownerUsername?: string } | null)?.username || (payload as { ownerUsername?: string } | null)?.ownerUsername || '').trim().toLowerCase();
     for (const client of stateStreamClients) {
@@ -648,7 +651,7 @@ export async function startWebServer(
       const viewer = String(client.__username || '').trim().toLowerCase();
       if (event === 'auto-analysis' && payloadUsername && viewer !== payloadUsername) continue;
       if (payloadChain) {
-        const allowedChains = getAllowedChainsForUser(userAuth, viewer, chains);
+        const allowedChains = getAllowedChainsForUser(userAuth, viewer, runtimeChains);
         if (!allowedChains.includes(payloadChain)) continue;
       }
       writeSseEvent(client, event, payload);
@@ -767,7 +770,6 @@ export async function startWebServer(
   startAutoAnalysisEngine();
 
   const handleApiRoute = createApiRouteHandler({
-    chains,
     state,
     rootDir: ROOT,
     stateStreamClients,

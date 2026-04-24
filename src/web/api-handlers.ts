@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { readFile } from 'fs/promises';
 import path from 'path';
 import {
+  getAvailableChains,
   getDefaultAiAuditModel,
   getDefaultAiAuditProvider,
   normalizeAiAuditModel,
@@ -22,7 +23,7 @@ import {
   saveContractAiAuditResult,
   saveTokenAiAuditResult,
   setManyAppSettings,
-  upsertChainSettings,
+  replaceChainSettings,
 } from '../db.js';
 import {
   getPatternSyncStatus,
@@ -63,7 +64,6 @@ interface WebStateLike {
 }
 
 interface ApiRouteHandlerDeps {
-  chains: string[];
   state: WebStateLike;
   rootDir: string;
   stateStreamClients: Set<StateStreamClient>;
@@ -209,7 +209,6 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     url: URL,
   ): Promise<boolean> {
     const {
-      chains,
       state,
       stateStreamClients,
       sendJson,
@@ -248,7 +247,8 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     const requestUsername = requestSession?.session.username || '';
     const requestIsAdmin = !requestUserAuth.authEnabled
       || isAdminAuthUser(requestUserAuth, requestUsername);
-    const requestAllowedChains = getAllowedChainsForUser(requestUserAuth, requestUsername, chains);
+    const requestKnownChains = getAvailableChains();
+    const requestAllowedChains = getAllowedChainsForUser(requestUserAuth, requestUsername, requestKnownChains);
     const requireAdmin = () => {
       if (requestIsAdmin) return true;
       sendJson(res, 403, { error: 'Admin privileges are required for this action' });
@@ -268,7 +268,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         role: account?.role || 'user',
         ai_api_key: account?.aiApiKey || '',
         has_ai_api_key: Boolean(account?.aiApiKey),
-        allowed_chains: getAllowedChainsForUser(config, username, chains),
+        allowed_chains: getAllowedChainsForUser(config, username, requestKnownChains),
       };
     };
 
@@ -336,7 +336,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     if (reqPath === '/api/auto-analysis/start' && method === 'POST') {
       const body = await readJsonBody(req);
       const chain = normalizeRequestedChain(body.chain);
-      if (!chain || !chains.includes(chain)) {
+      if (!chain || !requestKnownChains.includes(chain)) {
         sendJson(res, 400, { error: 'Unknown chain' });
         return true;
       }
@@ -689,7 +689,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       if (!requireAdmin()) return true;
       const body = await readJsonBody(req);
       const chain = normalizeRequestedChain(body.chain);
-      if (!chain || !chains.includes(chain)) {
+      if (!chain || !requestKnownChains.includes(chain)) {
         sendJson(res, 400, { error: 'Invalid chain' });
         return true;
       }
@@ -951,17 +951,78 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         }
       }
 
+      const normalizedChainRows = chainConfigs
+        .map((row) => {
+          const nativeCurrency = (typeof row.native_currency === 'object' && row.native_currency)
+            ? row.native_currency as Record<string, unknown>
+            : {};
+          return {
+            chain: String(row.chain || '').trim().toLowerCase(),
+            name: String(row.name || '').trim(),
+            chainId: coercePositiveInt(row.chain_id ?? row.chainId, 0),
+            tablePrefix: String((row.table_prefix ?? row.tablePrefix) || '').trim(),
+            blocksPerScan: coercePositiveInt(row.blocks_per_scan ?? row.blocksPerScan, 75),
+            chainbaseKeys: coerceStringArray(row.chainbase_keys ?? row.chainbaseKeys),
+            rpcUrls: coerceStringArray(row.rpc_urls ?? row.rpcUrls ?? row.rpc_urls_text),
+            multicall3Address: String(row.multicall3 || '').trim().toLowerCase(),
+            nativeCurrencyName: String(
+              row.native_currency_name
+              ?? row.nativeCurrencyName
+              ?? nativeCurrency.name
+              ?? '',
+            ).trim(),
+            nativeCurrencySymbol: String(
+              row.native_currency_symbol
+              ?? row.nativeCurrencySymbol
+              ?? nativeCurrency.symbol
+              ?? '',
+            ).trim(),
+            nativeCurrencyDecimals: coercePositiveInt(
+              row.native_currency_decimals
+              ?? row.nativeCurrencyDecimals
+              ?? nativeCurrency.decimals,
+              18,
+            ),
+          };
+        })
+        .filter((row) => row.chain);
+      const nextKnownChains = normalizedChainRows.map((row) => row.chain);
+
+      if (!normalizedChainRows.length) {
+        sendJson(res, 400, { error: 'At least one chain config is required' });
+        return true;
+      }
+      const duplicateChains = nextKnownChains.filter((chain, index) => nextKnownChains.indexOf(chain) !== index);
+      if (duplicateChains.length) {
+        sendJson(res, 400, { error: `Duplicate chain config: ${duplicateChains[0]}` });
+        return true;
+      }
+      for (const row of normalizedChainRows) {
+        if (!/^[a-z0-9_-]+$/.test(row.chain)) {
+          sendJson(res, 400, { error: `Invalid chain key: ${row.chain}` });
+          return true;
+        }
+        if (!row.name || !row.tablePrefix || !row.chainId || !row.nativeCurrencyName || !row.nativeCurrencySymbol) {
+          sendJson(res, 400, { error: `Incomplete chain config for ${row.chain}` });
+          return true;
+        }
+        if (!requestKnownChains.includes(row.chain) && !row.rpcUrls.length) {
+          sendJson(res, 400, { error: `New chain ${row.chain} needs at least one RPC URL` });
+          return true;
+        }
+      }
+
       updateUserAllowedChains(accessUsers.map((row) => ({
         username: String(row.username || '').trim(),
         allowedChains: coerceStringArray(row.allowed_chains)
           .map((chain) => String(chain || '').trim().toLowerCase())
-          .filter((chain) => chains.includes(chain)),
+          .filter((chain) => nextKnownChains.includes(chain)),
       })));
 
       setManyAppSettings([
         { key: 'chainbase_keys', value: JSON.stringify(coerceStringArray(runtime.chainbase_keys)) },
         { key: 'rpc_keys', value: JSON.stringify(coerceStringArray(runtime.rpc_keys)) },
-        { key: 'monitor_chains', value: JSON.stringify(coerceStringArray(runtime.monitored_chains)) },
+        { key: 'monitor_chains', value: JSON.stringify(coerceStringArray(runtime.monitored_chains).filter((chain) => nextKnownChains.includes(chain))) },
         { key: 'poll_interval_ms', value: String(coercePositiveInt(runtime.poll_interval_ms, 600_000)) },
         { key: 'debug', value: coerceBoolean(runtime.debug, false) ? '1' : '0' },
         { key: 'pattern_sync.host', value: String(patternSync.host || '').trim() },
@@ -985,13 +1046,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         { key: 'web_security.tls_key_path', value: tlsKeyPath },
       ]);
 
-      upsertChainSettings(chainConfigs.map((row) => ({
-        chain: String(row.chain || '').trim().toLowerCase(),
-        blocksPerScan: coercePositiveInt(row.blocks_per_scan, 75),
-        chainbaseKeys: [],
-        rpcUrls: [],
-        multicall3Address: String(row.multicall3 || '').trim().toLowerCase(),
-      })).filter((row) => row.chain));
+      replaceChainSettings(normalizedChainRows);
 
       replaceAiAuditProviders(providerRows);
       replaceAiAuditModels(modelRows);
@@ -1003,6 +1058,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         description: String(row.description || '').trim(),
       })));
       reloadRuntimeConfig();
+      await broadcastStateSnapshot();
 
       sendJson(res, 200, { ok: true, hot_applied: true, settings: await buildSettingsPayload(requestUsername) });
       return true;

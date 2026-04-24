@@ -218,6 +218,7 @@ export function updateOwnUserAuthAccount(
     username?: string;
     newPassword?: string;
     aiApiKey?: string;
+    allowedChains?: string[];
   },
 ): { previousUsername: string; user: UserAuthAccount; config: UserAuthConfig } {
   const config = ensureUserAuthFile();
@@ -241,6 +242,7 @@ export function updateOwnUserAuthAccount(
     ...previous,
     username: nextUsername,
     aiApiKey: String(input.aiApiKey ?? previous.aiApiKey ?? '').trim(),
+    allowedChains: [...new Set((input.allowedChains ?? previous.allowedChains ?? []).map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean))],
   };
   if (newPassword) {
     if (newPassword.length < 4) throw new Error('new password must be at least 4 characters');

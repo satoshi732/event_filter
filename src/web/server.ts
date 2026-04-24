@@ -357,6 +357,9 @@ function applyDashboardTokenQuery(
       case 'price':
         delta = compareNumberLike(a.token_price_usd, b.token_price_usd);
         break;
+      case 'processing':
+        delta = compareNumberLike(a.processing_percent, b.processing_percent);
+        break;
       case 'contracts':
       default:
         delta = compareNumberLike(a.related_contract_count, b.related_contract_count);
@@ -432,7 +435,7 @@ async function buildSettingsPayload(username = '') {
       table_prefix: cfg.tablePrefix,
       blocks_per_scan: cfg.blocksPerScan,
       chainbase_keys: cfg.chainbaseKeys,
-      rpc_urls: cfg.rpcUrls,
+      rpc_network: cfg.rpcNetwork,
       multicall3: cfg.multicall3Address,
       native_currency: cfg.nativeCurrency,
     })),

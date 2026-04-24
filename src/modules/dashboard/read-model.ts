@@ -63,6 +63,8 @@ export interface DashboardTokenSummary {
   is_manual_audit: boolean;
   is_seen_pattern: boolean;
   seen_label: string;
+  processing_percent: number;
+  processing_seen_contract_count: number;
   related_contract_count: number;
   total_transfer_count: number;
   total_transfer_amount: string;
@@ -107,6 +109,7 @@ export function latestRunMeta(run: PipelineRunResult): LatestRunMeta {
 }
 
 export function tokenSummary(token: TokenResult, audit?: TokenAiAuditRow | null): DashboardTokenSummary {
+  const processing = resolveTokenProcessing(token);
   return {
     chain: token.chain,
     token: token.token,
@@ -125,9 +128,29 @@ export function tokenSummary(token: TokenResult, audit?: TokenAiAuditRow | null)
     is_manual_audit: token.is_manual_audit,
     is_seen_pattern: false,
     seen_label: '',
+    processing_percent: processing.percent,
+    processing_seen_contract_count: processing.seenCount,
     related_contract_count: token.related_contract_count,
     total_transfer_count: token.total_transfer_count,
     total_transfer_amount: token.total_transfer_amount,
+  };
+}
+
+function resolveTokenProcessing(token: TokenResult): { percent: number; seenCount: number; totalCount: number } {
+  const contracts = (token.groups || []).flatMap((group) => group.contracts || []);
+  const totalCount = contracts.length || Number(token.related_contract_count || 0) || 0;
+  if (!totalCount) {
+    return { percent: 0, seenCount: 0, totalCount: 0 };
+  }
+  const seenCount = contracts.filter((contract) => (
+    Boolean(contract.is_seen_pattern)
+    || Boolean(contract.seen_label)
+    || Boolean(contract.is_manual_audit)
+  )).length;
+  return {
+    percent: Math.max(0, Math.min(100, Math.round((seenCount / totalCount) * 100))),
+    seenCount,
+    totalCount,
   };
 }
 

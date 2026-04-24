@@ -579,8 +579,7 @@
         chain_id: '',
         table_prefix: '',
         blocks_per_scan: 75,
-        rpc_urls: [],
-        rpc_urls_text: '',
+        rpc_network: '',
         multicall3: '',
         native_currency_name: '',
         native_currency_symbol: '',
@@ -589,19 +588,13 @@
     }
 
     function normalizeChainConfigPayload(row) {
-      const rpcUrls = Array.isArray(row?.rpc_urls)
-        ? row.rpc_urls
-        : String(row?.rpc_urls_text || row?.rpc_urls || '')
-          .split(/[\r\n,]/)
-          .map((entry) => entry.trim())
-          .filter(Boolean);
       return {
         chain: String(row?.chain || '').trim().toLowerCase(),
         name: String(row?.name || '').trim(),
         chain_id: Number.isFinite(Number(row?.chain_id)) ? Number(row.chain_id) : '',
         table_prefix: String(row?.table_prefix || '').trim(),
         blocks_per_scan: Number.isFinite(Number(row?.blocks_per_scan)) ? Number(row.blocks_per_scan) : 75,
-        rpc_urls: [...new Set(rpcUrls)],
+        rpc_network: String(row?.rpc_network || '').trim(),
         multicall3: String(row?.multicall3 || '').trim().toLowerCase(),
         native_currency_name: String(row?.native_currency_name || '').trim(),
         native_currency_symbol: String(row?.native_currency_symbol || '').trim(),
@@ -618,6 +611,40 @@
     function removeChainConfigRow(index) {
       if (index < 0 || index >= (state.settings.chain_configs || []).length) return;
       state.settings.chain_configs.splice(index, 1);
+    }
+
+    function addAccountAllowedChain() {
+      const account = state.settings.runtime_settings.account || {};
+      const candidate = String(account.allowed_chain_candidate || '').trim().toLowerCase();
+      if (!candidate) return;
+      const availableChains = Array.isArray(account.available_chains)
+        ? account.available_chains.map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean)
+        : [];
+      if (!availableChains.includes(candidate)) return;
+      const nextAllowedChains = [...new Set([...(account.allowed_chains || []), candidate])];
+      const nextCandidate = availableChains.find((chain) => !nextAllowedChains.includes(chain)) || '';
+      state.settings.runtime_settings.account = {
+        ...account,
+        allowed_chains: nextAllowedChains,
+        allowed_chain_candidate: nextCandidate,
+      };
+    }
+
+    function removeAccountAllowedChain(chain) {
+      const account = state.settings.runtime_settings.account || {};
+      const normalized = String(chain || '').trim().toLowerCase();
+      const nextAllowedChains = (account.allowed_chains || []).filter((entry) => String(entry || '').trim().toLowerCase() !== normalized);
+      const availableChains = Array.isArray(account.available_chains)
+        ? account.available_chains.map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean)
+        : [];
+      const nextCandidate = account.allowed_chain_candidate
+        || availableChains.find((entry) => !nextAllowedChains.includes(entry))
+        || '';
+      state.settings.runtime_settings.account = {
+        ...account,
+        allowed_chains: nextAllowedChains,
+        allowed_chain_candidate: nextCandidate,
+      };
     }
 
     function addAiProviderRow() {
@@ -706,12 +733,6 @@
         .map((user) => ({
           username: String(user.username || '').trim(),
           role: String(user.role || 'user').trim().toLowerCase() || 'user',
-          allowed_chains: [...new Set(
-            String(user.allowed_chains_text || '')
-              .split(/[\r\n,]/)
-              .map((entry) => entry.trim().toLowerCase())
-              .filter(Boolean),
-          )],
         }))
         .filter((user) => user.username);
       const chainConfigs = (state.settings.chain_configs || [])
@@ -778,18 +799,38 @@
           body: JSON.stringify({
             username: String(account.username || '').trim(),
             ai_api_key: String(account.ai_api_key || '').trim(),
+            allowed_chains: Array.isArray(account.allowed_chains) ? account.allowed_chains : [],
             current_password: String(account.current_password || ''),
             new_password: String(account.new_password || ''),
             confirm_password: String(account.confirm_password || ''),
           }),
         });
-        state.settings.runtime_settings.account = {
+        const updatedAccount = {
           ...(state.settings.runtime_settings.account || {}),
           ...(data.account || {}),
+          available_chains: Array.isArray(data.account?.available_chains)
+            ? data.account.available_chains.map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean)
+            : (state.settings.runtime_settings.account?.available_chains || []),
+          allowed_chains: Array.isArray(data.account?.allowed_chains)
+            ? data.account.allowed_chains.map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean)
+            : (state.settings.runtime_settings.account?.allowed_chains || []),
+        };
+        const visibleChains = updatedAccount.allowed_chains.length
+          ? updatedAccount.allowed_chains
+          : updatedAccount.available_chains;
+        updatedAccount.allowed_chain_candidate = updatedAccount.available_chains.find(
+          (chain) => !updatedAccount.allowed_chains.includes(chain),
+        ) || updatedAccount.available_chains[0] || '';
+        state.settings.runtime_settings.account = {
+          ...updatedAccount,
           current_password: '',
           new_password: '',
           confirm_password: '',
         };
+        state.chains = visibleChains;
+        if (state.selectedChain && visibleChains.length && !visibleChains.includes(state.selectedChain)) {
+          state.selectedChain = visibleChains[0];
+        }
         if (data.account?.username) {
           state.currentUser = data.account.username;
         }
@@ -897,6 +938,8 @@
       requestTokenAnalysis,
       openAiReport,
       openTokenAiReport,
+      addAccountAllowedChain,
+      removeAccountAllowedChain,
       addChainConfigRow,
       removeChainConfigRow,
       addAiProviderRow,

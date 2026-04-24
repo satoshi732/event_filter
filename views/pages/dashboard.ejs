@@ -615,12 +615,45 @@
                 <div class="settings-panel">
                   <div class="card-head compact">
                     <h3>My Account</h3>
-                    <span class="muted">Only your username, password, and AI audit API key are editable here.</span>
+                    <span class="muted">Choose your own chains here along with your username, password, and AI audit API key.</span>
                   </div>
                   <div class="settings-inline-grid">
                     <div class="stack-label">
-                      <span>Assigned Chains</span>
-                      <span class="mono">{{ ((settings.runtime_settings.account.allowed_chains || []).length ? settings.runtime_settings.account.allowed_chains.join(', ') : 'all visible chains') }}</span>
+                      <span>My Chains</span>
+                      <div class="chain-selector-row">
+                        <select v-model="settings.runtime_settings.account.allowed_chain_candidate">
+                          <option value="">Select chain</option>
+                          <option
+                            v-for="chain in (settings.runtime_settings.account.available_chains || []).filter((chain) => !(settings.runtime_settings.account.allowed_chains || []).includes(chain))"
+                            :key="`account-chain-option-${chain}`"
+                            :value="chain"
+                          >
+                            {{ chain }}
+                          </option>
+                        </select>
+                        <button
+                          class="btn ghost btn-small"
+                          type="button"
+                          :disabled="!settings.runtime_settings.account.allowed_chain_candidate"
+                          @click="addAccountAllowedChain"
+                        >
+                          Add
+                        </button>
+                      </div>
+                      <div class="chain-badge-list">
+                        <button
+                          v-for="chain in settings.runtime_settings.account.allowed_chains || []"
+                          :key="`account-chain-${chain}`"
+                          class="chain-badge"
+                          type="button"
+                          @click="removeAccountAllowedChain(chain)"
+                        >
+                          <span>{{ chain }}</span>
+                          <span class="chain-badge-remove" aria-hidden="true">×</span>
+                        </button>
+                        <span v-if="!(settings.runtime_settings.account.allowed_chains || []).length" class="chip small plain">all supported chains</span>
+                      </div>
+                      <span class="muted">Select the chains you want in your workspace. Leave the list empty to keep all supported chains visible.</span>
                     </div>
                     <label class="stack-label">
                       <span>Username</span>
@@ -775,14 +808,14 @@
                 </div>
 
                 <h3>User Chain Access</h3>
-                <p class="muted">Use comma-separated chain names. Leave blank to allow every supported chain for that user. Supported chains: <span class="mono">{{ chains.join(', ') || '--' }}</span></p>
+                <p class="muted">Users manage their own chain list from their Account panel. Empty means all supported chains. Supported chains: <span class="mono">{{ chains.join(', ') || '--' }}</span></p>
                 <div class="table-wrap compact">
                   <table>
                     <thead>
                       <tr>
                         <th>User</th>
                         <th>Role</th>
-                        <th>Assigned Chains</th>
+                        <th>Selected Chains</th>
                         <th>API Key</th>
                       </tr>
                     </thead>
@@ -794,11 +827,16 @@
                         <td class="mono">{{ user.username }}</td>
                         <td>{{ user.role }}</td>
                         <td>
-                          <input
-                            v-model="user.allowed_chains_text"
-                            type="text"
-                            placeholder="ethereum, bsc, base"
-                          >
+                          <div class="chain-badge-list">
+                            <span
+                              v-for="chain in user.allowed_chains || []"
+                              :key="`access-user-${user.username}-${chain}`"
+                              class="chip small plain"
+                            >
+                              {{ chain }}
+                            </span>
+                            <span v-if="!(user.allowed_chains || []).length" class="chip small plain">all chains</span>
+                          </div>
                         </td>
                         <td>
                           <span class="chip small" :class="user.has_ai_api_key ? 'ok' : 'plain'">
@@ -851,13 +889,13 @@
                 </div>
               </div>
 
-              <div v-else-if="settingsSection === 'chains'" class="settings-panel">
+              <div v-else-if="settingsSection === 'chains'" class="settings-panel chain-settings-panel">
                 <h3>Chain Config</h3>
                 <div class="settings-panel-actions">
-                  <p class="muted">Admins can add supported chains here. New chains should include chain key, chain ID, table prefix, native currency, and at least one RPC URL.</p>
-                  <button class="ghost-button" @click="addChainConfigRow">Add Chain</button>
+                  <p class="muted">Admins can add supported chains here. Store the Infura network slug here, like <span class="mono">arbitrum-mainnet</span> or <span class="mono">base-mainnet</span>, and RPC URLs will be assembled from the shared RPC keys.</p>
+                  <button class="btn ghost btn-small" type="button" @click="addChainConfigRow">Add Chain</button>
                 </div>
-                <div class="table-wrap compact">
+                <div class="table-wrap compact chain-settings-table">
                   <table>
                     <thead>
                       <tr>
@@ -866,7 +904,7 @@
                         <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'chain_id') }" @click="toggleTableSort('chainConfig', 'chain_id')">Chain ID <span>{{ sortIndicator('chainConfig', 'chain_id') }}</span></button></th>
                         <th>Table Prefix</th>
                         <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'blocks_per_scan') }" @click="toggleTableSort('chainConfig', 'blocks_per_scan')">Blocks/Scan <span>{{ sortIndicator('chainConfig', 'blocks_per_scan') }}</span></button></th>
-                        <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'rpc_url_count') }" @click="toggleTableSort('chainConfig', 'rpc_url_count')">RPC URLs <span>{{ sortIndicator('chainConfig', 'rpc_url_count') }}</span></button></th>
+                        <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'rpc_network') }" @click="toggleTableSort('chainConfig', 'rpc_network')">Infura Network <span>{{ sortIndicator('chainConfig', 'rpc_network') }}</span></button></th>
                         <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'multicall3') }" @click="toggleTableSort('chainConfig', 'multicall3')">Multicall <span>{{ sortIndicator('chainConfig', 'multicall3') }}</span></button></th>
                         <th>Native Currency</th>
                         <th>Actions</th>
@@ -876,18 +914,14 @@
                       <tr v-if="!sortedChainConfigs.length">
                         <td colspan="9" class="muted">No chain configs</td>
                       </tr>
-                      <tr v-for="cfg in sortedChainConfigs" :key="cfg.chain || `chain-row-${state.settings.chain_configs.indexOf(cfg)}`">
+                      <tr v-for="(cfg, index) in sortedChainConfigs" :key="cfg.chain || `chain-row-${index}`">
                         <td><input v-model="cfg.chain" type="text" placeholder="base-sepolia"></td>
                         <td><input v-model="cfg.name" type="text" placeholder="Base Sepolia"></td>
                         <td><input v-model.number="cfg.chain_id" type="number" min="1"></td>
                         <td><input v-model="cfg.table_prefix" type="text" placeholder="base_sepolia"></td>
                         <td><input v-model.number="cfg.blocks_per_scan" type="number" min="1"></td>
                         <td>
-                          <textarea
-                            v-model="cfg.rpc_urls_text"
-                            rows="3"
-                            placeholder="https://rpc1.example.org&#10;https://rpc2.example.org"
-                          ></textarea>
+                          <input v-model="cfg.rpc_network" type="text" placeholder="base-mainnet">
                         </td>
                         <td class="mono"><input v-model="cfg.multicall3" type="text" class="mono"></td>
                         <td>
@@ -898,7 +932,7 @@
                           </div>
                         </td>
                         <td>
-                          <button class="ghost-button danger" @click="removeChainConfigRow(state.settings.chain_configs.indexOf(cfg))">Remove</button>
+                          <button class="btn subtle btn-small" type="button" @click="removeChainConfigRow(settings.chain_configs.indexOf(cfg))">Remove</button>
                         </td>
                       </tr>
                     </tbody>
@@ -1091,13 +1125,14 @@
                   <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'manual_audit') }" @click="toggleTableSort('tokenDirectory', 'manual_audit')">Manual Audit <span>{{ sortIndicator('tokenDirectory', 'manual_audit') }}</span></button></th>
                   <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'deployed') }" @click="toggleTableSort('tokenDirectory', 'deployed')">Deployed <span>{{ sortIndicator('tokenDirectory', 'deployed') }}</span></button></th>
                   <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'price') }" @click="toggleTableSort('tokenDirectory', 'price')">Price <span>{{ sortIndicator('tokenDirectory', 'price') }}</span></button></th>
+                  <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'processing') }" @click="toggleTableSort('tokenDirectory', 'processing')">Processing <span>{{ sortIndicator('tokenDirectory', 'processing') }}</span></button></th>
                   <th><button class="th-sort-btn" :class="{ active: isActiveSort('tokenDirectory', 'contracts') }" @click="toggleTableSort('tokenDirectory', 'contracts')">Contracts <span>{{ sortIndicator('tokenDirectory', 'contracts') }}</span></button></th>
                   <th>Action</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-if="!filteredTokens.length">
-                  <td colspan="11" class="muted">No token data</td>
+                  <td colspan="12" class="muted">No token data</td>
                 </tr>
                 <tr v-for="token in paginatedFilteredTokens" :key="token.token" :class="tokenToneClass(token)">
                   <td>
@@ -1141,6 +1176,15 @@
                   </td>
                   <td :title="formatDateTime(token.token_created_at)">{{ formatRelativeTime(token.token_created_at) }}</td>
                   <td>{{ formatUsd(token.token_price_usd) }}</td>
+                  <td>
+                    <span
+                      class="chip small"
+                      :class="token.processing_percent >= 100 ? 'ok' : (token.processing_percent > 0 ? 'warn' : 'plain')"
+                      :title="`${token.processing_seen_contract_count || 0} / ${token.related_contract_count || 0} related contracts marked seen`"
+                    >
+                      {{ token.processing_percent }}%
+                    </span>
+                  </td>
                   <td>{{ token.related_contract_count }}</td>
                   <td>
                     <div class="icon-action-row">

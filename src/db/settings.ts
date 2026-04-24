@@ -13,6 +13,7 @@ export interface ChainSettingRow {
   tablePrefix: string;
   blocksPerScan: number;
   chainbaseKeys: string[];
+  rpcNetwork: string;
   rpcUrls: string[];
   multicall3Address: string;
   nativeCurrencyName: string;
@@ -115,6 +116,7 @@ export function listChainSettings(): ChainSettingRow[] {
       table_prefix,
       blocks_per_scan,
       chainbase_keys,
+      rpc_network,
       rpc_urls,
       multicall3_address,
       native_currency_name,
@@ -130,6 +132,7 @@ export function listChainSettings(): ChainSettingRow[] {
     table_prefix: string | null;
     blocks_per_scan: number;
     chainbase_keys: string;
+    rpc_network: string | null;
     rpc_urls: string;
     multicall3_address: string;
     native_currency_name: string | null;
@@ -144,6 +147,7 @@ export function listChainSettings(): ChainSettingRow[] {
     tablePrefix: row.table_prefix ?? '',
     blocksPerScan: row.blocks_per_scan,
     chainbaseKeys: parseJsonArray(row.chainbase_keys),
+    rpcNetwork: row.rpc_network ?? '',
     rpcUrls: parseJsonArray(row.rpc_urls),
     multicall3Address: row.multicall3_address,
     nativeCurrencyName: row.native_currency_name ?? '',
@@ -160,6 +164,7 @@ export function upsertChainSettings(rows: Array<{
   tablePrefix: string;
   blocksPerScan: number;
   chainbaseKeys: string[];
+  rpcNetwork: string;
   rpcUrls: string[];
   multicall3Address: string;
   nativeCurrencyName: string;
@@ -170,15 +175,16 @@ export function upsertChainSettings(rows: Array<{
     const stmt = getDb().prepare(`
       INSERT INTO chain_settings (
         chain, name, chain_id, table_prefix, blocks_per_scan,
-        chainbase_keys, rpc_urls, multicall3_address,
+        chainbase_keys, rpc_network, rpc_urls, multicall3_address,
         native_currency_name, native_currency_symbol, native_currency_decimals, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       ON CONFLICT(chain) DO UPDATE SET
         name = excluded.name,
         chain_id = excluded.chain_id,
         table_prefix = excluded.table_prefix,
         blocks_per_scan = excluded.blocks_per_scan,
         chainbase_keys = excluded.chainbase_keys,
+        rpc_network = excluded.rpc_network,
         rpc_urls = excluded.rpc_urls,
         multicall3_address = excluded.multicall3_address,
         native_currency_name = excluded.native_currency_name,
@@ -194,6 +200,7 @@ export function upsertChainSettings(rows: Array<{
         row.tablePrefix.trim(),
         row.blocksPerScan,
         stringifyJsonArray(row.chainbaseKeys),
+        row.rpcNetwork.trim(),
         stringifyJsonArray(row.rpcUrls),
         row.multicall3Address.trim().toLowerCase(),
         row.nativeCurrencyName.trim(),
@@ -212,6 +219,7 @@ export function replaceChainSettings(rows: Array<{
   tablePrefix: string;
   blocksPerScan: number;
   chainbaseKeys: string[];
+  rpcNetwork: string;
   rpcUrls: string[];
   multicall3Address: string;
   nativeCurrencyName: string;
@@ -226,6 +234,7 @@ export function replaceChainSettings(rows: Array<{
       tablePrefix: row.tablePrefix.trim(),
       blocksPerScan: row.blocksPerScan,
       chainbaseKeys: row.chainbaseKeys,
+      rpcNetwork: row.rpcNetwork.trim(),
       rpcUrls: row.rpcUrls,
       multicall3Address: row.multicall3Address,
       nativeCurrencyName: row.nativeCurrencyName,
@@ -241,9 +250,9 @@ export function replaceChainSettings(rows: Array<{
     const stmt = db.prepare(`
       INSERT INTO chain_settings (
         chain, name, chain_id, table_prefix, blocks_per_scan,
-        chainbase_keys, rpc_urls, multicall3_address,
+        chainbase_keys, rpc_network, rpc_urls, multicall3_address,
         native_currency_name, native_currency_symbol, native_currency_decimals, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     `);
     for (const row of entries) {
       stmt.run(
@@ -253,6 +262,7 @@ export function replaceChainSettings(rows: Array<{
         row.tablePrefix,
         row.blocksPerScan,
         stringifyJsonArray(row.chainbaseKeys),
+        row.rpcNetwork.trim(),
         stringifyJsonArray(row.rpcUrls),
         row.multicall3Address.trim().toLowerCase(),
         row.nativeCurrencyName.trim(),

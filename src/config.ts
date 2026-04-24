@@ -105,6 +105,7 @@ export interface ChainConfig {
   tablePrefix: string;
   blocksPerScan: number;
   chainbaseKeys: string[];
+  rpcNetwork: string;
   rpcUrls: string[];
   multicall3Address: string;
   nativeCurrency: {
@@ -163,7 +164,7 @@ interface LegacyKeysFile {
   };
 }
 
-const BASE_CHAIN_CONFIGS: Record<string, Omit<ChainConfig, 'blocksPerScan' | 'chainbaseKeys' | 'rpcUrls' | 'multicall3Address'>> = {
+const BASE_CHAIN_CONFIGS: Record<string, Omit<ChainConfig, 'blocksPerScan' | 'chainbaseKeys' | 'rpcNetwork' | 'rpcUrls' | 'multicall3Address'>> = {
   ethereum:  { name: 'Ethereum',  chainId: 1,     tablePrefix: 'ethereum',  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
   bsc:       { name: 'BSC',       chainId: 56,    tablePrefix: 'bsc',       nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 } },
   polygon:   { name: 'Polygon',   chainId: 137,   tablePrefix: 'polygon',   nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 } },
@@ -391,10 +392,16 @@ function resolveTlsPaths(rawCertPath: string | null | undefined, rawKeyPath: str
   };
 }
 
-function buildInfuraRpcUrls(chain: string, infuraKeys: string[]): string[] {
-  const network = INFURA_NETWORK_BY_CHAIN[chain.toLowerCase()];
-  if (!network || !infuraKeys.length) return [];
-  return infuraKeys.map((key) => `https://${network}.infura.io/v3/${key}`);
+function buildInfuraRpcUrls(network: string, infuraKeys: string[]): string[] {
+  const normalizedNetwork = String(network || '').trim();
+  if (!normalizedNetwork || !infuraKeys.length) return [];
+  return infuraKeys.map((key) => `https://${normalizedNetwork}.infura.io/v3/${key}`);
+}
+
+function resolveRpcNetwork(chain: string, configured: string | null | undefined): string {
+  const normalizedConfigured = String(configured || '').trim();
+  if (normalizedConfigured) return normalizedConfigured;
+  return INFURA_NETWORK_BY_CHAIN[chain.toLowerCase()] || '';
 }
 
 function fallbackChainName(chain: string): string {
@@ -517,6 +524,7 @@ function seedRuntimeConfigIfNeeded(): void {
         tablePrefix: base.tablePrefix,
         blocksPerScan: DEFAULT_BLOCKS_PER_SCAN[chain] ?? 75,
         chainbaseKeys: [],
+        rpcNetwork: INFURA_NETWORK_BY_CHAIN[chain] ?? '',
         rpcUrls: [],
         multicall3Address: multicall3Address || DEFAULT_MULTICALL3_ADDRESS,
         nativeCurrencyName: base.nativeCurrency.name,
@@ -661,14 +669,15 @@ function buildChainConfigs(rows: ChainSettingRow[]): Record<string, ChainConfig>
     const base = BASE_CHAIN_CONFIGS[chain];
     const row = rows.find((entry) => entry.chain === chain);
     const configuredChainbaseKeys = uniqueStrings((row?.chainbaseKeys ?? []).map((entry) => String(entry || '').trim()));
-    const configuredRpcUrls = uniqueStrings((row?.rpcUrls ?? []).map((entry) => String(entry || '').trim()));
+    const rpcNetwork = resolveRpcNetwork(chain, row?.rpcNetwork);
     map[chain] = {
       name: String(row?.name || base?.name || fallbackChainName(chain)).trim(),
       chainId: parsePositiveInt(row?.chainId, base?.chainId ?? 0),
       tablePrefix: String(row?.tablePrefix || base?.tablePrefix || chain).trim(),
       blocksPerScan: parsePositiveInt(row?.blocksPerScan, DEFAULT_BLOCKS_PER_SCAN[chain] ?? 75),
       chainbaseKeys: configuredChainbaseKeys.length ? configuredChainbaseKeys : sharedChainbaseKeys,
-      rpcUrls: configuredRpcUrls.length ? configuredRpcUrls : buildInfuraRpcUrls(chain, sharedRpcKeys),
+      rpcNetwork,
+      rpcUrls: buildInfuraRpcUrls(rpcNetwork, sharedRpcKeys),
       multicall3Address: (row?.multicall3Address || DEFAULT_MULTICALL3_ADDRESS).trim().toLowerCase(),
       nativeCurrency: {
         name: String(row?.nativeCurrencyName || base?.nativeCurrency.name || fallbackChainName(chain)).trim(),

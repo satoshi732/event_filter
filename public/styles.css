@@ -1791,6 +1791,83 @@ hr {
   background: #143045;
 }
 
+.settings-panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.settings-panel-actions .muted {
+  margin: 0;
+  flex: 1 1 auto;
+}
+
+.settings-panel-actions .btn {
+  margin-top: 0;
+  flex-shrink: 0;
+}
+
+.chain-selector-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chain-selector-row select {
+  flex: 1 1 auto;
+}
+
+.chain-selector-row .btn {
+  margin-top: 0;
+}
+
+.chain-badge-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.chain-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid rgba(91, 178, 231, 0.36);
+  border-radius: 999px;
+  background: rgba(18, 42, 60, 0.92);
+  color: #d8f4ff;
+  cursor: pointer;
+  transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease;
+}
+
+.chain-badge:hover {
+  border-color: rgba(120, 240, 219, 0.5);
+  background: rgba(15, 55, 61, 0.94);
+  transform: translateY(-1px);
+}
+
+.chain-badge-remove {
+  color: #9fd7f1;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.chain-settings-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 260px);
+}
+
+.chain-settings-table {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+
 .button-row {
   margin-top: 10px;
   display: flex;
@@ -2800,6 +2877,10 @@ hr {
 
   .settings-inline-grid {
     grid-template-columns: 1fr;
+  }
+
+  .chain-settings-panel {
+    min-height: 0;
   }
 
   .meta-grid {

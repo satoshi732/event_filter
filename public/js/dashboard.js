@@ -209,20 +209,13 @@
     const nativeCurrency = row.native_currency && typeof row.native_currency === 'object'
       ? row.native_currency
       : {};
-    const rpcUrls = Array.isArray(row.rpc_urls)
-      ? row.rpc_urls
-      : String(row.rpc_urls_text || row.rpc_urls || '')
-        .split(/[\r\n,]/)
-        .map((entry) => entry.trim())
-        .filter(Boolean);
     return {
       chain: String(row.chain || '').trim().toLowerCase(),
       name: String(row.name || '').trim(),
       chain_id: Number.isFinite(Number(row.chain_id)) ? Number(row.chain_id) : '',
       table_prefix: String(row.table_prefix || '').trim(),
       blocks_per_scan: Number.isFinite(Number(row.blocks_per_scan)) ? Number(row.blocks_per_scan) : 75,
-      rpc_urls: rpcUrls,
-      rpc_urls_text: rpcUrls.join('\n'),
+      rpc_network: String(row.rpc_network || '').trim(),
       multicall3: String(row.multicall3 || '').trim().toLowerCase(),
       native_currency_name: String(row.native_currency_name || nativeCurrency.name || '').trim(),
       native_currency_symbol: String(row.native_currency_symbol || nativeCurrency.symbol || '').trim(),
@@ -230,6 +223,18 @@
         ? Number(row.native_currency_decimals ?? nativeCurrency.decimals)
         : 18,
     };
+  }
+
+  function normalizeAllowedChains(value) {
+    return Array.isArray(value)
+      ? value.map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean)
+      : [];
+  }
+
+  function buildVisibleChainsForAccount(account = {}) {
+    const availableChains = normalizeAllowedChains(account.available_chains);
+    const selectedChains = normalizeAllowedChains(account.allowed_chains);
+    return selectedChains.length ? selectedChains : availableChains;
   }
 
   const useDashboardStore = defineStore('eventFilterDashboard', () => {
@@ -375,7 +380,9 @@
             role: CURRENT_USER_ROLE,
             ai_api_key: '',
             has_ai_api_key: false,
+            available_chains: [],
             allowed_chains: [],
+            allowed_chain_candidate: '',
             current_password: '',
             new_password: '',
             confirm_password: '',
@@ -525,13 +532,20 @@
             return {
               ...user,
               allowed_chains: allowedChains,
-              allowed_chains_text: allowedChains.join(', '),
             };
           })
           : (state.settings.runtime_settings.access?.users || []);
         const accountAllowedChains = Array.isArray(data.runtime_settings?.account?.allowed_chains)
-          ? data.runtime_settings.account.allowed_chains.map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean)
+          ? normalizeAllowedChains(data.runtime_settings.account.allowed_chains)
           : (state.settings.runtime_settings.account?.allowed_chains || []);
+        const accountAvailableChains = Array.isArray(data.runtime_settings?.account?.available_chains)
+          ? normalizeAllowedChains(data.runtime_settings.account.available_chains)
+          : (state.settings.runtime_settings.account?.available_chains || []);
+        const nextAllowedChainCandidate = (
+          accountAvailableChains.find((chain) => !accountAllowedChains.includes(chain))
+          || accountAvailableChains[0]
+          || ''
+        );
         state.settings.runtime_settings = {
           ...state.settings.runtime_settings,
           ...(data.runtime_settings || {}),
@@ -543,7 +557,9 @@
           account: {
             ...(state.settings.runtime_settings.account || {}),
             ...(data.runtime_settings?.account || {}),
+            available_chains: accountAvailableChains,
             allowed_chains: accountAllowedChains,
+            allowed_chain_candidate: nextAllowedChainCandidate,
             current_password: '',
             new_password: '',
             confirm_password: '',
@@ -1184,8 +1200,8 @@
               return compareNumber(a.chain_id, b.chain_id);
             case 'blocks_per_scan':
               return compareNumber(a.blocks_per_scan, b.blocks_per_scan);
-            case 'rpc_url_count':
-              return compareNumber(countSettingLines(a.rpc_urls_text || a.rpc_urls), countSettingLines(b.rpc_urls_text || b.rpc_urls));
+            case 'rpc_network':
+              return compareString(a.rpc_network || '', b.rpc_network || '');
             case 'multicall3':
               return compareString(a.multicall3 || '', b.multicall3 || '');
             case 'chain':
@@ -1260,6 +1276,10 @@
         const wasRunning = state.running;
         const previousRunningChain = state.runningChain;
         state.chains = data.chains || [];
+        const nextVisibleChains = buildVisibleChainsForAccount(state.settings.runtime_settings.account);
+        if (nextVisibleChains.length && nextVisibleChains.join(',') !== state.chains.join(',')) {
+          state.chains = nextVisibleChains;
+        }
         const explicitRouteChain = String(router.currentRoute.value?.query?.chain || '').toLowerCase();
         if (!state.selectedChain) {
           state.selectedChain = (
@@ -1400,6 +1420,9 @@
         requestTokenAnalysis,
         openAiReport,
         openTokenAiReport,
+        saveAccountSettings,
+        addAccountAllowedChain,
+        removeAccountAllowedChain,
         addChainConfigRow,
         removeChainConfigRow,
         addAiProviderRow,
@@ -1756,6 +1779,9 @@
         openTokenAiReport,
         toggleTokenReviewEditor,
         saveSettings,
+        saveAccountSettings,
+        addAccountAllowedChain,
+        removeAccountAllowedChain,
         addChainConfigRow,
         removeChainConfigRow,
         addAiProviderRow,

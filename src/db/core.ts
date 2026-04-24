@@ -78,6 +78,7 @@ function initSchema(db: Database.Database): void {
       table_prefix              TEXT NOT NULL DEFAULT '',
       blocks_per_scan           INTEGER NOT NULL DEFAULT 12,
       chainbase_keys            TEXT NOT NULL DEFAULT '[]',
+      rpc_network               TEXT NOT NULL DEFAULT '',
       rpc_urls                  TEXT NOT NULL DEFAULT '[]',
       multicall3_address        TEXT NOT NULL DEFAULT '',
       native_currency_name      TEXT NOT NULL DEFAULT '',
@@ -475,6 +476,9 @@ function ensureRuntimeSettingsSchema(db: Database.Database): void {
   }
   if (!cols.some((col) => col.name === 'chainbase_keys')) {
     db.exec(`ALTER TABLE chain_settings ADD COLUMN chainbase_keys TEXT NOT NULL DEFAULT '[]';`);
+  }
+  if (!cols.some((col) => col.name === 'rpc_network')) {
+    db.exec(`ALTER TABLE chain_settings ADD COLUMN rpc_network TEXT NOT NULL DEFAULT '';`);
   }
   if (!cols.some((col) => col.name === 'rpc_urls')) {
     db.exec(`ALTER TABLE chain_settings ADD COLUMN rpc_urls TEXT NOT NULL DEFAULT '[]';`);

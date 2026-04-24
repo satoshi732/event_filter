@@ -50,7 +50,7 @@ import { withLiveReviews, type DashboardContractSummary, type DashboardTokenSumm
 import { deriveAiAuditLifecycleStatus } from '../db/audit-state.js';
 import type { PipelineRunResult } from '../pipeline.js';
 import { getAuthenticatedSession, isAdminAuthUser, renameAuthenticatedSessions } from './auth.js';
-import { findUserAuthAccount, getAllowedChainsForUser, getUserAuthConfig, updateOwnUserAuthAccount, updateUserAllowedChains } from '../utils/user-auth.js';
+import { findUserAuthAccount, getAllowedChainsForUser, getUserAuthConfig, updateOwnUserAuthAccount } from '../utils/user-auth.js';
 import { verifyPassword } from '../utils/web-security.js';
 
 type StateStreamClient = ServerResponse<IncomingMessage> & {
@@ -268,7 +268,8 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         role: account?.role || 'user',
         ai_api_key: account?.aiApiKey || '',
         has_ai_api_key: Boolean(account?.aiApiKey),
-        allowed_chains: getAllowedChainsForUser(config, username, requestKnownChains),
+        allowed_chains: account?.allowedChains || [],
+        available_chains: requestKnownChains,
       };
     };
 
@@ -302,6 +303,9 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       const currentPassword = String(body.current_password || '');
       const newPassword = String(body.new_password || '');
       const confirmPassword = String(body.confirm_password || '');
+      const allowedChains = coerceStringArray(body.allowed_chains)
+        .map((chain) => String(chain || '').trim().toLowerCase())
+        .filter((chain) => requestKnownChains.includes(chain));
       const changingCredentials = nextUsername.toLowerCase() !== account.username.toLowerCase() || Boolean(newPassword);
       if (changingCredentials && !verifyPassword(currentPassword, account.passwordHash)) {
         sendJson(res, 400, { error: 'Current password is required to change username or password' });
@@ -316,6 +320,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
           username: nextUsername,
           newPassword,
           aiApiKey,
+          allowedChains,
         });
         renameAuthenticatedSessions(updated.previousUsername, updated.user.username);
         sendJson(res, 200, {
@@ -891,7 +896,6 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       const pancakePrice = (typeof runtime.pancakeswap_price === 'object' && runtime.pancakeswap_price) ? runtime.pancakeswap_price as Record<string, unknown> : {};
       const aiAuditBackend = (typeof runtime.ai_audit_backend === 'object' && runtime.ai_audit_backend) ? runtime.ai_audit_backend as Record<string, unknown> : {};
       const access = (typeof runtime.access === 'object' && runtime.access) ? runtime.access as Record<string, unknown> : {};
-      const accessUsers = Array.isArray(access.users) ? access.users as Array<Record<string, unknown>> : [];
 
       const chainConfigs = Array.isArray(body.chain_configs) ? body.chain_configs as Array<Record<string, unknown>> : [];
       const aiProviders = Array.isArray(body.ai_providers) ? body.ai_providers as Array<Record<string, unknown>> : [];
@@ -963,7 +967,8 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
             tablePrefix: String((row.table_prefix ?? row.tablePrefix) || '').trim(),
             blocksPerScan: coercePositiveInt(row.blocks_per_scan ?? row.blocksPerScan, 75),
             chainbaseKeys: coerceStringArray(row.chainbase_keys ?? row.chainbaseKeys),
-            rpcUrls: coerceStringArray(row.rpc_urls ?? row.rpcUrls ?? row.rpc_urls_text),
+            rpcNetwork: String((row.rpc_network ?? row.rpcNetwork) || '').trim(),
+            rpcUrls: [],
             multicall3Address: String(row.multicall3 || '').trim().toLowerCase(),
             nativeCurrencyName: String(
               row.native_currency_name
@@ -1006,18 +1011,11 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
           sendJson(res, 400, { error: `Incomplete chain config for ${row.chain}` });
           return true;
         }
-        if (!requestKnownChains.includes(row.chain) && !row.rpcUrls.length) {
-          sendJson(res, 400, { error: `New chain ${row.chain} needs at least one RPC URL` });
+        if (!row.rpcNetwork) {
+          sendJson(res, 400, { error: `Chain ${row.chain} needs an Infura RPC network value` });
           return true;
         }
       }
-
-      updateUserAllowedChains(accessUsers.map((row) => ({
-        username: String(row.username || '').trim(),
-        allowedChains: coerceStringArray(row.allowed_chains)
-          .map((chain) => String(chain || '').trim().toLowerCase())
-          .filter((chain) => nextKnownChains.includes(chain)),
-      })));
 
       setManyAppSettings([
         { key: 'chainbase_keys', value: JSON.stringify(coerceStringArray(runtime.chainbase_keys)) },

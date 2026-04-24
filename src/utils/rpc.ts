@@ -224,8 +224,11 @@ function getRotator(chain: string): RpcRotator {
   const key = chain.toLowerCase();
   let rotator = rotators.get(key);
   if (!rotator) {
-    const urls = getChainConfig(chain).rpcUrls;
-    if (!urls.length) throw new Error(`No RPC URLs configured for ${chain}`);
+    const cfg = getChainConfig(chain);
+    const urls = cfg.rpcUrls;
+    if (!urls.length) {
+      throw new Error(`No assembled RPC URLs available for ${chain} (rpc_network=${cfg.rpcNetwork || 'unset'})`);
+    }
     rotator = new RpcRotator(urls);
     rotators.set(key, rotator);
     logger.info(`[${chain}] RPC rotator created (${urls.length} URLs)`);

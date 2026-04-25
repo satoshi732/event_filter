@@ -12,15 +12,25 @@ const RPC_TIMEOUT_MS = 20_000;
 const MULTICALL_MAX_SUBCALLS = 96;
 const AGGREGATE3_SELECTOR = '82ad56cb';
 const PANCAKESWAP_PRICE_API_BASE = 'https://wallet-api.pancakeswap.com/v1/prices/list';
-const ONEINCH_TOKENS_MARKET_API_BASE = 'https://proxy-app.1inch.com/v2.0/bff/v1.0/tokens-market';
-const ONEINCH_BEARER_TOKEN_FALLBACK = 'eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbiI6IjgzODFmNTUwLWNmMDktNDk3MS1iZjUxLTY0NGY2Njg2ZGQ5NyIsImV4cCI6MTc3NzEzOTg4MywiZGV2aWNlIjoiYnJvd3NlciIsImlwQWRkcmVzcyI6IjI3LjEwMi4xMzcuMjA1IiwiaWF0IjoxNzc3MTM2MjgzfQ.XA6bRZIYaNOQT6KEVMXs--iSmJXo-lAn0Mp1VbSi-bcnO1g-575hphGO05mq5l0b29zKAvmD2DbTPAehucglIw';
+const ONEINCH_AUTH_TOKEN_URL = 'https://proxy-app.1inch.io/v2.0/auth/token?ngsw-bypass';
+const ONEINCH_TOKENS_MARKET_API_BASE = 'https://proxy-app.1inch.io/v2.0/bff/v1.0/tokens-market';
 const PANCAKESWAP_NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
 const PANCAKESWAP_PRICE_BATCH_SIZE = 50;
 const ONEINCH_PRICE_BATCH_SIZE = 30;
 const PANCAKESWAP_SUPPORTED_CHAIN_IDS = new Set([56]);
+const ONEINCH_REFRESH_BUFFER_MS = 120_000;
 let pancakeLimiterLock: Promise<void> = Promise.resolve();
 const pancakePriceRequestTimestamps: number[] = [];
-const warnedMissing1inchTokenChains = new Set<string>();
+
+interface OneInchAuthResponse {
+  access_token: string;
+  exp: number;
+}
+
+interface OneInchTokenCache {
+  token: string;
+  expiresAt: number;
+}
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -168,10 +178,26 @@ function getWrappedNativeTokenAddress(chain: string): string | null {
   return /^0x[a-f0-9]{40}$/i.test(value) ? value : null;
 }
 
-function get1inchBearerToken(): string {
-  return String(process.env.ONEINCH_BEARER_TOKEN || ONEINCH_BEARER_TOKEN_FALLBACK || '')
-    .trim()
-    .replace(/^Bearer\s+/i, '');
+async function get1inchBearerToken(): Promise<string> {
+  const now = Date.now();
+  if (oneInchTokenCache && now < oneInchTokenCache.expiresAt - ONEINCH_REFRESH_BUFFER_MS) {
+    return oneInchTokenCache.token;
+  }
+
+  const res = await axios.get<OneInchAuthResponse>(ONEINCH_AUTH_TOKEN_URL, {
+    timeout: RPC_TIMEOUT_MS,
+    headers: { accept: 'application/json' },
+  });
+  const nextToken = String(res.data?.access_token || '').trim().replace(/^Bearer\s+/i, '');
+  const nextExp = Number(res.data?.exp) || 0;
+  if (!nextToken || !nextExp) {
+    throw new Error('1inch auth token response is missing access_token or exp');
+  }
+  oneInchTokenCache = {
+    token: nextToken,
+    expiresAt: nextExp * 1000,
+  };
+  return nextToken;
 }
 
 export function isFungibleTokenKind(kind: TokenKind | null | undefined): boolean {
@@ -235,6 +261,7 @@ const rotators = new Map<string, RpcRotator>();
 const metadataCache = new Map<string, Promise<TokenMetadata>>();
 const balanceCache = new Map<string, Promise<string | null>>();
 const disabledRpcUrls = new Map<string, string>();
+let oneInchTokenCache: OneInchTokenCache | null = null;
 
 function getRotator(chain: string): RpcRotator {
   const key = chain.toLowerCase();
@@ -497,14 +524,11 @@ async function fetchPancakePriceBatch(url: string): Promise<Record<string, unkno
 
 async function fetch1inchTokensMarketBatch(chainId: number, addresses: string[]): Promise<Array<{ address: string; lastPriceUsd: number | null }>> {
   const url = `${ONEINCH_TOKENS_MARKET_API_BASE}/${encodeURIComponent(String(chainId))}`;
-  const bearerToken = get1inchBearerToken();
-  if (!bearerToken) {
-    throw new Error('1inch bearer token is not configured');
-  }
   let lastErr: unknown;
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       await acquirePancakePriceRateSlot();
+      const bearerToken = await get1inchBearerToken();
       const res = await axios.post<Array<{ address?: unknown; lastPriceUsd?: unknown }>>(url, {
         tokens: addresses,
       }, {
@@ -631,13 +655,6 @@ export async function getTokenPricesBatch(
 
   const chainId = getChainConfig(chain).chainId;
   const usePancake = PANCAKESWAP_SUPPORTED_CHAIN_IDS.has(chainId);
-  if (!usePancake && !get1inchBearerToken()) {
-    if (!warnedMissing1inchTokenChains.has(chain.toLowerCase())) {
-      warnedMissing1inchTokenChains.add(chain.toLowerCase());
-      logger.warn(`[${chain}] 1inch price fetch skipped: ONEINCH_BEARER_TOKEN is not configured`);
-    }
-    return out;
-  }
   const wrappedNativeAddress = getWrappedNativeTokenAddress(chain);
   const entries = normalized
     .map((token) => {

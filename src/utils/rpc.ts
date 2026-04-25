@@ -13,7 +13,7 @@ const MULTICALL_MAX_SUBCALLS = 96;
 const AGGREGATE3_SELECTOR = '82ad56cb';
 const PANCAKESWAP_PRICE_API_BASE = 'https://wallet-api.pancakeswap.com/v1/prices/list';
 const PANCAKESWAP_NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
-const PANCAKESWAP_PRICE_BATCH_SIZE = 50;
+const PANCAKESWAP_PRICE_BATCH_SIZE = 30;
 let pancakeLimiterLock: Promise<void> = Promise.resolve();
 const pancakePriceRequestTimestamps: number[] = [];
 

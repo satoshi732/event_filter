@@ -19,6 +19,7 @@ const ONEINCH_PRICE_BATCH_SIZE = 30;
 const PANCAKESWAP_SUPPORTED_CHAIN_IDS = new Set([56]);
 let pancakeLimiterLock: Promise<void> = Promise.resolve();
 const pancakePriceRequestTimestamps: number[] = [];
+const warnedMissing1inchTokenChains = new Set<string>();
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -164,6 +165,12 @@ function getNativeTokenMetadata(chain: string): TokenMetadata {
 function getWrappedNativeTokenAddress(chain: string): string | null {
   const value = String(getChainConfig(chain).wrappedNativeTokenAddress || '').trim().toLowerCase();
   return /^0x[a-f0-9]{40}$/i.test(value) ? value : null;
+}
+
+function get1inchBearerToken(): string {
+  return String(process.env.ONEINCH_BEARER_TOKEN || '')
+    .trim()
+    .replace(/^Bearer\s+/i, '');
 }
 
 export function isFungibleTokenKind(kind: TokenKind | null | undefined): boolean {
@@ -489,6 +496,10 @@ async function fetchPancakePriceBatch(url: string): Promise<Record<string, unkno
 
 async function fetch1inchTokensMarketBatch(chainId: number, addresses: string[]): Promise<Array<{ address: string; lastPriceUsd: number | null }>> {
   const url = `${ONEINCH_TOKENS_MARKET_API_BASE}/${encodeURIComponent(String(chainId))}`;
+  const bearerToken = get1inchBearerToken();
+  if (!bearerToken) {
+    throw new Error('1inch bearer token is not configured');
+  }
   let lastErr: unknown;
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
@@ -500,6 +511,7 @@ async function fetch1inchTokensMarketBatch(chainId: number, addresses: string[])
         headers: {
           accept: 'application/json',
           'content-type': 'application/json',
+          authorization: `Bearer ${bearerToken}`,
         },
       });
       return Array.isArray(res.data)
@@ -618,6 +630,13 @@ export async function getTokenPricesBatch(
 
   const chainId = getChainConfig(chain).chainId;
   const usePancake = PANCAKESWAP_SUPPORTED_CHAIN_IDS.has(chainId);
+  if (!usePancake && !get1inchBearerToken()) {
+    if (!warnedMissing1inchTokenChains.has(chain.toLowerCase())) {
+      warnedMissing1inchTokenChains.add(chain.toLowerCase());
+      logger.warn(`[${chain}] 1inch price fetch skipped: ONEINCH_BEARER_TOKEN is not configured`);
+    }
+    return out;
+  }
   const wrappedNativeAddress = getWrappedNativeTokenAddress(chain);
   const entries = normalized
     .map((token) => {

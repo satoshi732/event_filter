@@ -12,8 +12,11 @@ const RPC_TIMEOUT_MS = 20_000;
 const MULTICALL_MAX_SUBCALLS = 96;
 const AGGREGATE3_SELECTOR = '82ad56cb';
 const PANCAKESWAP_PRICE_API_BASE = 'https://wallet-api.pancakeswap.com/v1/prices/list';
+const ONEINCH_TOKENS_MARKET_API_BASE = 'https://proxy-app.1inch.com/v2.0/bff/v1.0/tokens-market';
 const PANCAKESWAP_NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
-const PANCAKESWAP_PRICE_BATCH_SIZE = 30;
+const PANCAKESWAP_PRICE_BATCH_SIZE = 50;
+const ONEINCH_PRICE_BATCH_SIZE = 30;
+const PANCAKESWAP_SUPPORTED_CHAIN_IDS = new Set([56]);
 let pancakeLimiterLock: Promise<void> = Promise.resolve();
 const pancakePriceRequestTimestamps: number[] = [];
 
@@ -156,6 +159,11 @@ function getNativeTokenMetadata(chain: string): TokenMetadata {
     isAutoAudited: false,
     isManualAudited: false,
   };
+}
+
+function getWrappedNativeTokenAddress(chain: string): string | null {
+  const value = String(getChainConfig(chain).wrappedNativeTokenAddress || '').trim().toLowerCase();
+  return /^0x[a-f0-9]{40}$/i.test(value) ? value : null;
 }
 
 export function isFungibleTokenKind(kind: TokenKind | null | undefined): boolean {
@@ -479,6 +487,47 @@ async function fetchPancakePriceBatch(url: string): Promise<Record<string, unkno
   throw lastErr;
 }
 
+async function fetch1inchTokensMarketBatch(chainId: number, addresses: string[]): Promise<Array<{ address: string; lastPriceUsd: number | null }>> {
+  const url = `${ONEINCH_TOKENS_MARKET_API_BASE}/${encodeURIComponent(String(chainId))}`;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await acquirePancakePriceRateSlot();
+      const res = await axios.post<Array<{ address?: unknown; lastPriceUsd?: unknown }>>(url, {
+        tokens: addresses,
+      }, {
+        timeout: RPC_TIMEOUT_MS,
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json',
+        },
+      });
+      return Array.isArray(res.data)
+        ? res.data.map((row) => ({
+          address: String(row?.address || '').trim().toLowerCase(),
+          lastPriceUsd: sanitizeTokenPriceUsd(
+            typeof row?.lastPriceUsd === 'number' ? row.lastPriceUsd : Number(row?.lastPriceUsd),
+          ),
+        }))
+        : [];
+    } catch (err) {
+      lastErr = err;
+      if (attempt === 4) throw err;
+
+      if (isRateLimitError(err)) {
+        const backoffMs = getRetryAfterMs(err, 1_500 * (attempt + 1));
+        logger.warn(`1inch tokens-market API rate-limited (429), backing off ${backoffMs}ms`);
+        await sleep(backoffMs);
+        continue;
+      }
+
+      if (!isDnsError(err)) throw err;
+      await sleep(300 * (attempt + 1));
+    }
+  }
+  throw lastErr;
+}
+
 function encodeSupportsInterface(interfaceId: string): string {
   return `0x01ffc9a7${pad32(strip0x(interfaceId).padStart(8, '0'))}`;
 }
@@ -568,33 +617,52 @@ export async function getTokenPricesBatch(
   if (!normalized.length) return out;
 
   const chainId = getChainConfig(chain).chainId;
+  const usePancake = PANCAKESWAP_SUPPORTED_CHAIN_IDS.has(chainId);
+  const wrappedNativeAddress = getWrappedNativeTokenAddress(chain);
   const entries = normalized
-    .map((token) => ({
-      token,
-      address: isNativeToken(chain, token) ? PANCAKESWAP_NATIVE_TOKEN_ADDRESS : token,
-    }))
+    .map((token) => {
+      if (isNativeToken(chain, token)) {
+        return {
+          token,
+          address: usePancake
+            ? PANCAKESWAP_NATIVE_TOKEN_ADDRESS
+            : (wrappedNativeAddress || ''),
+        };
+      }
+      return { token, address: token };
+    })
     .filter((entry) => isAddressLike(entry.address));
 
   if (!entries.length) return out;
 
-  for (const batch of chunk(entries, PANCAKESWAP_PRICE_BATCH_SIZE)) {
-    const pairs = batch.map(({ address }) => `${chainId}:${address}`);
-    const encodedPairs = encodeURIComponent(pairs.join(','));
-    const url = `${PANCAKESWAP_PRICE_API_BASE}/${encodedPairs}`;
-
+  const batchSize = usePancake ? PANCAKESWAP_PRICE_BATCH_SIZE : ONEINCH_PRICE_BATCH_SIZE;
+  for (const batch of chunk(entries, batchSize)) {
     try {
-      const payload = await fetchPancakePriceBatch(url);
-      const normalizedPayload = new Map<string, unknown>(
-        Object.entries(payload).map(([key, value]) => [key.toLowerCase(), value]),
-      );
+      if (usePancake) {
+        const pairs = batch.map(({ address }) => `${chainId}:${address}`);
+        const encodedPairs = encodeURIComponent(pairs.join(','));
+        const url = `${PANCAKESWAP_PRICE_API_BASE}/${encodedPairs}`;
+        const payload = await fetchPancakePriceBatch(url);
+        const normalizedPayload = new Map<string, unknown>(
+          Object.entries(payload).map(([key, value]) => [key.toLowerCase(), value]),
+        );
 
-      for (const { token, address } of batch) {
-        const raw = normalizedPayload.get(`${chainId}:${address}`.toLowerCase());
-        const numeric = typeof raw === 'number' ? raw : Number(raw);
-        out.set(token, sanitizeTokenPriceUsd(numeric));
+        for (const { token, address } of batch) {
+          const raw = normalizedPayload.get(`${chainId}:${address}`.toLowerCase());
+          const numeric = typeof raw === 'number' ? raw : Number(raw);
+          out.set(token, sanitizeTokenPriceUsd(numeric));
+        }
+      } else {
+        const payload = await fetch1inchTokensMarketBatch(chainId, batch.map(({ address }) => address));
+        const normalizedPayload = new Map<string, number | null>(
+          payload.map((row) => [row.address.toLowerCase(), row.lastPriceUsd]),
+        );
+        for (const { token, address } of batch) {
+          out.set(token, sanitizeTokenPriceUsd(normalizedPayload.get(address.toLowerCase()) ?? null));
+        }
       }
     } catch (err) {
-      logger.warn(`[${chain}] PancakeSwap price fetch failed (${batch.length} token(s)): ${errorMessage(err)}`);
+      logger.warn(`[${chain}] ${usePancake ? 'PancakeSwap' : '1inch'} price fetch failed (${batch.length} token(s)): ${errorMessage(err)}`);
     }
   }
 

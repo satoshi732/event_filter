@@ -11,9 +11,18 @@ import { TokenKind } from '../db/types.js';
 const RPC_TIMEOUT_MS = 20_000;
 const MULTICALL_MAX_SUBCALLS = 96;
 const AGGREGATE3_SELECTOR = '82ad56cb';
-const DEXSCREENER_TOKEN_API_BASE = 'https://api.dexscreener.com/latest/dex/tokens';
-let dexScreenerLimiterLock: Promise<void> = Promise.resolve();
-const dexScreenerPriceRequestTimestamps: number[] = [];
+const GECKOTERMINAL_TOKEN_API_BASE = 'https://api.geckoterminal.com/api/v2/networks';
+const GECKOTERMINAL_NETWORK_BY_CHAIN: Record<string, string> = {
+  ethereum: 'eth',
+  bsc: 'bsc',
+  polygon: 'polygon_pos',
+  arbitrum: 'arbitrum',
+  optimism: 'optimism',
+  base: 'base',
+  avalanche: 'avax',
+};
+let geckoTerminalLimiterLock: Promise<void> = Promise.resolve();
+const geckoTerminalPriceRequestTimestamps: number[] = [];
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -159,6 +168,20 @@ function getNativeTokenMetadata(chain: string): TokenMetadata {
 function getWrappedNativeTokenAddress(chain: string): string | null {
   const value = String(getChainConfig(chain).wrappedNativeTokenAddress || '').trim().toLowerCase();
   return /^0x[a-f0-9]{40}$/i.test(value) ? value : null;
+}
+
+function getGeckoTerminalNetworkId(chain: string): string {
+  const normalizedChain = String(chain || '').trim().toLowerCase();
+  if (GECKOTERMINAL_NETWORK_BY_CHAIN[normalizedChain]) return GECKOTERMINAL_NETWORK_BY_CHAIN[normalizedChain];
+
+  const rpcNetwork = String(getChainConfig(chain).rpcNetwork || '').trim().toLowerCase();
+  const simplified = rpcNetwork
+    .replace(/-mainnet$/i, '')
+    .replace(/^mainnet$/i, 'eth')
+    .replace(/^polygon$/i, 'polygon_pos')
+    .replace(/^avalanche$/i, 'avax');
+
+  return simplified || normalizedChain;
 }
 
 export function isFungibleTokenKind(kind: TokenKind | null | undefined): boolean {
@@ -411,41 +434,41 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function withDexScreenerLimiter<T>(task: () => Promise<T>): Promise<T> {
-  const run = dexScreenerLimiterLock.then(task, task);
-  dexScreenerLimiterLock = run.then(() => undefined, () => undefined);
+function withGeckoTerminalLimiter<T>(task: () => Promise<T>): Promise<T> {
+  const run = geckoTerminalLimiterLock.then(task, task);
+  geckoTerminalLimiterLock = run.then(() => undefined, () => undefined);
   return run;
 }
 
-async function acquireDexScreenerPriceRateSlot(): Promise<void> {
-  await withDexScreenerLimiter(async () => {
+async function acquireGeckoTerminalPriceRateSlot(): Promise<void> {
+  await withGeckoTerminalLimiter(async () => {
     while (true) {
       const limiterConfig = getPancakeSwapPriceLimiterConfig();
       const maxReqPerSecond = limiterConfig.maxReqPerSecond;
       const maxReqPerMinute = limiterConfig.maxReqPerMinute;
       const now = Date.now();
       const minuteWindowStart = now - 60_000;
-      while (dexScreenerPriceRequestTimestamps.length && dexScreenerPriceRequestTimestamps[0] <= minuteWindowStart) {
-        dexScreenerPriceRequestTimestamps.shift();
+      while (geckoTerminalPriceRequestTimestamps.length && geckoTerminalPriceRequestTimestamps[0] <= minuteWindowStart) {
+        geckoTerminalPriceRequestTimestamps.shift();
       }
 
       const secondWindowStart = now - 1_000;
-      const firstSecondIndex = dexScreenerPriceRequestTimestamps.findIndex((ts) => ts > secondWindowStart);
+      const firstSecondIndex = geckoTerminalPriceRequestTimestamps.findIndex((ts) => ts > secondWindowStart);
       const secondCount = firstSecondIndex === -1
         ? 0
-        : dexScreenerPriceRequestTimestamps.length - firstSecondIndex;
+        : geckoTerminalPriceRequestTimestamps.length - firstSecondIndex;
 
-      const minuteCount = dexScreenerPriceRequestTimestamps.length;
+      const minuteCount = geckoTerminalPriceRequestTimestamps.length;
       const secondWaitMs = secondCount >= maxReqPerSecond && firstSecondIndex !== -1
-        ? Math.max(0, dexScreenerPriceRequestTimestamps[firstSecondIndex] + 1_000 - now)
+        ? Math.max(0, geckoTerminalPriceRequestTimestamps[firstSecondIndex] + 1_000 - now)
         : 0;
       const minuteWaitMs = minuteCount >= maxReqPerMinute
-        ? Math.max(0, dexScreenerPriceRequestTimestamps[0] + 60_000 - now)
+        ? Math.max(0, geckoTerminalPriceRequestTimestamps[0] + 60_000 - now)
         : 0;
       const waitMs = Math.max(secondWaitMs, minuteWaitMs);
 
       if (waitMs <= 0) {
-        dexScreenerPriceRequestTimestamps.push(Date.now());
+        geckoTerminalPriceRequestTimestamps.push(Date.now());
         return;
       }
 
@@ -454,18 +477,19 @@ async function acquireDexScreenerPriceRateSlot(): Promise<void> {
   });
 }
 
-async function fetchDexScreenerTokenPrice(address: string): Promise<number | null> {
-  const url = `${DEXSCREENER_TOKEN_API_BASE}/${encodeURIComponent(address)}`;
+async function fetchGeckoTerminalTokenPrice(chain: string, address: string): Promise<number | null> {
+  const network = getGeckoTerminalNetworkId(chain);
+  const url = `${GECKOTERMINAL_TOKEN_API_BASE}/${encodeURIComponent(network)}/tokens/${encodeURIComponent(address)}`;
   let lastErr: unknown;
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
-      await acquireDexScreenerPriceRateSlot();
-      const res = await axios.get<{ pairs?: Array<{ priceUsd?: unknown }> }>(url, {
+      await acquireGeckoTerminalPriceRateSlot();
+      const res = await axios.get<{ data?: { attributes?: { price_usd?: unknown } } }>(url, {
         timeout: RPC_TIMEOUT_MS,
         headers: { accept: 'application/json' },
       });
-      const firstPair = Array.isArray(res.data?.pairs) ? res.data.pairs[0] : null;
-      const numeric = typeof firstPair?.priceUsd === 'number' ? firstPair.priceUsd : Number(firstPair?.priceUsd);
+      const rawPrice = res.data?.data?.attributes?.price_usd;
+      const numeric = typeof rawPrice === 'number' ? rawPrice : Number(rawPrice);
       return sanitizeTokenPriceUsd(numeric);
     } catch (err) {
       lastErr = err;
@@ -473,7 +497,7 @@ async function fetchDexScreenerTokenPrice(address: string): Promise<number | nul
 
       if (isRateLimitError(err)) {
         const backoffMs = getRetryAfterMs(err, 1_500 * (attempt + 1));
-        logger.warn(`Dexscreener price API rate-limited (429), backing off ${backoffMs}ms`);
+        logger.warn(`GeckoTerminal price API rate-limited (429), backing off ${backoffMs}ms`);
         await sleep(backoffMs);
         continue;
       }
@@ -577,10 +601,10 @@ export async function getTokenPricesBatch(
   const nativeTokens = normalized.filter((token) => isNativeToken(chain, token));
   if (wrappedNative && nativeTokens.length) {
     try {
-      const nativePrice = await fetchDexScreenerTokenPrice(wrappedNative);
+      const nativePrice = await fetchGeckoTerminalTokenPrice(chain, wrappedNative);
       nativeTokens.forEach((token) => out.set(token, nativePrice));
     } catch (err) {
-      logger.warn(`[${chain}] Dexscreener native price fetch failed for ${wrappedNative}: ${errorMessage(err)}`);
+      logger.warn(`[${chain}] GeckoTerminal native price fetch failed for ${wrappedNative}: ${errorMessage(err)}`);
     }
   }
 
@@ -593,10 +617,10 @@ export async function getTokenPricesBatch(
 
   for (const { token, address } of entries) {
     try {
-      const price = await fetchDexScreenerTokenPrice(address);
+      const price = await fetchGeckoTerminalTokenPrice(chain, address);
       out.set(token, price);
     } catch (err) {
-      logger.warn(`[${chain}] Dexscreener price fetch failed for ${address}: ${errorMessage(err)}`);
+      logger.warn(`[${chain}] GeckoTerminal price fetch failed for ${address}: ${errorMessage(err)}`);
     }
   }
 

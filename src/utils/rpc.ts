@@ -11,18 +11,11 @@ import { TokenKind } from '../db/types.js';
 const RPC_TIMEOUT_MS = 20_000;
 const MULTICALL_MAX_SUBCALLS = 96;
 const AGGREGATE3_SELECTOR = '82ad56cb';
-const GECKOTERMINAL_TOKEN_API_BASE = 'https://api.geckoterminal.com/api/v2/networks';
-const GECKOTERMINAL_NETWORK_BY_CHAIN: Record<string, string> = {
-  ethereum: 'eth',
-  bsc: 'bsc',
-  polygon: 'polygon_pos',
-  arbitrum: 'arbitrum',
-  optimism: 'optimism',
-  base: 'base',
-  avalanche: 'avax',
-};
-let geckoTerminalLimiterLock: Promise<void> = Promise.resolve();
-const geckoTerminalPriceRequestTimestamps: number[] = [];
+const PANCAKESWAP_PRICE_API_BASE = 'https://wallet-api.pancakeswap.com/v1/prices/list';
+const PANCAKESWAP_NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
+const PANCAKESWAP_PRICE_BATCH_SIZE = 50;
+let pancakeLimiterLock: Promise<void> = Promise.resolve();
+const pancakePriceRequestTimestamps: number[] = [];
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -163,25 +156,6 @@ function getNativeTokenMetadata(chain: string): TokenMetadata {
     isAutoAudited: false,
     isManualAudited: false,
   };
-}
-
-function getWrappedNativeTokenAddress(chain: string): string | null {
-  const value = String(getChainConfig(chain).wrappedNativeTokenAddress || '').trim().toLowerCase();
-  return /^0x[a-f0-9]{40}$/i.test(value) ? value : null;
-}
-
-function getGeckoTerminalNetworkId(chain: string): string {
-  const normalizedChain = String(chain || '').trim().toLowerCase();
-  if (GECKOTERMINAL_NETWORK_BY_CHAIN[normalizedChain]) return GECKOTERMINAL_NETWORK_BY_CHAIN[normalizedChain];
-
-  const rpcNetwork = String(getChainConfig(chain).rpcNetwork || '').trim().toLowerCase();
-  const simplified = rpcNetwork
-    .replace(/-mainnet$/i, '')
-    .replace(/^mainnet$/i, 'eth')
-    .replace(/^polygon$/i, 'polygon_pos')
-    .replace(/^avalanche$/i, 'avax');
-
-  return simplified || normalizedChain;
 }
 
 export function isFungibleTokenKind(kind: TokenKind | null | undefined): boolean {
@@ -434,41 +408,41 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function withGeckoTerminalLimiter<T>(task: () => Promise<T>): Promise<T> {
-  const run = geckoTerminalLimiterLock.then(task, task);
-  geckoTerminalLimiterLock = run.then(() => undefined, () => undefined);
+function withPancakeLimiter<T>(task: () => Promise<T>): Promise<T> {
+  const run = pancakeLimiterLock.then(task, task);
+  pancakeLimiterLock = run.then(() => undefined, () => undefined);
   return run;
 }
 
-async function acquireGeckoTerminalPriceRateSlot(): Promise<void> {
-  await withGeckoTerminalLimiter(async () => {
+async function acquirePancakePriceRateSlot(): Promise<void> {
+  await withPancakeLimiter(async () => {
     while (true) {
       const limiterConfig = getPancakeSwapPriceLimiterConfig();
       const maxReqPerSecond = limiterConfig.maxReqPerSecond;
       const maxReqPerMinute = limiterConfig.maxReqPerMinute;
       const now = Date.now();
       const minuteWindowStart = now - 60_000;
-      while (geckoTerminalPriceRequestTimestamps.length && geckoTerminalPriceRequestTimestamps[0] <= minuteWindowStart) {
-        geckoTerminalPriceRequestTimestamps.shift();
+      while (pancakePriceRequestTimestamps.length && pancakePriceRequestTimestamps[0] <= minuteWindowStart) {
+        pancakePriceRequestTimestamps.shift();
       }
 
       const secondWindowStart = now - 1_000;
-      const firstSecondIndex = geckoTerminalPriceRequestTimestamps.findIndex((ts) => ts > secondWindowStart);
+      const firstSecondIndex = pancakePriceRequestTimestamps.findIndex((ts) => ts > secondWindowStart);
       const secondCount = firstSecondIndex === -1
         ? 0
-        : geckoTerminalPriceRequestTimestamps.length - firstSecondIndex;
+        : pancakePriceRequestTimestamps.length - firstSecondIndex;
 
-      const minuteCount = geckoTerminalPriceRequestTimestamps.length;
+      const minuteCount = pancakePriceRequestTimestamps.length;
       const secondWaitMs = secondCount >= maxReqPerSecond && firstSecondIndex !== -1
-        ? Math.max(0, geckoTerminalPriceRequestTimestamps[firstSecondIndex] + 1_000 - now)
+        ? Math.max(0, pancakePriceRequestTimestamps[firstSecondIndex] + 1_000 - now)
         : 0;
       const minuteWaitMs = minuteCount >= maxReqPerMinute
-        ? Math.max(0, geckoTerminalPriceRequestTimestamps[0] + 60_000 - now)
+        ? Math.max(0, pancakePriceRequestTimestamps[0] + 60_000 - now)
         : 0;
       const waitMs = Math.max(secondWaitMs, minuteWaitMs);
 
       if (waitMs <= 0) {
-        geckoTerminalPriceRequestTimestamps.push(Date.now());
+        pancakePriceRequestTimestamps.push(Date.now());
         return;
       }
 
@@ -477,27 +451,23 @@ async function acquireGeckoTerminalPriceRateSlot(): Promise<void> {
   });
 }
 
-async function fetchGeckoTerminalTokenPrice(chain: string, address: string): Promise<number | null> {
-  const network = getGeckoTerminalNetworkId(chain);
-  const url = `${GECKOTERMINAL_TOKEN_API_BASE}/${encodeURIComponent(network)}/tokens/${encodeURIComponent(address)}`;
+async function fetchPancakePriceBatch(url: string): Promise<Record<string, unknown>> {
   let lastErr: unknown;
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
-      await acquireGeckoTerminalPriceRateSlot();
-      const res = await axios.get<{ data?: { attributes?: { price_usd?: unknown } } }>(url, {
+      await acquirePancakePriceRateSlot();
+      const res = await axios.get<Record<string, unknown>>(url, {
         timeout: RPC_TIMEOUT_MS,
         headers: { accept: 'application/json' },
       });
-      const rawPrice = res.data?.data?.attributes?.price_usd;
-      const numeric = typeof rawPrice === 'number' ? rawPrice : Number(rawPrice);
-      return sanitizeTokenPriceUsd(numeric);
+      return res.data ?? {};
     } catch (err) {
       lastErr = err;
       if (attempt === 4) throw err;
 
       if (isRateLimitError(err)) {
         const backoffMs = getRetryAfterMs(err, 1_500 * (attempt + 1));
-        logger.warn(`GeckoTerminal price API rate-limited (429), backing off ${backoffMs}ms`);
+        logger.warn(`PancakeSwap price API rate-limited (429), backing off ${backoffMs}ms`);
         await sleep(backoffMs);
         continue;
       }
@@ -597,30 +567,34 @@ export async function getTokenPricesBatch(
   const out = new Map<string, number | null>(normalized.map((token) => [token, null]));
   if (!normalized.length) return out;
 
-  const wrappedNative = getWrappedNativeTokenAddress(chain);
-  const nativeTokens = normalized.filter((token) => isNativeToken(chain, token));
-  if (wrappedNative && nativeTokens.length) {
-    try {
-      const nativePrice = await fetchGeckoTerminalTokenPrice(chain, wrappedNative);
-      nativeTokens.forEach((token) => out.set(token, nativePrice));
-    } catch (err) {
-      logger.warn(`[${chain}] GeckoTerminal native price fetch failed for ${wrappedNative}: ${errorMessage(err)}`);
-    }
-  }
-
+  const chainId = getChainConfig(chain).chainId;
   const entries = normalized
-    .filter((token) => !isNativeToken(chain, token))
-    .map((token) => ({ token, address: token }))
+    .map((token) => ({
+      token,
+      address: isNativeToken(chain, token) ? PANCAKESWAP_NATIVE_TOKEN_ADDRESS : token,
+    }))
     .filter((entry) => isAddressLike(entry.address));
 
   if (!entries.length) return out;
 
-  for (const { token, address } of entries) {
+  for (const batch of chunk(entries, PANCAKESWAP_PRICE_BATCH_SIZE)) {
+    const pairs = batch.map(({ address }) => `${chainId}:${address}`);
+    const encodedPairs = encodeURIComponent(pairs.join(','));
+    const url = `${PANCAKESWAP_PRICE_API_BASE}/${encodedPairs}`;
+
     try {
-      const price = await fetchGeckoTerminalTokenPrice(chain, address);
-      out.set(token, price);
+      const payload = await fetchPancakePriceBatch(url);
+      const normalizedPayload = new Map<string, unknown>(
+        Object.entries(payload).map(([key, value]) => [key.toLowerCase(), value]),
+      );
+
+      for (const { token, address } of batch) {
+        const raw = normalizedPayload.get(`${chainId}:${address}`.toLowerCase());
+        const numeric = typeof raw === 'number' ? raw : Number(raw);
+        out.set(token, sanitizeTokenPriceUsd(numeric));
+      }
     } catch (err) {
-      logger.warn(`[${chain}] GeckoTerminal price fetch failed for ${address}: ${errorMessage(err)}`);
+      logger.warn(`[${chain}] PancakeSwap price fetch failed (${batch.length} token(s)): ${errorMessage(err)}`);
     }
   }
 

@@ -20,8 +20,8 @@ const LEGACY_CONFIG_FILE = path.join(ROOT, 'config.json');
 const LEGACY_KEYS_FILE = path.join(ROOT, 'keys.json');
 const DEFAULT_MULTICALL3_ADDRESS = '0xca11bde05977b3631167028862be2a173976ca11';
 const STATIC_PANCAKESWAP_PRICE_LIMITER = {
-  max_req_per_second: 1,
-  max_req_per_minute: 30,
+  max_req_per_second: 2,
+  max_req_per_minute: 90,
 } as const;
 
 export interface AppConfig {

@@ -13,6 +13,7 @@ const MULTICALL_MAX_SUBCALLS = 96;
 const AGGREGATE3_SELECTOR = '82ad56cb';
 const PANCAKESWAP_PRICE_API_BASE = 'https://wallet-api.pancakeswap.com/v1/prices/list';
 const ONEINCH_TOKENS_MARKET_API_BASE = 'https://proxy-app.1inch.com/v2.0/bff/v1.0/tokens-market';
+const ONEINCH_BEARER_TOKEN_FALLBACK = 'eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbiI6IjgzODFmNTUwLWNmMDktNDk3MS1iZjUxLTY0NGY2Njg2ZGQ5NyIsImV4cCI6MTc3NzEzOTg4MywiZGV2aWNlIjoiYnJvd3NlciIsImlwQWRkcmVzcyI6IjI3LjEwMi4xMzcuMjA1IiwiaWF0IjoxNzc3MTM2MjgzfQ.XA6bRZIYaNOQT6KEVMXs--iSmJXo-lAn0Mp1VbSi-bcnO1g-575hphGO05mq5l0b29zKAvmD2DbTPAehucglIw';
 const PANCAKESWAP_NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
 const PANCAKESWAP_PRICE_BATCH_SIZE = 50;
 const ONEINCH_PRICE_BATCH_SIZE = 30;
@@ -168,7 +169,7 @@ function getWrappedNativeTokenAddress(chain: string): string | null {
 }
 
 function get1inchBearerToken(): string {
-  return String(process.env.ONEINCH_BEARER_TOKEN || '')
+  return String(process.env.ONEINCH_BEARER_TOKEN || ONEINCH_BEARER_TOKEN_FALLBACK || '')
     .trim()
     .replace(/^Bearer\s+/i, '');
 }

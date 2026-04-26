@@ -1545,6 +1545,8 @@
         removeAiModelRow,
         addWhitelistPatternRow,
         removeWhitelistPatternRow,
+        createManagedUserAccount,
+        deleteManagedUserAccount,
         saveSettings,
         saveReview,
         saveTokenReview,

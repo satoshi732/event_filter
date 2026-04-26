@@ -8,21 +8,29 @@ export * from './db/tokens.js';
 export * from './db/contracts.js';
 export * from './db/selectors.js';
 export * from './db/settings.js';
+export * from './db/auth.js';
+export * from './db/activity.js';
 
 export function getWhitelistPatterns(): PatternRow[] {
   return getDb().prepare(`
-    SELECT id, name, hex_pattern, pattern_type, score, description
+    SELECT id, name, hex_pattern, pattern_type, description, created_by_username
     FROM whitelist_patterns
-    ORDER BY score DESC, name ASC, id ASC
+    ORDER BY name ASC, id ASC
   `).all() as PatternRow[];
 }
 
-export function addWhitelistPattern(name: string, hexPattern: string, patternType: string, score: number, description = ''): void {
+export function addWhitelistPattern(
+  name: string,
+  hexPattern: string,
+  patternType: string,
+  description = '',
+  createdByUsername = '',
+): void {
   getDb().prepare(`
-    INSERT OR REPLACE INTO whitelist_patterns (name, hex_pattern, pattern_type, score, description)
+    INSERT OR REPLACE INTO whitelist_patterns (name, hex_pattern, pattern_type, description, created_by_username)
     VALUES (?, ?, ?, ?, ?)
-  `).run(name, hexPattern.toLowerCase(), patternType, score, description);
-  console.log(`whitelist pattern added: ${name} (${hexPattern}) score=${score}`);
+  `).run(name, hexPattern.toLowerCase(), patternType, description, String(createdByUsername || '').trim().toLowerCase());
+  console.log(`whitelist pattern added: ${name} (${hexPattern})`);
 }
 
 export function removeWhitelistPattern(name: string): void {
@@ -31,58 +39,72 @@ export function removeWhitelistPattern(name: string): void {
 }
 
 export function replaceWhitelistPatterns(rows: Array<{
+  id?: number;
   name: string;
   hexPattern: string;
   patternType: string;
-  score: number;
   description?: string;
-}>): void {
+  createdByUsername?: string;
+}>, actorUsername = ''): number {
   const normalized = rows
     .map((row) => ({
+      id: Number.isFinite(Number(row.id)) ? Number(row.id) : null,
       name: String(row.name || '').trim(),
       hexPattern: String(row.hexPattern || '').trim().toLowerCase().replace(/^0x/, ''),
       patternType: String(row.patternType || 'selector').trim().toLowerCase() || 'selector',
-      score: Number.isFinite(Number(row.score)) ? Math.floor(Number(row.score)) : 1,
       description: String(row.description || '').trim(),
+      createdByUsername: String(row.createdByUsername || '').trim().toLowerCase(),
     }))
     .filter((row) => row.name && row.hexPattern);
 
   const db = getDb();
+  const previousRows = db.prepare(`
+    SELECT id, name, created_by_username
+    FROM whitelist_patterns
+    ORDER BY id ASC
+  `).all() as Array<{ id: number; name: string; created_by_username: string }>;
+  const previousById = new Map(previousRows.map((row) => [row.id, row] as const));
+  const previousByName = new Map(previousRows.map((row) => [row.name, row] as const));
+  const previousNames = new Set(previousRows.map((row) => row.name));
+  const normalizedActor = String(actorUsername || '').trim().toLowerCase();
   const insert = db.prepare(`
-    INSERT INTO whitelist_patterns (name, hex_pattern, pattern_type, score, description)
+    INSERT INTO whitelist_patterns (name, hex_pattern, pattern_type, description, created_by_username)
     VALUES (?, ?, ?, ?, ?)
   `);
 
   const run = db.transaction((entries: typeof normalized) => {
     db.prepare('DELETE FROM whitelist_patterns').run();
     for (const row of entries) {
-      insert.run(row.name, row.hexPattern, row.patternType, row.score, row.description);
+      const existing = (row.id != null ? previousById.get(row.id) : null) || previousByName.get(row.name);
+      const owner = row.createdByUsername || existing?.created_by_username || normalizedActor;
+      insert.run(row.name, row.hexPattern, row.patternType, row.description, owner);
     }
   });
 
   run(normalized);
+  return normalized.filter((row) => !previousNames.has(row.name)).length;
 }
 
 export function listWhitelistPatterns(): void {
-  const rows = getDb().prepare('SELECT * FROM whitelist_patterns ORDER BY score DESC, name').all() as PatternRow[];
+  const rows = getDb().prepare('SELECT * FROM whitelist_patterns ORDER BY name ASC, id ASC').all() as PatternRow[];
   if (!rows.length) { console.log('(empty)'); return; }
-  console.log('name                           hex_pattern  type      score  description');
+  console.log('name                           hex_pattern  type      description');
   console.log('-'.repeat(80));
   for (const r of rows) {
-    console.log(`${r.name.padEnd(31)} ${r.hex_pattern.padEnd(13)} ${r.pattern_type.padEnd(10)} ${String(r.score).padEnd(7)} ${r.description}`);
+    console.log(`${r.name.padEnd(31)} ${r.hex_pattern.padEnd(13)} ${r.pattern_type.padEnd(10)} ${r.description}`);
   }
 }
 
 export function getPrimitiveDbSnapshot(): PrimitiveDbSnapshot {
   const db = getDb();
   const whitelistPatterns = db.prepare(`
-    SELECT id, name, hex_pattern, pattern_type, score, description, created_at
+    SELECT id, name, hex_pattern, pattern_type, description, created_by_username, created_at
     FROM whitelist_patterns
     ORDER BY id ASC
   `).all() as PrimitiveDbSnapshot['whitelist_patterns'];
 
   const seenSelectorsRows = db.prepare(`
-    SELECT hash, label, selectors, level, bytecode_size, created_at
+    SELECT hash, label, selectors, level, bytecode_size, created_by_username, created_at
     FROM seen_selectors
     ORDER BY created_at ASC
   `).all() as Array<{
@@ -91,13 +113,14 @@ export function getPrimitiveDbSnapshot(): PrimitiveDbSnapshot {
     selectors: string;
     level: number | null;
     bytecode_size: number;
+    created_by_username: string;
     created_at: string;
   }>;
 
   const selectorsTempRows = db.prepare(`
     SELECT
       id, chain, contract_addr, selector_hash, selectors, label,
-      bytecode_size, status, last_error, created_at, updated_at
+      bytecode_size, prepared_by_username, status, last_error, created_at, updated_at
     FROM selectors_temp
     ORDER BY created_at ASC, id ASC
   `).all() as Array<{
@@ -108,6 +131,7 @@ export function getPrimitiveDbSnapshot(): PrimitiveDbSnapshot {
     selectors: string;
     label: string;
     bytecode_size: number;
+    prepared_by_username: string;
     status: string;
     last_error: string | null;
     created_at: string;

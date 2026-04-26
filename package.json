@@ -16,11 +16,13 @@
     "@types/pg": "^8.20.0",
     "axios": "^1.7.0",
     "better-sqlite3": "^11.0.0",
+    "echarts": "^6.0.0",
     "ejs": "^5.0.1",
     "node-cron": "^3.0.3",
     "pg": "^8.20.0",
     "pinia": "^3.0.4",
     "vue": "^3.5.32",
+    "vue-echarts": "^8.0.1",
     "vue-router": "^5.0.4"
   },
   "devDependencies": {

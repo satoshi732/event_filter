@@ -23,6 +23,7 @@ export function storeSelectorsTempRows(
     selectors: string[];
     label?: string;
     bytecodeSize?: number;
+    preparedByUsername?: string;
     status?: string;
     lastError?: string | null;
   }>,
@@ -46,8 +47,9 @@ export function saveSeenSelectorPattern(
   selectors: string[],
   label: string,
   bytecodeSize = 0,
+  createdByUsername = '',
 ): string {
-  return addSeenSelectors(selectors, label, bytecodeSize);
+  return addSeenSelectors(selectors, label, bytecodeSize, null, createdByUsername);
 }
 
 export {

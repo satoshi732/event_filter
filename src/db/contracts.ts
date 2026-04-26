@@ -243,6 +243,8 @@ function mapBaseAiAuditRow(row: {
   chain: string;
   target_type: string;
   target_addr: string;
+  owner_username: string;
+  request_origin: string;
   status: string | null;
   title: string;
   provider: string;
@@ -257,11 +259,16 @@ function mapBaseAiAuditRow(row: {
   requested_at: string;
   audited_at: string | null;
 }) {
+  const requestOrigin: 'manual' | 'auto' = String(row.request_origin || '').trim().toLowerCase() === 'auto'
+    ? 'auto'
+    : 'manual';
   return {
     requestSession: row.request_session,
     chain: row.chain.toLowerCase(),
     targetType: (row.target_type === 'token' ? 'token' : 'contract') as AiAuditTargetType,
     targetAddr: row.target_addr.toLowerCase(),
+    ownerUsername: String(row.owner_username || '').trim().toLowerCase() || null,
+    requestOrigin,
     status: deriveAiAuditLifecycleStatus({
       status: row.status,
       isSuccess: row.is_success == null ? null : Boolean(row.is_success),
@@ -320,7 +327,7 @@ function getLatestAiAudits(
   const placeholders = normalized.map(() => '?').join(', ');
   const rows = getDb().prepare(`
     SELECT
-      request_session, chain, target_type, target_addr, status, title, provider, model, result_path,
+      request_session, chain, target_type, target_addr, owner_username, request_origin, status, title, provider, model, result_path,
       dedaub_job_id, analysis_session_id, critical, high, medium, is_success, requested_at, audited_at
     FROM ai_audits
     WHERE chain = ?
@@ -332,6 +339,8 @@ function getLatestAiAudits(
     chain: string;
     target_type: string;
     target_addr: string;
+    owner_username: string;
+    request_origin: string;
     status: string | null;
     title: string;
     provider: string;
@@ -390,7 +399,7 @@ export function getSingleTokenAiAudit(
 export function listPendingAiAudits(): BaseAiAuditRow[] {
   const rows = getDb().prepare(`
     SELECT
-      request_session, chain, target_type, target_addr, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
+      request_session, chain, target_type, target_addr, owner_username, request_origin, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
       critical, high, medium, is_success, requested_at, audited_at
     FROM ai_audits
     WHERE status IN ('requested', 'running')
@@ -403,6 +412,8 @@ export function listPendingAiAudits(): BaseAiAuditRow[] {
     chain: string;
     target_type: string;
     target_addr: string;
+    owner_username: string;
+    request_origin: string;
     status: string | null;
     title: string;
     provider: string;
@@ -445,12 +456,16 @@ function requestAiAudit(input: {
   title?: string;
   provider?: string;
   model?: string;
+  ownerUsername?: string;
+  requestOrigin?: 'manual' | 'auto';
 }) {
   const chainName = input.chain.toLowerCase();
   const address = input.targetAddr.toLowerCase();
   const title = resolveAiAuditTitle(input.title, chainName, address);
   const provider = normalizeAiAuditProvider(input.provider);
   const model = normalizeAiAuditModel(provider, input.model);
+  const ownerUsername = String(input.ownerUsername || '').trim().toLowerCase();
+  const requestOrigin: 'manual' | 'auto' = input.requestOrigin === 'auto' ? 'auto' : 'manual';
   const latest = getLatestAiAudits(input.targetType, chainName, [address]).get(address);
   if (latest && (latest.status === 'requested' || latest.status === 'running')) {
     logger.info(
@@ -462,13 +477,15 @@ function requestAiAudit(input: {
   const requestSession = v2Id('ai-audit', `${input.targetType}:${chainName}:${address}:${Date.now()}`);
   getDb().prepare(`
     INSERT INTO ai_audits (
-      request_session, chain, target_type, target_addr, status, title, provider, model, dedaub_job_id, analysis_session_id, requested_at
-    ) VALUES (?, ?, ?, ?, 'requested', ?, ?, ?, NULL, NULL, datetime('now'))
+      request_session, chain, target_type, target_addr, owner_username, request_origin, status, title, provider, model, dedaub_job_id, analysis_session_id, requested_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'requested', ?, ?, ?, NULL, NULL, datetime('now'))
   `).run(
     requestSession,
     chainName,
     input.targetType,
     address,
+    ownerUsername,
+    requestOrigin,
     title,
     provider,
     model,
@@ -483,6 +500,8 @@ function requestAiAudit(input: {
     chain: chainName,
     targetType: input.targetType,
     targetAddr: address,
+    ownerUsername: ownerUsername || null,
+    requestOrigin,
     status: 'requested',
     title,
     provider,
@@ -505,6 +524,8 @@ export function requestContractAiAudit(input: {
   title?: string;
   provider?: string;
   model?: string;
+  ownerUsername?: string;
+  requestOrigin?: 'manual' | 'auto';
 }): ContractAiAuditRow {
   return toContractAiAuditRow(requestAiAudit({
     targetType: 'contract',
@@ -513,6 +534,8 @@ export function requestContractAiAudit(input: {
     title: input.title,
     provider: input.provider,
     model: input.model,
+    ownerUsername: input.ownerUsername,
+    requestOrigin: input.requestOrigin,
   }));
 }
 
@@ -522,6 +545,8 @@ export function requestTokenAiAudit(input: {
   title?: string;
   provider?: string;
   model?: string;
+  ownerUsername?: string;
+  requestOrigin?: 'manual' | 'auto';
 }): TokenAiAuditRow {
   return toTokenAiAuditRow(requestAiAudit({
     targetType: 'token',
@@ -530,6 +555,8 @@ export function requestTokenAiAudit(input: {
     title: input.title,
     provider: input.provider,
     model: input.model,
+    ownerUsername: input.ownerUsername,
+    requestOrigin: input.requestOrigin,
   }));
 }
 
@@ -539,7 +566,7 @@ export function updateAiAuditLifecycleStatus(input: {
 }): BaseAiAuditRow | null {
   const normalizedStatus = normalizeAiAuditLifecycleStatus(input.status) || 'requested';
   const previous = getDb().prepare(`
-    SELECT request_session, chain, target_type, target_addr, status
+    SELECT request_session, chain, target_type, target_addr, owner_username, request_origin, status
     FROM ai_audits
     WHERE request_session = ?
     LIMIT 1
@@ -548,6 +575,8 @@ export function updateAiAuditLifecycleStatus(input: {
     chain: string;
     target_type: string;
     target_addr: string;
+    owner_username: string;
+    request_origin: string;
     status: string | null;
   } | undefined;
 
@@ -559,7 +588,7 @@ export function updateAiAuditLifecycleStatus(input: {
 
   const row = getDb().prepare(`
     SELECT
-      request_session, chain, target_type, target_addr, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
+      request_session, chain, target_type, target_addr, owner_username, request_origin, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
       critical, high, medium, is_success, requested_at, audited_at
     FROM ai_audits
     WHERE request_session = ?
@@ -569,6 +598,8 @@ export function updateAiAuditLifecycleStatus(input: {
     chain: string;
     target_type: string;
     target_addr: string;
+    owner_username: string;
+    request_origin: string;
     status: string | null;
     title: string;
     provider: string;
@@ -600,7 +631,7 @@ export function updateAiAuditBackendSessionIds(input: {
   analysisSessionId?: string | null;
 }): BaseAiAuditRow | null {
   const previous = getDb().prepare(`
-    SELECT request_session, chain, target_type, target_addr, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
+    SELECT request_session, chain, target_type, target_addr, owner_username, request_origin, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
            critical, high, medium, is_success, requested_at, audited_at
     FROM ai_audits
     WHERE request_session = ?
@@ -610,6 +641,8 @@ export function updateAiAuditBackendSessionIds(input: {
     chain: string;
     target_type: string;
     target_addr: string;
+    owner_username: string;
+    request_origin: string;
     status: string | null;
     title: string;
     provider: string;
@@ -638,7 +671,7 @@ export function updateAiAuditBackendSessionIds(input: {
   );
 
   const row = getDb().prepare(`
-    SELECT request_session, chain, target_type, target_addr, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
+    SELECT request_session, chain, target_type, target_addr, owner_username, request_origin, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
            critical, high, medium, is_success, requested_at, audited_at
     FROM ai_audits
     WHERE request_session = ?
@@ -648,6 +681,8 @@ export function updateAiAuditBackendSessionIds(input: {
     chain: string;
     target_type: string;
     target_addr: string;
+    owner_username: string;
+    request_origin: string;
     status: string | null;
     title: string;
     provider: string;
@@ -682,12 +717,14 @@ function saveAiAuditResult(input: {
   medium?: number | null;
   isSuccess?: boolean | null;
   auditedAt?: string | null;
+  ownerUsername?: string | null;
+  requestOrigin?: 'manual' | 'auto';
 }) {
   const chainName = input.chain.toLowerCase();
   const address = input.targetAddr.toLowerCase();
   const existing = input.requestSession
     ? getDb().prepare(`
-      SELECT request_session, chain, target_type, target_addr, status, title, provider, model, result_path,
+      SELECT request_session, chain, target_type, target_addr, owner_username, request_origin, status, title, provider, model, result_path,
              dedaub_job_id, analysis_session_id, critical, high, medium, is_success, requested_at, audited_at
       FROM ai_audits
       WHERE request_session = ?
@@ -697,6 +734,8 @@ function saveAiAuditResult(input: {
       chain: string;
       target_type: string;
       target_addr: string;
+      owner_username: string;
+      request_origin: string;
       status: string | null;
       title: string;
       provider: string;
@@ -718,16 +757,25 @@ function saveAiAuditResult(input: {
   const provider = normalizeAiAuditProvider(input.provider || latest?.provider || getDefaultAiAuditProvider());
   const model = normalizeAiAuditModel(provider, input.model || latest?.model || getDefaultAiAuditModel(provider));
   const title = resolveAiAuditTitle(input.title || latest?.title, chainName, address);
+  const ownerUsername = String(input.ownerUsername ?? latest?.ownerUsername ?? '').trim().toLowerCase();
+  const requestOrigin: 'manual' | 'auto' = input.requestOrigin === 'auto'
+    ? 'auto'
+    : (latest?.requestOrigin === 'auto' ? 'auto' : 'manual');
   const nextStatus = input.isSuccess == null
     ? (latest?.status === 'running' ? 'running' : 'requested')
     : (input.isSuccess ? 'completed' : 'failed');
 
   getDb().prepare(`
     INSERT INTO ai_audits (
-      request_session, chain, target_type, target_addr, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
+      request_session, chain, target_type, target_addr, owner_username, request_origin, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
       critical, high, medium, is_success, requested_at, audited_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
     ON CONFLICT(request_session) DO UPDATE SET
+      owner_username = CASE
+        WHEN excluded.owner_username != '' THEN excluded.owner_username
+        ELSE ai_audits.owner_username
+      END,
+      request_origin = COALESCE(excluded.request_origin, ai_audits.request_origin),
       status = excluded.status,
       title = excluded.title,
       provider = excluded.provider,
@@ -745,6 +793,8 @@ function saveAiAuditResult(input: {
     chainName,
     input.targetType,
     address,
+    ownerUsername,
+    requestOrigin,
     nextStatus,
     title,
     provider,
@@ -768,6 +818,8 @@ function saveAiAuditResult(input: {
     chain: chainName,
     targetType: input.targetType,
     targetAddr: address,
+    ownerUsername: ownerUsername || null,
+    requestOrigin,
     status: nextStatus,
     title,
     provider,
@@ -799,6 +851,8 @@ export function saveContractAiAuditResult(input: {
   medium?: number | null;
   isSuccess?: boolean | null;
   auditedAt?: string | null;
+  ownerUsername?: string | null;
+  requestOrigin?: 'manual' | 'auto';
 }): ContractAiAuditRow {
   const row = saveAiAuditResult({
     targetType: 'contract',
@@ -816,6 +870,8 @@ export function saveContractAiAuditResult(input: {
     medium: input.medium,
     isSuccess: input.isSuccess,
     auditedAt: input.auditedAt,
+    ownerUsername: input.ownerUsername,
+    requestOrigin: input.requestOrigin,
   });
   if (input.isSuccess === true) {
     getDb().prepare(`
@@ -842,6 +898,8 @@ export function saveTokenAiAuditResult(input: {
   medium?: number | null;
   isSuccess?: boolean | null;
   auditedAt?: string | null;
+  ownerUsername?: string | null;
+  requestOrigin?: 'manual' | 'auto';
 }): TokenAiAuditRow {
   const row = saveAiAuditResult({
     targetType: 'token',
@@ -859,6 +917,8 @@ export function saveTokenAiAuditResult(input: {
     medium: input.medium,
     isSuccess: input.isSuccess,
     auditedAt: input.auditedAt,
+    ownerUsername: input.ownerUsername,
+    requestOrigin: input.requestOrigin,
   });
   if (input.isSuccess === true) {
     getDb().prepare(`

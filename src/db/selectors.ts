@@ -16,26 +16,37 @@ export function addSeenSelectors(
   label: string,
   bytecodeSize = 0,
   level: number | null = null,
+  createdByUsername = '',
 ): string {
   const sorted = [...new Set(selectors)].sort().join(',');
   const hash = createHash('sha256').update(sorted).digest('hex');
   getDb().prepare(`
-    INSERT OR REPLACE INTO seen_selectors (hash, label, selectors, level, bytecode_size)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(hash, label, sorted, level, bytecodeSize);
+    INSERT INTO seen_selectors (hash, label, selectors, level, bytecode_size, created_by_username)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(hash) DO UPDATE SET
+      label = excluded.label,
+      selectors = excluded.selectors,
+      level = COALESCE(excluded.level, seen_selectors.level),
+      bytecode_size = excluded.bytecode_size,
+      created_by_username = CASE
+        WHEN excluded.created_by_username != '' THEN excluded.created_by_username
+        ELSE seen_selectors.created_by_username
+      END
+  `).run(hash, label, sorted, level, bytecodeSize, String(createdByUsername || '').trim().toLowerCase());
   return hash;
 }
 
 export function getSeenSelectorEntries(): SeenSelectorEntry[] {
   const rows = getDb().prepare(
-    'SELECT hash, label, selectors, level, bytecode_size FROM seen_selectors',
-  ).all() as { hash: string; label: string; selectors: string; level: number | null; bytecode_size: number }[];
+    'SELECT hash, label, selectors, level, bytecode_size, created_by_username FROM seen_selectors',
+  ).all() as { hash: string; label: string; selectors: string; level: number | null; bytecode_size: number; created_by_username: string }[];
   return rows.map(r => ({
     hash: r.hash,
     label: r.label || '(unnamed)',
     selectors: new Set(r.selectors.split(',')),
     level: r.level,
     bytecodeSize: r.bytecode_size ?? 0,
+    createdByUsername: String(r.created_by_username || '').trim().toLowerCase(),
   }));
 }
 
@@ -177,6 +188,7 @@ export function upsertSeenContractReview(input: {
   exploitable?: boolean;
   selectors: string[];
   bytecodeSize?: number;
+  createdByUsername?: string;
 }): void {
   const chain = input.chain.toLowerCase();
   const contractAddress = input.contractAddress.toLowerCase();
@@ -195,6 +207,7 @@ export function upsertSeenContractReview(input: {
       selectors,
       label: input.label,
       bytecodeSize,
+      preparedByUsername: input.createdByUsername ?? '',
       status: syncStatus,
       lastError: null,
     }]);
@@ -290,38 +303,58 @@ export function getSeenContractsForPush(statuses?: string[]): PatternPushQueueRo
   const rows = getDb().prepare(`
     SELECT
       selector_hash AS hash,
-      MAX(CASE WHEN label != '' THEN label ELSE '' END) AS label,
-      MAX(selectors) AS selectors,
-      MAX(bytecode_size) AS bytecode_size,
-      MIN(status) AS status,
-      MIN(last_error) AS last_error,
-      MIN(created_at) AS created_at,
-      MAX(updated_at) AS updated_at
+      label,
+      selectors,
+      bytecode_size,
+      prepared_by_username,
+      status,
+      last_error,
+      created_at,
+      updated_at
     FROM selectors_temp
     ${where}
-    GROUP BY selector_hash
-    ORDER BY MIN(created_at) ASC
+    ORDER BY created_at ASC, updated_at ASC, id ASC
   `).all(...(statuses ?? [])) as Array<{
     hash: string;
     label: string;
     selectors: string;
     bytecode_size: number;
+    prepared_by_username: string;
     status: string;
     last_error: string | null;
     created_at: string;
     updated_at: string;
   }>;
 
-  return rows.map((row) => ({
-    hash: row.hash,
-    label: row.label,
-    selectors: row.selectors.split(',').filter(Boolean),
-    bytecodeSize: row.bytecode_size ?? 0,
-    status: row.status,
-    lastError: row.last_error,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }));
+  const grouped = new Map<string, PatternPushQueueRow>();
+  for (const row of rows) {
+    const existing = grouped.get(row.hash);
+    const owner = String(row.prepared_by_username || '').trim().toLowerCase();
+    if (!existing) {
+      grouped.set(row.hash, {
+        hash: row.hash,
+        label: row.label,
+        selectors: row.selectors.split(',').filter(Boolean),
+        bytecodeSize: row.bytecode_size ?? 0,
+        createdByUsername: owner,
+        status: row.status,
+        lastError: row.last_error,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      });
+      continue;
+    }
+    if (!existing.label && row.label) existing.label = row.label;
+    if ((!existing.selectors || existing.selectors.length === 0) && row.selectors) {
+      existing.selectors = row.selectors.split(',').filter(Boolean);
+    }
+    if (!existing.bytecodeSize && row.bytecode_size) existing.bytecodeSize = row.bytecode_size ?? 0;
+    if (!existing.createdByUsername && owner) existing.createdByUsername = owner;
+    if (row.updated_at > existing.updatedAt) existing.updatedAt = row.updated_at;
+    if (row.last_error && !existing.lastError) existing.lastError = row.last_error;
+  }
+
+  return [...grouped.values()];
 }
 
 export function markSeenContractPushResult(
@@ -520,6 +553,7 @@ export function upsertSelectorsTempBatch(
     selectors: string[];
     label?: string;
     bytecodeSize?: number;
+    preparedByUsername?: string;
     status?: string;
     lastError?: string | null;
   }>,
@@ -535,14 +569,18 @@ export function upsertSelectorsTempBatch(
   const insert = getDb().prepare(`
     INSERT INTO selectors_temp (
       id, chain, contract_addr, selector_hash, selectors, label,
-      bytecode_size, status, last_error, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+      bytecode_size, prepared_by_username, status, last_error, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
     ON CONFLICT(chain, contract_addr, selector_hash) DO UPDATE SET
       selectors = excluded.selectors,
       label = CASE WHEN excluded.label != '' THEN excluded.label ELSE selectors_temp.label END,
       bytecode_size = CASE
         WHEN excluded.bytecode_size > 0 THEN excluded.bytecode_size
         ELSE selectors_temp.bytecode_size
+      END,
+      prepared_by_username = CASE
+        WHEN excluded.prepared_by_username != '' THEN excluded.prepared_by_username
+        ELSE selectors_temp.prepared_by_username
       END,
       status = CASE
         WHEN excluded.status != '' THEN excluded.status
@@ -564,6 +602,7 @@ export function upsertSelectorsTempBatch(
         [...new Set(row.selectors.map((value) => value.toLowerCase()))].join(','),
         row.label ?? '',
         row.bytecodeSize ?? 0,
+        String(row.preparedByUsername || '').trim().toLowerCase(),
         row.status ?? 'pending',
         row.lastError ?? null,
       );

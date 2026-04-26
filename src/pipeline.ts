@@ -1,4 +1,5 @@
-import { classifyDelegations } from './utils/proxy.js';
+import { classifyDelegations, resolveProxyByBytecode } from './utils/proxy.js';
+import type { ProxyResult } from './utils/proxy.js';
 import {
   SeenContractRow,
   getWhitelistPatterns,
@@ -20,6 +21,7 @@ import { logger } from './utils/logger.js';
 import { sanitizeTokenPriceUsd } from './utils/token-price.js';
 import { getChainConfig } from './config.js';
 import {
+  getContractBytecode,
   getNativeTokenRef,
   getTokenBalancesBatch,
   getTokenMetadataBatch,
@@ -27,7 +29,7 @@ import {
   isFungibleTokenKind,
   TokenMetadata,
 } from './utils/rpc.js';
-import { collectRawRoundSnapshot } from './modules/raw-data/index.js';
+import { collectRawRoundSnapshot, type RawRoundRangeInput } from './modules/raw-data/index.js';
 import { resolvePatternHash, safeBigInt, detectSyncCallPattern } from './modules/analysis/index.js';
 import {
   backfillContractDeployments,
@@ -149,6 +151,7 @@ export interface PipelineProgressUpdate {
 
 export interface RunPipelineOptions {
   onProgress?: (update: PipelineProgressUpdate) => void;
+  range?: RawRoundRangeInput;
 }
 
 export interface TokenCounterpartyFlow {
@@ -174,6 +177,8 @@ interface TokenContractFacts {
 
 const TOKEN_PRICE_BACKFILL_BATCH_SIZE = 300;
 const CONTRACT_ANALYSIS_PROGRESS_STEP = 25;
+const RPC_CONTRACT_INFO_BATCH_SIZE = 20;
+const PROXY_RESOLVE_BATCH_SIZE = 20;
 
 function clampPercent(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -294,6 +299,93 @@ function computeContractPortfolioUsd(input: {
   return totals;
 }
 
+async function loadContractInfosViaRpc(chain: string, addresses: string[]): Promise<Map<string, ContractInfo>> {
+  const map = new Map<string, ContractInfo>();
+  if (!addresses.length) return map;
+
+  for (let index = 0; index < addresses.length; index += RPC_CONTRACT_INFO_BATCH_SIZE) {
+    const batch = addresses.slice(index, index + RPC_CONTRACT_INFO_BATCH_SIZE);
+    const rows = await Promise.all(batch.map(async (address) => {
+      try {
+        const bytecode = await getContractBytecode(chain, address);
+        return {
+          address,
+          info: {
+            bytecode: bytecode.startsWith('0x') ? bytecode.slice(2).toLowerCase() : bytecode.toLowerCase(),
+            block_number: 0,
+            block_timestamp: null,
+          } satisfies ContractInfo,
+        };
+      } catch (err) {
+        logger.warn(`[${chain}] RPC contract bytecode fetch failed for ${address}: ${(err as Error).message || String(err)}`);
+        return {
+          address,
+          info: {
+            bytecode: '',
+            block_number: 0,
+            block_timestamp: null,
+          } satisfies ContractInfo,
+        };
+      }
+    }));
+    rows.forEach(({ address, info }) => map.set(address.toLowerCase(), info));
+  }
+
+  return map;
+}
+
+async function loadContractInfosForPipeline(chain: string, addresses: string[]): Promise<Map<string, ContractInfo>> {
+  if (!addresses.length) return new Map();
+  const chainConfig = getChainConfig(chain);
+  if (chainConfig.chainbaseKeys.length) {
+    try {
+      return await getContractInfos(chain, addresses);
+    } catch (err) {
+      logger.warn(`[${chain}] Chainbase contract info fetch failed, falling back to RPC bytecode: ${(err as Error).message || String(err)}`);
+    }
+  }
+  return loadContractInfosViaRpc(chain, addresses);
+}
+
+async function loadDelegateCallsForPipeline(chain: string, fromBlock: number, toBlock: number): Promise<Map<string, string>> {
+  const chainConfig = getChainConfig(chain);
+  if (!chainConfig.chainbaseKeys.length) return new Map();
+  try {
+    return await getDelegateCalls(chain, fromBlock, toBlock);
+  } catch (err) {
+    logger.warn(`[${chain}] Delegatecall trace fetch failed: ${(err as Error).message || String(err)}`);
+    return new Map();
+  }
+}
+
+async function resolveProxyMapForPipeline(
+  chain: string,
+  delegateMap: Map<string, string>,
+  contractInfos: Map<string, ContractInfo>,
+): Promise<Map<string, ProxyResult>> {
+  const proxyMap = classifyDelegations(delegateMap, contractInfos);
+  const bytecodeEntries = [...contractInfos.entries()].filter(([, info]) => info.bytecode.length > 0);
+
+  for (let index = 0; index < bytecodeEntries.length; index += PROXY_RESOLVE_BATCH_SIZE) {
+    const batch = bytecodeEntries.slice(index, index + PROXY_RESOLVE_BATCH_SIZE);
+    const resolvedBatch = await Promise.all(batch.map(async ([address, info]) => {
+      try {
+        const resolved = await resolveProxyByBytecode(chain, address, info.bytecode);
+        return resolved ? { address, resolved } : null;
+      } catch (err) {
+        logger.warn(`[${chain}] Proxy bytecode resolution failed for ${address}: ${(err as Error).message || String(err)}`);
+        return null;
+      }
+    }));
+
+    for (const item of resolvedBatch) {
+      if (item) proxyMap.set(item.address.toLowerCase(), item.resolved);
+    }
+  }
+
+  return proxyMap;
+}
+
 export async function runPipeline(
   chain: string,
   options: RunPipelineOptions = {},
@@ -313,7 +405,7 @@ export async function runPipeline(
     label: 'Collecting raw transfer and trace data',
     percent: 6,
   });
-  const rawRound = await collectRawRoundSnapshot(chain);
+  const rawRound = await collectRawRoundSnapshot(chain, options.range || {});
   const toBlock = rawRound.blockTo;
   const lastBlock = rawRound.blockFrom;
   const transfers = rawRound.transfers;
@@ -365,7 +457,7 @@ export async function runPipeline(
     current: 0,
     total: uniqueAddrs.length,
   });
-  const contractInfos = await getContractInfos(chain, uniqueAddrs);
+  const contractInfos = await loadContractInfosForPipeline(chain, uniqueAddrs);
 
   const contractAddrs: string[] = [];
   for (const addr of uniqueAddrs) {
@@ -386,8 +478,8 @@ export async function runPipeline(
     label: 'Resolving proxy and EIP-7702 delegations',
     percent: 28,
   });
-  const delegateMap = await getDelegateCalls(chain, lastBlock, toBlock);
-  const proxyMap = classifyDelegations(delegateMap, contractInfos);
+  const delegateMap = await loadDelegateCallsForPipeline(chain, lastBlock, toBlock);
+  const proxyMap = await resolveProxyMapForPipeline(chain, delegateMap, contractInfos);
 
   const eip7702Map = new Map<string, string>();
   for (const [addr, info] of proxyMap) {
@@ -403,7 +495,7 @@ export async function runPipeline(
 
   const implAddrsSet = new Set<string>();
   for (const info of proxyMap.values()) implAddrsSet.add(info.implementation);
-  const implInfos = implAddrsSet.size ? await getContractInfos(chain, [...implAddrsSet]) : new Map();
+  const implInfos = implAddrsSet.size ? await loadContractInfosForPipeline(chain, [...implAddrsSet]) : new Map();
 
   const candidates = new Set([
     ...contractAddrs,
@@ -411,11 +503,8 @@ export async function runPipeline(
   ]);
 
   const getEffectiveBytecode = (addr: string): string => {
-    const proxy = proxyMap.get(addr);
-    if (proxy) return implInfos.get(proxy.implementation)?.bytecode ?? '';
-
-    const delegate = eip7702Map.get(addr);
-    if (delegate) return implInfos.get(delegate)?.bytecode ?? '';
+    const linkInfo = proxyMap.get(addr);
+    if (linkInfo) return implInfos.get(linkInfo.implementation)?.bytecode ?? '';
 
     return contractInfos.get(addr)?.bytecode ?? '';
   };
@@ -478,8 +567,9 @@ export async function runPipeline(
     };
     const selfBytecode = contractInfos.get(addr)?.bytecode ?? '';
     const bytecode = getEffectiveBytecode(addr);
-    const delegate = eip7702Map.get(addr);
-    const proxy = proxyMap.get(addr);
+    const linkInfo = proxyMap.get(addr);
+    const proxy = linkInfo?.type === 'proxy' ? linkInfo : null;
+    const delegate = linkInfo?.type === 'eip7702' ? linkInfo.implementation : null;
     const known = knownContractMap.get(addr);
     const selfSelectors = extractSelectors(selfBytecode) ?? [];
     const effectiveSelectors = extractSelectors(bytecode) ?? [];
@@ -684,7 +774,7 @@ export async function runPipeline(
       agg.eth_in,
       bytecode,
       whitelistPatterns,
-      delegate,
+      delegate ?? undefined,
     );
 
     const result: TokenContractResult = {
@@ -850,7 +940,7 @@ export async function runPipeline(
   });
 
   const tokenContractInfoMap = missingTokenFacts.length
-    ? await getContractInfos(chain, missingTokenFacts)
+    ? await loadContractInfosForPipeline(chain, missingTokenFacts)
     : new Map<string, ContractInfo>();
 
   for (const token of tokens) {

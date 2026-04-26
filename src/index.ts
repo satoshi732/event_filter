@@ -13,7 +13,7 @@
  *   node dist/index.js --sync-push
  *   node dist/index.js --sync-verify
  *
- *   node dist/index.js --add-whitelist-pat     <name> <hex> <selector|opcode|call> <score> [description]
+ *   node dist/index.js --add-whitelist-pat     <name> <hex> <selector|opcode|call> [description]
  *   node dist/index.js --rm-whitelist-pat      <name>
  *   node dist/index.js --queue-seen-contract   <chain> <address> <label>
  *

@@ -27,7 +27,7 @@
       </div>
       <header class="hero">
         <div class="hero-top">
-          <div>
+          <div class="hero-heading">
             <p class="kicker">Event Filter Control</p>
             <h1 class="hero-title">Solana Mev Labs</h1>
           </div>
@@ -38,9 +38,54 @@
                 <option v-for="chain in chains" :key="chain" :value="chain">{{ chain.toUpperCase() }}</option>
               </select>
             </label>
-            <button class="btn primary" type="button" :disabled="running || !selectedChain" @click="runScan">
-              {{ running ? 'Running...' : 'Run Round' }}
-            </button>
+            <div class="run-round-launch">
+              <button class="btn primary" type="button" :disabled="running || !chains.length" @click="openRunRoundModal">
+                {{ running ? 'Running...' : 'Next Round' }}
+              </button>
+              <div v-if="runRoundModal.open" class="run-round-launch-panel">
+                <div class="run-round-panel-head">
+                  <div class="run-round-modal-title">
+                    <strong>Next Round</strong>
+                    <p class="muted">Choose the chain and optional block range for the next pipeline run.</p>
+                  </div>
+                  <button class="icon-action-btn run-round-panel-close" type="button" @click="closeRunRoundModal" aria-label="Close next round panel" title="Close">
+                    <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-svg">
+                      <path d="m4.2 4.2 7.6 7.6-1 1-7.6-7.6z" fill="currentColor"></path>
+                      <path d="m11.8 4.2-7.6 7.6-1-1 7.6-7.6z" fill="currentColor"></path>
+                    </svg>
+                  </button>
+                </div>
+                <section class="run-round-modal-grid">
+                  <label class="stack-label review-modal-field">
+                    <span>Chain</span>
+                    <select v-model="runRoundModal.chain">
+                      <option v-for="chain in chains" :key="`run-round-${chain}`" :value="chain">{{ chain.toUpperCase() }}</option>
+                    </select>
+                  </label>
+                  <label class="stack-label review-modal-field">
+                    <span>Delta Blocks</span>
+                    <input v-model.trim="runRoundModal.deltaBlocks" type="text" inputmode="numeric" placeholder="optional">
+                  </label>
+                  <label class="stack-label review-modal-field">
+                    <span>From Block</span>
+                    <input v-model.trim="runRoundModal.fromBlock" type="text" inputmode="numeric" placeholder="optional">
+                  </label>
+                  <label class="stack-label review-modal-field">
+                    <span>To Block</span>
+                    <input v-model.trim="runRoundModal.toBlock" type="text" inputmode="numeric" placeholder="optional">
+                  </label>
+                </section>
+                <div class="review-modal-footer run-round-panel-footer">
+                  <p v-if="runRoundModal.error" class="inline-error review-modal-error">{{ runRoundModal.error }}</p>
+                  <div class="button-row review-modal-actions">
+                    <button class="btn ghost" type="button" @click="closeRunRoundModal">Cancel</button>
+                    <button class="btn primary" type="button" :disabled="running || !runRoundModal.chain" @click="confirmRunRoundModal">
+                      {{ running ? 'Running...' : 'Run' }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
             <button class="btn ghost" type="button" :disabled="syncingPrices" @click="syncTokenPrices">
               {{ syncingPrices ? 'Syncing Prices...' : 'Sync Prices' }}
             </button>
@@ -74,12 +119,13 @@
 
         <div class="hero-nav-row">
           <div class="hero-nav">
-            <button class="tab" :class="{ active: currentView === 'dashboard' && dashboardTab === 'tokens' }" @click="openDashboardMain">Dashboard</button>
-            <button class="tab" :class="{ active: currentView === 'dashboard' && dashboardTab === 'auto' }" @click="openAutoMode">Auto Mode</button>
+            <button class="tab" :class="{ active: currentView === 'dashboard' && dashboardTab === 'dashboard' }" @click="openDashboardMain">Dashboard</button>
+            <button class="tab" :class="{ active: currentView === 'dashboard' && dashboardTab === 'contracts' }" @click="openContractsMain">Contracts</button>
             <button class="tab" :class="{ active: currentView === 'token' || currentView === 'token-detail' }" @click="navigateToken">Token</button>
+            <button class="tab" :class="{ active: currentView === 'dashboard' && dashboardTab === 'auto' }" @click="openAutoMode">Auto Mode</button>
             <button class="tab" :class="{ active: currentView === 'dashboard' && dashboardTab === 'settings' }" @click="openSettings(isAdmin ? 'keys' : 'account')">Settings</button>
           </div>
-          <div class="hero-status-badges">
+          <div v-if="!runRoundModal.open" class="hero-status-badges">
             <span class="status-badge" :class="syncStatus?.configured ? 'active' : 'inactive'">AUTO SYNC</span>
             <span class="status-badge" :class="autoAnalysisEnabled ? 'active' : 'inactive'">AUTO AUDIT</span>
           </div>
@@ -117,7 +163,114 @@
           </section>
         </template>
 
-        <template v-else-if="dashboardTab === 'tokens'">
+        <template v-else-if="dashboardTab === 'dashboard'">
+        <section class="dashboard-home-top card-full">
+          <section class="card dashboard-home-card dashboard-home-hero-main">
+            <div class="card-head">
+              <h2>Daily Activity</h2>
+              <span class="muted">UTC day</span>
+            </div>
+            <div class="dashboard-activity-legend">
+              <span class="dashboard-legend-pill sync">Sync</span>
+              <span class="dashboard-legend-pill review">Review</span>
+              <span class="dashboard-legend-pill auto">Auto</span>
+            </div>
+            <div v-if="dashboardHome.activity_series.length" class="dashboard-line-chart">
+              <v-chart class="dashboard-echart dashboard-echart-line" :option="dashboardActivityChartOption" autoresize />
+            </div>
+            <p v-else class="muted">No recorded activity yet.</p>
+          </section>
+          <aside class="card dashboard-home-card dashboard-daily-assign">
+            <div class="card-head">
+              <h2>Daily Assign</h2>
+              <span class="muted">Today</span>
+            </div>
+            <div class="dashboard-assign-hero">
+              <strong>{{ dashboardHome.daily_assign.review_count }}</strong>
+              <span>reviews</span>
+            </div>
+            <div class="dashboard-assign-progress">
+              <div class="dashboard-assign-progress-fill" :style="{ width: `${dashboardHome.daily_assign.percent}%` }"></div>
+            </div>
+            <div class="dashboard-assign-meta">
+              <span>{{ dashboardHome.daily_assign.percent }}%</span>
+              <span>{{ dashboardHome.daily_assign.review_count }} / {{ dashboardHome.daily_assign.target }}</span>
+            </div>
+          </aside>
+        </section>
+
+        <section class="dashboard-home-grid card-full">
+          <section class="card dashboard-mini-card">
+            <div class="card-head">
+              <h2>Sync Trend</h2>
+              <span class="muted">All users</span>
+            </div>
+            <div v-if="dashboardGlobalSyncBars.length" class="dashboard-bar-chart">
+              <v-chart class="dashboard-echart dashboard-echart-bar" :option="dashboardGlobalSyncChartOption" autoresize />
+            </div>
+            <p v-else class="muted">No sync registrations yet.</p>
+          </section>
+
+          <section class="card dashboard-mini-card">
+            <div class="card-head">
+              <h2>My Coverage</h2>
+              <span class="muted">Allowed chains</span>
+            </div>
+            <div class="dashboard-coverage-grid">
+              <div v-for="card in dashboardCoverageCards" :key="`coverage-${card.key}`" class="dashboard-coverage-card" :class="`tone-${card.tone}`">
+                <div class="dashboard-coverage-head">
+                  <span>{{ card.label }}</span>
+                  <strong>{{ card.percent }}%</strong>
+                </div>
+                <div class="dashboard-coverage-progress">
+                  <div class="dashboard-coverage-progress-fill" :style="{ width: `${card.percent}%` }"></div>
+                </div>
+                <div class="dashboard-coverage-meta">
+                  <strong>{{ card.analyzed }}</strong>
+                  <span>/ {{ card.total }}</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="card dashboard-mini-card">
+            <div class="card-head">
+              <h2>Auto Engine</h2>
+              <span class="muted">{{ dashboardAutoSummary.enabled ? (dashboardAutoSummary.chain ? dashboardAutoSummary.chain.toUpperCase() : 'ACTIVE') : 'IDLE' }}</span>
+            </div>
+            <div class="dashboard-engine-layout">
+              <div class="dashboard-engine-chart-wrap">
+                <v-chart class="dashboard-echart dashboard-echart-donut" :option="dashboardAutoEngineChartOption" autoresize />
+              </div>
+              <div class="dashboard-engine-legend">
+                <div class="dashboard-engine-legend-row">
+                  <span class="dashboard-engine-dot queued"></span>
+                  <span>Queued</span>
+                  <strong>{{ dashboardAutoSummary.queued }}</strong>
+                </div>
+                <div class="dashboard-engine-legend-row">
+                  <span class="dashboard-engine-dot running"></span>
+                  <span>Running</span>
+                  <strong>{{ dashboardAutoSummary.running }}</strong>
+                </div>
+                <div class="dashboard-engine-legend-row">
+                  <span class="dashboard-engine-dot completed"></span>
+                  <span>Success</span>
+                  <strong>{{ dashboardAutoSummary.completed }}</strong>
+                </div>
+                <div class="dashboard-engine-legend-row">
+                  <span class="dashboard-engine-dot failed"></span>
+                  <span>Failed</span>
+                  <strong>{{ dashboardAutoSummary.failed }}</strong>
+                </div>
+              </div>
+            </div>
+            <p class="muted dashboard-mini-note">{{ dashboardAutoSummary.last_action }}</p>
+          </section>
+        </section>
+        </template>
+
+        <template v-else-if="dashboardTab === 'contracts'">
         <section class="card card-full">
           <div class="meta-grid">
             <div class="meta-item">
@@ -263,11 +416,20 @@
                     </span>
                   </td>
                   <td>
-                    <span v-if="autoAuditStatusLabel(row.auto_audit_status) === 'yes'" class="audit-severity-badge">
-                      <span v-for="entry in auditSeverityPills(row)" :key="`${row.contract}:${entry.key}`" class="audit-severity-fragment" :class="entry.className">
-                        <span class="audit-severity-label">{{ entry.shortLabel }}</span><span class="audit-severity-value">{{ entry.count }}</span>
+                    <button
+                      v-if="autoAuditStatusLabel(row.auto_audit_status) === 'yes'"
+                      class="audit-severity-button"
+                      type="button"
+                      @click="openContractAuditResultDrawer(row)"
+                      :aria-label="`Open AI audit report for ${row.contract}`"
+                      title="Open AI audit report"
+                    >
+                      <span class="audit-severity-badge">
+                        <span v-for="entry in auditSeverityPills(row)" :key="`${row.contract}:${entry.key}`" class="audit-severity-fragment" :class="entry.className">
+                          <span class="audit-severity-label">{{ entry.shortLabel }}</span><span class="audit-severity-value">{{ entry.count }}</span>
+                        </span>
                       </span>
-                    </span>
+                    </button>
                     <span v-else class="muted">--</span>
                   </td>
                   <td>
@@ -354,156 +516,55 @@
             <span class="muted">Run and tune unattended analysis from one place</span>
           </div>
 
-          <div class="auto-mode-console">
-            <section class="auto-board-top">
-              <div class="auto-command-center">
-                <div class="auto-board-kicker-row">
-                  <p class="kicker">Unattended Audit Loop</p>
-                  <span class="chip small" :class="autoAnalysisChipTone">{{ autoAnalysisEnabled ? 'AUTO ON' : 'AUTO OFF' }}</span>
+          <div class="auto-mode-console auto-layout">
+            <aside class="auto-side-rail">
+              <section class="settings-surface auto-rail-card auto-launch-card">
+                <div class="settings-surface-head settings-surface-head-actions">
+                  <strong>Launch</strong>
+                  <span class="chip small plain">{{ autoAnalysisEnabled ? 'Live' : 'Ready' }}</span>
                 </div>
-                <h3>Night Shift Operations</h3>
-                <p class="muted auto-mode-status-text">{{ autoAnalysisDetailText }}</p>
-                <div class="stack-label">
-                  <span>Auto Chains</span>
-                  <div class="chain-selector-row">
-                    <select v-model="settings.runtime_settings.auto_analysis.chain_candidate">
-                      <option value="">Select chain</option>
-                      <option
-                        v-for="chain in autoAnalysisAvailableChains.filter((chain) => !autoAnalysisSelectedChains.includes(chain))"
-                        :key="`auto-chain-option-${chain}`"
-                        :value="chain"
-                      >
-                        {{ chain }}
-                      </option>
-                    </select>
-                    <button
-                      class="btn ghost btn-small"
-                      type="button"
-                      :disabled="!settings.runtime_settings.auto_analysis.chain_candidate"
-                      @click="addAutoAnalysisChain"
-                    >
-                      Add
-                    </button>
-                  </div>
-                  <div class="auto-chain-ratio-list">
-                    <div
-                      v-for="chain in autoAnalysisSelectedChains"
-                      :key="`auto-chain-ratio-${chain}`"
-                      class="auto-chain-ratio-item"
-                    >
-                      <span class="auto-chain-ratio-label mono">{{ chain }}</span>
-                      <label class="auto-chain-ratio-field">
-                        <span>Ratio</span>
-                        <input v-model.number="settings.runtime_settings.auto_analysis.chain_ratios[chain]" type="number" min="1" step="1">
-                      </label>
-                      <button class="btn subtle btn-small" type="button" @click="removeAutoAnalysisChain(chain)">Remove</button>
-                    </div>
-                    <span v-if="!autoAnalysisSelectedChains.length" class="chip small plain">No auto chains selected</span>
-                  </div>
-                  <span class="muted">One engine splits queue slots across these chains using the relative ratios above.</span>
-                </div>
-                <div class="auto-command-strip">
-                  <div class="auto-command-item">
-                    <span>Target Chains</span>
-                    <strong>{{ autoAnalysisChainSummaryText }}</strong>
-                  </div>
-                  <div class="auto-command-item">
-                    <span>Focus Chain</span>
-                    <strong>{{ autoAnalysisFocusChainText }}</strong>
-                  </div>
-                  <div class="auto-command-item">
-                    <span>Queued</span>
-                    <strong>{{ autoAnalysisStatus.queued || 0 }}</strong>
-                  </div>
-                </div>
-                <div class="button-row">
-                  <button
-                    class="btn"
-                    :class="autoAnalysisEnabled ? 'secondary' : 'primary'"
-                    type="button"
-                    :disabled="!autoAnalysisSelectedChains.length && !autoAnalysisEnabled"
-                    @click="toggleAutoAnalysis"
-                  >
-                    {{ autoAnalysisButtonLabel }}
-                  </button>
-                </div>
-              </div>
+                <button
+                  class="btn"
+                  :class="autoAnalysisEnabled ? 'secondary' : 'primary'"
+                  type="button"
+                  :disabled="!autoAnalysisSelectedChains.length && !autoAnalysisEnabled"
+                  @click="toggleAutoAnalysis"
+                >
+                  {{ autoAnalysisButtonLabel }}
+                </button>
+              </section>
 
-              <div class="auto-telemetry-panel">
-                <div class="auto-telemetry-grid">
+              <section class="settings-surface auto-rail-card">
+                <div class="settings-surface-head settings-surface-head-actions">
+                  <strong>Engine Status</strong>
+                  <span class="chip small" :class="autoAnalysisChipTone">{{ String(autoAnalysisStatus.phase || 'idle').toUpperCase() }}</span>
+                </div>
+                <div class="auto-status-grid">
                   <div class="auto-telemetry-card">
-                    <span>Pool Capacity</span>
+                    <span>Pool Cap</span>
                     <strong>{{ autoAnalysisStatus.capacity || settings.runtime_settings.auto_analysis.queue_capacity || 10 }}</strong>
+                  </div>
+                  <div class="auto-telemetry-card">
+                    <span>Running</span>
+                    <strong>{{ autoAnalysisStatus.active || 0 }}</strong>
                   </div>
                   <div class="auto-telemetry-card">
                     <span>Phase</span>
                     <strong>{{ autoAnalysisStatus.phase || 'idle' }}</strong>
                   </div>
                   <div class="auto-telemetry-card">
-                    <span>Running Now</span>
-                    <strong>{{ autoAnalysisStatus.active || 0 }}</strong>
-                  </div>
-                  <div class="auto-telemetry-card">
-                    <span>Token Share</span>
-                    <strong>{{ settings.runtime_settings.auto_analysis.token_share_percent || 0 }}%</strong>
-                  </div>
-                  <div class="auto-telemetry-card">
-                    <span>Contract Share</span>
-                    <strong>{{ settings.runtime_settings.auto_analysis.contract_share_percent || 0 }}%</strong>
-                  </div>
-                  <div class="auto-telemetry-card">
-                    <span>Audit Provider</span>
-                    <strong>{{ settings.runtime_settings.auto_analysis.provider || '--' }}</strong>
-                  </div>
-                  <div class="auto-telemetry-card">
-                    <span>Audit Model</span>
-                    <strong>{{ settings.runtime_settings.auto_analysis.model || '--' }}</strong>
+                    <span>Queued</span>
+                    <strong>{{ autoAnalysisStatus.queued || 0 }}</strong>
                   </div>
                 </div>
-              </div>
-            </section>
+              </section>
 
-            <section class="auto-strategy-board">
-              <div class="auto-strategy-card">
-                <div class="card-head compact">
-                  <h3>Queue Strategy</h3>
-                  <span class="muted">How the pool is split and filled</span>
+              <section class="settings-surface auto-rail-card">
+                <div class="settings-surface-head settings-surface-head-actions">
+                  <strong>Audit Model</strong>
+                  <span class="chip small plain">{{ settings.runtime_settings.auto_analysis.model || '--' }}</span>
                 </div>
-                <div class="auto-mix-strip">
-                  <div class="auto-mix-bar">
-                    <div class="auto-mix-token" :style="{ width: `${Math.max(0, Math.min(100, settings.runtime_settings.auto_analysis.token_share_percent || 0))}%` }"></div>
-                    <div class="auto-mix-contract" :style="{ width: `${Math.max(0, Math.min(100, settings.runtime_settings.auto_analysis.contract_share_percent || 0))}%` }"></div>
-                  </div>
-                  <div class="auto-mix-legend">
-                    <span class="chip small token-tone">Token {{ settings.runtime_settings.auto_analysis.token_share_percent || 0 }}%</span>
-                    <span class="chip small contract-tone">Contract {{ settings.runtime_settings.auto_analysis.contract_share_percent || 0 }}%</span>
-                  </div>
-                </div>
-                <div class="auto-strategy-grid">
-                  <label class="stack-label">
-                    <span>Queue Capacity</span>
-                    <input v-model.number="settings.runtime_settings.auto_analysis.queue_capacity" type="number" min="1" max="50">
-                  </label>
-                  <label class="stack-label">
-                    <span>Round Audit Limit</span>
-                    <input v-model.number="settings.runtime_settings.auto_analysis.round_audit_limit" type="number" min="1" max="200">
-                  </label>
-                  <label class="stack-label">
-                    <span>Round Rest (sec)</span>
-                    <input v-model.number="settings.runtime_settings.auto_analysis.round_rest_seconds" type="number" min="1" max="3600">
-                  </label>
-                  <label class="stack-label">
-                    <span>Stop At (local)</span>
-                    <input v-model="settings.runtime_settings.auto_analysis.stop_at_datetime" type="datetime-local">
-                  </label>
-                  <label class="stack-label">
-                    <span>Token Share (%)</span>
-                    <input v-model.number="settings.runtime_settings.auto_analysis.token_share_percent" type="number" min="0" max="100">
-                  </label>
-                  <label class="stack-label">
-                    <span>Contract Share (%)</span>
-                    <input v-model.number="settings.runtime_settings.auto_analysis.contract_share_percent" type="number" min="0" max="100">
-                  </label>
+                <div class="auto-rail-form">
                   <label class="stack-label">
                     <span>Auto Audit Provider</span>
                     <select v-model="settings.runtime_settings.auto_analysis.provider">
@@ -517,126 +578,262 @@
                     </select>
                   </label>
                 </div>
-              </div>
+              </section>
 
-              <div class="auto-threshold-card">
-                <div class="card-head compact">
-                  <h3>Backend Timing</h3>
-                  <span class="muted">Tune how often the audit worker checks Dedaub and analysis status</span>
+              <section class="settings-surface auto-rail-card">
+                <div class="settings-surface-head settings-surface-head-actions">
+                  <strong>Thresholds</strong>
+                  <span class="chip small plain">Queue Gates</span>
                 </div>
-                <div class="auto-threshold-grid">
-                  <div class="auto-threshold-box">
-                    <span>Audit Poll Interval</span>
-                    <label class="stack-label compact-stack">
-                      <input v-model.number="settings.runtime_settings.ai_audit_backend.poll_interval_ms" type="number" min="1000" step="1000">
-                    </label>
-                    <p class="muted inline-help">Used for both Dedaub decompile status and analysis status polling.</p>
-                  </div>
-                  <div class="auto-threshold-box">
-                    <span>Dedaub Wait</span>
-                    <label class="stack-label compact-stack">
-                      <input v-model.number="settings.runtime_settings.ai_audit_backend.dedaub_wait_seconds" type="number" min="1" step="1">
-                    </label>
-                    <p class="muted inline-help">Initial wait passed when the Dedaub decompile request is created.</p>
-                  </div>
-                </div>
-              </div>
-
-              <div class="auto-threshold-card">
-                <div class="card-head compact">
-                  <h3>Thresholds</h3>
-                  <span class="muted">The minimum bar before anything enters the queue</span>
-                </div>
-                <div class="auto-threshold-grid">
-                  <div class="auto-threshold-box">
+                <div class="auto-rail-form">
+                  <label class="stack-label">
                     <span>Contract Min TVL</span>
-                    <label class="stack-label compact-stack">
-                      <input v-model.number="settings.runtime_settings.auto_analysis.contract_min_tvl_usd" type="number" min="0" step="1000">
-                    </label>
-                  </div>
-                  <div class="auto-threshold-box">
+                    <input v-model.number="settings.runtime_settings.auto_analysis.contract_min_tvl_usd" type="number" min="0" step="1000">
+                  </label>
+                  <label class="stack-label">
                     <span>Token Min Price</span>
-                    <label class="stack-label compact-stack">
-                      <input v-model.number="settings.runtime_settings.auto_analysis.token_min_price_usd" type="number" min="0" step="0.0001">
+                    <input v-model.number="settings.runtime_settings.auto_analysis.token_min_price_usd" type="number" min="0" step="0.0001">
+                  </label>
+                </div>
+              </section>
+            </aside>
+
+            <section class="auto-main-column">
+              <div class="auto-main-grid auto-main-grid-top">
+                <section class="settings-surface auto-strategy-card">
+                  <div class="auto-board-kicker-row auto-command-kicker-row">
+                    <p class="kicker">Unattended Audit Loop</p>
+                    <div class="auto-inline-status">
+                      <span class="muted">Night Shift Operations</span>
+                      <span class="chip small" :class="autoAnalysisChipTone">{{ autoAnalysisEnabled ? 'AUTO ON' : 'AUTO OFF' }}</span>
+                    </div>
+                  </div>
+                  <div class="settings-surface-head settings-surface-head-actions">
+                    <strong>Command Center</strong>
+                    <span class="chip small plain">{{ autoAnalysisFocusChainText }}</span>
+                  </div>
+                  <h3>Night Shift Operations</h3>
+                  <div class="stack-label">
+                    <div class="auto-command-topline">
+                      <label class="stack-label auto-command-capacity-field">
+                        <span>Queue Capacity</span>
+                        <input v-model.number="settings.runtime_settings.auto_analysis.queue_capacity" type="number" min="1" max="50">
+                      </label>
+                      <label class="stack-label auto-command-select-field">
+                        <select v-model="settings.runtime_settings.auto_analysis.chain_candidate">
+                          <option value="">Select chain</option>
+                          <option
+                            v-for="chain in autoAnalysisAvailableChains.filter((chain) => !autoAnalysisSelectedChains.includes(chain))"
+                            :key="`auto-chain-option-${chain}`"
+                            :value="chain"
+                          >
+                            {{ chain }}
+                          </option>
+                        </select>
+                      </label>
+                      <button
+                        class="btn ghost btn-small auto-command-add-btn"
+                        type="button"
+                        :disabled="!settings.runtime_settings.auto_analysis.chain_candidate"
+                        @click="addAutoAnalysisChain"
+                      >
+                        + Add
+                      </button>
+                    </div>
+                    <div v-if="autoAnalysisChainSegments.length" class="auto-ratio-board">
+                      <div class="auto-ratio-label-row">
+                        <div
+                          v-for="segment in autoAnalysisChainSegments"
+                          :key="`auto-chain-ratio-label-${segment.chain}`"
+                          class="auto-ratio-label"
+                          :style="{ width: `${segment.percent}%` }"
+                        >
+                          <span class="auto-ratio-label-chain mono">{{ segment.chain.toUpperCase() }}</span>
+                        </div>
+                      </div>
+                      <div class="auto-ratio-bar" data-auto-ratio-bar>
+                        <div
+                          v-for="segment in autoAnalysisChainSegments"
+                          :key="`auto-chain-ratio-segment-${segment.chain}`"
+                          class="auto-ratio-segment"
+                          :style="{
+                            width: `${segment.percent}%`,
+                            background: segment.gradient,
+                          }"
+                        >
+                          <strong class="auto-ratio-segment-percent">{{ segment.percentLabel }}</strong>
+                        </div>
+                        <button
+                          v-for="handle in autoAnalysisChainHandles"
+                          :key="`auto-chain-ratio-handle-${handle.index}`"
+                          class="auto-ratio-handle"
+                          type="button"
+                          :style="{ left: `calc(${handle.positionPercent}% - 10px)` }"
+                          :aria-label="`Adjust boundary between ${handle.leftChain.toUpperCase()} and ${handle.rightChain.toUpperCase()}`"
+                          @pointerdown="beginAutoAnalysisRatioDrag(handle.index, $event)"
+                        >
+                          <span></span>
+                        </button>
+                      </div>
+                      <div class="auto-ratio-meta-list">
+                        <div
+                          v-for="segment in autoAnalysisChainSegments"
+                          :key="`auto-chain-ratio-meta-${segment.chain}`"
+                          class="auto-ratio-meta-item auto-chain-config-card"
+                        >
+                          <div class="auto-chain-config-head">
+                            <div class="auto-ratio-meta-main">
+                              <span class="auto-ratio-meta-swatch" :style="{ background: segment.gradient }"></span>
+                              <strong class="mono">{{ segment.chain.toUpperCase() }}</strong>
+                              <span>{{ segment.percentLabel }} queue share</span>
+                            </div>
+                            <button class="btn subtle btn-small" type="button" @click="removeAutoAnalysisChain(segment.chain)">Remove</button>
+                          </div>
+                          <div class="auto-chain-config-grid">
+                            <label class="stack-label">
+                              <span>From</span>
+                              <input v-model.trim="settings.runtime_settings.auto_analysis.chain_configs[segment.chain].from_block" type="text" inputmode="numeric" placeholder="optional">
+                            </label>
+                            <label class="stack-label">
+                              <span>To</span>
+                              <input v-model.trim="settings.runtime_settings.auto_analysis.chain_configs[segment.chain].to_block" type="text" inputmode="numeric" placeholder="optional">
+                            </label>
+                            <label class="stack-label">
+                              <span>Delta</span>
+                              <input v-model.trim="settings.runtime_settings.auto_analysis.chain_configs[segment.chain].delta_blocks" type="text" inputmode="numeric" placeholder="chain default">
+                            </label>
+                          </div>
+                          <div class="auto-chain-mix-card">
+                            <div class="auto-chain-mix-head">
+                              <span class="auto-chain-mix-title">Audit Mix</span>
+                              <div class="auto-chain-mix-legend">
+                                <span class="chip small token-tone">Token {{ settings.runtime_settings.auto_analysis.chain_configs[segment.chain].token_share_percent || 0 }}%</span>
+                                <span class="chip small contract-tone">Contract {{ settings.runtime_settings.auto_analysis.chain_configs[segment.chain].contract_share_percent || 0 }}%</span>
+                              </div>
+                            </div>
+                            <div class="auto-chain-mix-bar" data-auto-mix-bar>
+                              <div
+                                class="auto-chain-mix-segment auto-chain-mix-token"
+                                :style="{ width: `${Math.max(0, Math.min(100, settings.runtime_settings.auto_analysis.chain_configs[segment.chain].token_share_percent || 0))}%` }"
+                              >
+                                <strong>{{ settings.runtime_settings.auto_analysis.chain_configs[segment.chain].token_share_percent || 0 }}%</strong>
+                              </div>
+                              <div
+                                class="auto-chain-mix-segment auto-chain-mix-contract"
+                                :style="{ width: `${Math.max(0, Math.min(100, settings.runtime_settings.auto_analysis.chain_configs[segment.chain].contract_share_percent || 0))}%` }"
+                              >
+                                <strong>{{ settings.runtime_settings.auto_analysis.chain_configs[segment.chain].contract_share_percent || 0 }}%</strong>
+                              </div>
+                              <button
+                                class="auto-chain-mix-handle"
+                                type="button"
+                                :style="{ left: `calc(${Math.max(0, Math.min(100, settings.runtime_settings.auto_analysis.chain_configs[segment.chain].token_share_percent || 0))}% - 10px)` }"
+                                :aria-label="`Adjust token and contract mix for ${segment.chain.toUpperCase()}`"
+                                @pointerdown="beginAutoAnalysisMixDrag(segment.chain, $event)"
+                              >
+                                <span></span>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div v-else class="auto-chain-ratio-empty">
+                      <span class="chip small plain">No auto chains selected</span>
+                    </div>
+                  </div>
+                  <div class="auto-command-strip">
+                    <div class="auto-command-item">
+                      <span>Target Chains</span>
+                      <strong>{{ autoAnalysisChainSummaryText }}</strong>
+                    </div>
+                    <div class="auto-command-item">
+                      <span>Focus Chain</span>
+                      <strong>{{ autoAnalysisFocusChainText }}</strong>
+                    </div>
+                    <div class="auto-command-item">
+                      <span>Queued</span>
+                      <strong>{{ autoAnalysisStatus.queued || 0 }}</strong>
+                    </div>
+                  </div>
+                </section>
+
+              </div>
+
+              <div class="auto-main-grid auto-main-grid-bottom">
+                <section class="settings-surface auto-rules-column">
+                  <div class="settings-surface-head settings-surface-head-actions">
+                    <strong>Contract Rules</strong>
+                    <span class="chip small plain">High Signal</span>
+                  </div>
+                  <div class="auto-rule-list">
+                    <label class="auto-rule-item">
+                      <input v-model="settings.runtime_settings.auto_analysis.require_contract_selectors" type="checkbox">
+                      <div class="auto-rule-copy">
+                        <strong>Require contract selectors</strong>
+                        <p>Only queue contracts that already have selector fingerprints.</p>
+                      </div>
+                    </label>
+                    <label class="auto-rule-item">
+                      <input v-model="settings.runtime_settings.auto_analysis.skip_seen_contracts" type="checkbox">
+                      <div class="auto-rule-copy">
+                        <strong>Skip seen contract patterns</strong>
+                        <p>Ignore contracts already mapped to known seen patterns.</p>
+                      </div>
+                    </label>
+                    <label class="auto-rule-item">
+                      <input v-model="settings.runtime_settings.auto_analysis.one_per_contract_pattern" type="checkbox">
+                      <div class="auto-rule-copy">
+                        <strong>One contract per pattern group</strong>
+                        <p>Pick a single representative when multiple contracts share a pattern.</p>
+                      </div>
+                    </label>
+                    <label class="auto-rule-item">
+                      <input v-model="settings.runtime_settings.auto_analysis.retry_failed_audits" type="checkbox">
+                      <div class="auto-rule-copy">
+                        <strong>Retry failed auto audits</strong>
+                        <p>Let auto mode re-queue candidates whose last auto audit ended in a failed state.</p>
+                      </div>
+                    </label>
+                    <label class="auto-rule-item">
+                      <input v-model="settings.runtime_settings.auto_analysis.exclude_audited_contracts" type="checkbox">
+                      <div class="auto-rule-copy">
+                        <strong>Skip already audited contracts</strong>
+                        <p>Leave previously auto or manually audited contracts out of the queue.</p>
+                      </div>
+                    </label>
+                    <label class="auto-rule-item">
+                      <input v-model="settings.runtime_settings.auto_analysis.continue_on_empty_round" type="checkbox">
+                      <div class="auto-rule-copy">
+                        <strong>Continue automatically</strong>
+                        <p>Start the next scan after current eligible candidates are exhausted.</p>
+                      </div>
                     </label>
                   </div>
-                </div>
-              </div>
-            </section>
+                </section>
 
-            <section class="auto-rules-board">
-              <div class="auto-rules-column">
-                <div class="card-head compact">
-                  <h3>Contract Rules</h3>
-                  <span class="muted">High signal contract selection</span>
-                </div>
-                <div class="auto-rule-list">
-                  <label class="auto-rule-item">
-                    <input v-model="settings.runtime_settings.auto_analysis.require_contract_selectors" type="checkbox">
-                    <div class="auto-rule-copy">
-                      <strong>Require contract selectors</strong>
-                      <p>Only queue contracts that already have selector fingerprints.</p>
-                    </div>
-                  </label>
-                  <label class="auto-rule-item">
-                    <input v-model="settings.runtime_settings.auto_analysis.skip_seen_contracts" type="checkbox">
-                    <div class="auto-rule-copy">
-                      <strong>Skip seen contract patterns</strong>
-                      <p>Ignore contracts already mapped to known seen patterns.</p>
-                    </div>
-                  </label>
-                  <label class="auto-rule-item">
-                    <input v-model="settings.runtime_settings.auto_analysis.one_per_contract_pattern" type="checkbox">
-                    <div class="auto-rule-copy">
-                      <strong>One contract per pattern group</strong>
-                      <p>Pick a single representative when multiple contracts share a pattern.</p>
-                    </div>
-                  </label>
-                  <label class="auto-rule-item">
-                    <input v-model="settings.runtime_settings.auto_analysis.retry_failed_audits" type="checkbox">
-                    <div class="auto-rule-copy">
-                      <strong>Retry failed auto audits</strong>
-                      <p>Let auto mode re-queue candidates whose last auto audit ended in a failed state.</p>
-                    </div>
-                  </label>
-                  <label class="auto-rule-item">
-                    <input v-model="settings.runtime_settings.auto_analysis.exclude_audited_contracts" type="checkbox">
-                    <div class="auto-rule-copy">
-                      <strong>Skip already audited contracts</strong>
-                      <p>Leave previously auto or manually audited contracts out of the queue.</p>
-                    </div>
-                  </label>
-                  <label class="auto-rule-item">
-                    <input v-model="settings.runtime_settings.auto_analysis.continue_on_empty_round" type="checkbox">
-                    <div class="auto-rule-copy">
-                      <strong>Continue to next block range automatically</strong>
-                      <p>Only when enabled will auto mode start the next scan round after the current eligible candidates are exhausted.</p>
-                    </div>
-                  </label>
-                </div>
-              </div>
-
-              <div class="auto-rules-column">
-                <div class="card-head compact">
-                  <h3>Token Rules</h3>
-                  <span class="muted">Filter tokens before queueing</span>
-                </div>
-                <div class="auto-rule-list">
-                  <label class="auto-rule-item">
-                    <input v-model="settings.runtime_settings.auto_analysis.require_token_sync" type="checkbox">
-                    <div class="auto-rule-copy">
-                      <strong>Require token `sync()`</strong>
-                      <p>Only queue tokens where `sync()` support has been positively detected.</p>
-                    </div>
-                  </label>
-                  <label class="auto-rule-item">
-                    <input v-model="settings.runtime_settings.auto_analysis.exclude_audited_tokens" type="checkbox">
-                    <div class="auto-rule-copy">
-                      <strong>Skip already audited tokens</strong>
-                      <p>Keep the queue focused on fresh token candidates.</p>
-                    </div>
-                  </label>
-                </div>
+                <section class="settings-surface auto-rules-column">
+                  <div class="settings-surface-head settings-surface-head-actions">
+                    <strong>Token Rules</strong>
+                    <span class="chip small plain">Pre-Filter</span>
+                  </div>
+                  <div class="auto-rule-list">
+                    <label class="auto-rule-item">
+                      <input v-model="settings.runtime_settings.auto_analysis.require_token_sync" type="checkbox">
+                      <div class="auto-rule-copy">
+                        <strong>Require token `sync()`</strong>
+                        <p>Only queue tokens where `sync()` support has been positively detected.</p>
+                      </div>
+                    </label>
+                    <label class="auto-rule-item">
+                      <input v-model="settings.runtime_settings.auto_analysis.exclude_audited_tokens" type="checkbox">
+                      <div class="auto-rule-copy">
+                        <strong>Skip audited tokens</strong>
+                        <p>Keep the queue focused on fresh token candidates.</p>
+                      </div>
+                    </label>
+                  </div>
+                </section>
               </div>
             </section>
           </div>
@@ -645,25 +842,189 @@
         <section class="card card-full" v-else-if="!pageLoading">
           <div class="card-head">
             <h2>Runtime Settings</h2>
-            <span class="muted">Saved in DB and hot-applied</span>
           </div>
           <div class="settings-shell">
             <template v-if="!isAdmin">
               <aside class="settings-sidebar">
-                <button class="settings-nav-btn active" type="button" @click="openSettings('account')">
-                  <strong>Account</strong>
-                  <span>{{ settings.runtime_settings.account.role || 'user' }} / personal API</span>
-                </button>
-                <button class="btn primary settings-save-btn" type="button" @click="saveAccountSettings">Save Account</button>
+                <div class="settings-sidebar-group">
+                  <button class="settings-nav-btn" :class="{ active: settingsSection === 'account' }" type="button" @click="openSettings('account')">
+                    <strong>Account</strong>
+                  </button>
+                  <button class="settings-nav-btn" :class="{ active: settingsSection === 'whitelist' }" type="button" @click="openSettings('whitelist')">
+                    <strong>Whitelist</strong>
+                  </button>
+                </div>
               </aside>
 
               <section class="settings-content">
-                <div class="settings-panel">
-                  <div class="card-head compact">
+                <div v-if="settingsSection === 'account'" class="settings-panel">
+                  <div class="settings-panel-headline">
                     <h3>My Account</h3>
-                    <span class="muted">Choose your own chains here along with your username, password, and AI audit API key.</span>
+                    <button class="btn primary btn-small" type="button" @click="saveAccountSettings">Save</button>
                   </div>
-                  <div class="settings-inline-grid">
+                  <div class="settings-dual-grid">
+                    <section class="settings-surface">
+                      <div class="settings-surface-head">
+                        <strong>Chain Scope</strong>
+                      </div>
+                      <div class="stack-label">
+                        <span>My Chains</span>
+                        <div class="chain-selector-row">
+                          <select v-model="settings.runtime_settings.account.allowed_chain_candidate">
+                            <option value="">Select chain</option>
+                            <option
+                              v-for="chain in (settings.runtime_settings.account.available_chains || []).filter((chain) => !(settings.runtime_settings.account.allowed_chains || []).includes(chain))"
+                              :key="`account-chain-option-${chain}`"
+                              :value="chain"
+                            >
+                              {{ chain }}
+                            </option>
+                          </select>
+                          <button
+                            class="btn ghost btn-small"
+                            type="button"
+                            :disabled="!settings.runtime_settings.account.allowed_chain_candidate"
+                            @click="addAccountAllowedChain"
+                          >
+                            Add
+                          </button>
+                        </div>
+                        <div class="chain-badge-list">
+                          <button
+                            v-for="chain in settings.runtime_settings.account.allowed_chains || []"
+                            :key="`account-chain-${chain}`"
+                            class="chain-badge"
+                            type="button"
+                            @click="removeAccountAllowedChain(chain)"
+                          >
+                            <span>{{ chain }}</span>
+                            <span class="chain-badge-remove" aria-hidden="true">×</span>
+                          </button>
+                          <span v-if="!(settings.runtime_settings.account.allowed_chains || []).length" class="chip small plain">all supported chains</span>
+                        </div>
+                      </div>
+                    </section>
+                    <section class="settings-surface">
+                      <div class="settings-surface-head">
+                        <strong>Credentials</strong>
+                      </div>
+                      <div class="settings-inline-grid">
+                        <label class="stack-label">
+                          <span>Username</span>
+                          <input v-model="settings.runtime_settings.account.username" type="text" autocomplete="username">
+                        </label>
+                        <label class="stack-label">
+                          <span>AI Backend API Key</span>
+                          <input v-model="settings.runtime_settings.account.ai_api_key" type="password" placeholder="tkc_...">
+                        </label>
+                        <label class="stack-label">
+                          <span>Daily Review Target</span>
+                          <input v-model.number="settings.runtime_settings.account.daily_review_target" type="number" min="1" step="1" placeholder="200">
+                        </label>
+                        <label class="stack-label">
+                          <span>Current Password</span>
+                          <input v-model="settings.runtime_settings.account.current_password" type="password" autocomplete="current-password" placeholder="required for username/password changes">
+                        </label>
+                        <label class="stack-label">
+                          <span>New Password</span>
+                          <input v-model="settings.runtime_settings.account.new_password" type="password" autocomplete="new-password" placeholder="leave blank to keep current">
+                        </label>
+                        <label class="stack-label settings-span-2">
+                          <span>Confirm New Password</span>
+                          <input v-model="settings.runtime_settings.account.confirm_password" type="password" autocomplete="new-password">
+                        </label>
+                      </div>
+                    </section>
+                  </div>
+                </div>
+
+                <div v-else class="settings-panel">
+                  <div class="settings-panel-headline">
+                    <h3>Whitelist Patterns</h3>
+                    <button class="btn primary btn-small" type="button" @click="saveSettings('whitelist')">Save</button>
+                  </div>
+                  <section class="settings-surface">
+                    <div class="settings-surface-head settings-surface-head-actions">
+                      <strong>Patterns</strong>
+                      <button class="btn ghost btn-small" type="button" @click="addWhitelistPatternRow">Add Pattern</button>
+                    </div>
+                    <div class="table-wrap compact settings-pattern-table">
+                      <table>
+                      <thead>
+                        <tr>
+                          <th>Name</th>
+                          <th>Hex Pattern</th>
+                          <th>Type</th>
+                          <th>Description</th>
+                          <th>Owner</th>
+                          <th>Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-if="!settings.whitelist_patterns.length">
+                          <td colspan="6" class="muted">No whitelist patterns</td>
+                        </tr>
+                        <tr v-for="(pattern, index) in settings.whitelist_patterns" :key="`user-whitelist-${pattern.id || index}`">
+                          <td><input v-model="pattern.name" type="text" placeholder="pattern name"></td>
+                          <td><input v-model="pattern.hex_pattern" type="text" class="mono" placeholder="ac9650d8"></td>
+                          <td>
+                            <select v-model="pattern.pattern_type">
+                              <option value="selector">selector</option>
+                              <option value="call">call</option>
+                            </select>
+                          </td>
+                          <td><input v-model="pattern.description" type="text" placeholder="description"></td>
+                          <td><span class="mono">{{ pattern.created_by_username || '--' }}</span></td>
+                          <td><button class="btn ghost btn-small" type="button" @click="removeWhitelistPatternRow(index)">Delete</button></td>
+                        </tr>
+                      </tbody>
+                      </table>
+                    </div>
+                  </section>
+                </div>
+              </section>
+            </template>
+
+            <template v-else>
+            <aside class="settings-sidebar">
+              <div class="settings-sidebar-group">
+                <button class="settings-nav-btn" :class="{ active: settingsSection === 'account' }" type="button" @click="openSettings('account')">
+                  <strong>Account</strong>
+                </button>
+              </div>
+              <div class="settings-sidebar-group">
+                <button class="settings-nav-btn" :class="{ active: settingsSection === 'keys' }" type="button" @click="openSettings('keys')">
+                  <strong>Keys</strong>
+                </button>
+                <button class="settings-nav-btn" :class="{ active: settingsSection === 'access' }" type="button" @click="openSettings('access')">
+                  <strong>Access</strong>
+                </button>
+                <button class="settings-nav-btn" :class="{ active: settingsSection === 'pattern-sync' }" type="button" @click="openSettings('pattern-sync')">
+                  <strong>Pattern Sync</strong>
+                </button>
+                <button class="settings-nav-btn" :class="{ active: settingsSection === 'chains' }" type="button" @click="openSettings('chains')">
+                  <strong>Chains</strong>
+                </button>
+                <button class="settings-nav-btn" :class="{ active: settingsSection === 'whitelist' }" type="button" @click="openSettings('whitelist')">
+                  <strong>Whitelist</strong>
+                </button>
+                <button class="settings-nav-btn" :class="{ active: settingsSection === 'ai' }" type="button" @click="openSettings('ai')">
+                  <strong>AI Audit</strong>
+                </button>
+              </div>
+            </aside>
+
+            <section class="settings-content">
+              <div v-if="settingsSection === 'account'" class="settings-panel">
+                <div class="settings-panel-headline">
+                  <h3>My Account</h3>
+                  <button class="btn primary btn-small" type="button" @click="saveAccountSettings">Save</button>
+                </div>
+                <div class="settings-dual-grid">
+                  <section class="settings-surface">
+                    <div class="settings-surface-head">
+                      <strong>Chain Scope</strong>
+                    </div>
                     <div class="stack-label">
                       <span>My Chains</span>
                       <div class="chain-selector-row">
@@ -671,7 +1032,7 @@
                           <option value="">Select chain</option>
                           <option
                             v-for="chain in (settings.runtime_settings.account.available_chains || []).filter((chain) => !(settings.runtime_settings.account.allowed_chains || []).includes(chain))"
-                            :key="`account-chain-option-${chain}`"
+                            :key="`admin-account-chain-option-${chain}`"
                             :value="chain"
                           >
                             {{ chain }}
@@ -689,7 +1050,7 @@
                       <div class="chain-badge-list">
                         <button
                           v-for="chain in settings.runtime_settings.account.allowed_chains || []"
-                          :key="`account-chain-${chain}`"
+                          :key="`admin-account-chain-${chain}`"
                           class="chain-badge"
                           type="button"
                           @click="removeAccountAllowedChain(chain)"
@@ -699,210 +1060,169 @@
                         </button>
                         <span v-if="!(settings.runtime_settings.account.allowed_chains || []).length" class="chip small plain">all supported chains</span>
                       </div>
-                      <span class="muted">Select the chains you want in your workspace. Leave the list empty to keep all supported chains visible.</span>
                     </div>
-                    <label class="stack-label">
-                      <span>Username</span>
-                      <input v-model="settings.runtime_settings.account.username" type="text" autocomplete="username">
-                    </label>
-                    <label class="stack-label">
-                      <span>AI API Key</span>
-                      <input v-model="settings.runtime_settings.account.ai_api_key" type="password" placeholder="tkc_...">
-                    </label>
-                    <label class="stack-label">
-                      <span>Current Password</span>
-                      <input v-model="settings.runtime_settings.account.current_password" type="password" autocomplete="current-password" placeholder="required for username/password changes">
-                    </label>
-                    <label class="stack-label">
-                      <span>New Password</span>
-                      <input v-model="settings.runtime_settings.account.new_password" type="password" autocomplete="new-password" placeholder="leave blank to keep current">
-                    </label>
-                    <label class="stack-label">
-                      <span>Confirm New Password</span>
-                      <input v-model="settings.runtime_settings.account.confirm_password" type="password" autocomplete="new-password">
-                    </label>
-                  </div>
-                </div>
-              </section>
-            </template>
-
-            <template v-else>
-            <aside class="settings-sidebar">
-              <button class="settings-nav-btn" :class="{ active: settingsSection === 'account' }" type="button" @click="openSettings('account')">
-                <strong>Account</strong>
-                <span>{{ settings.runtime_settings.account.role || 'admin' }} / personal API</span>
-              </button>
-              <button class="settings-nav-btn" :class="{ active: settingsSection === 'keys' }" type="button" @click="openSettings('keys')">
-                <strong>Keys</strong>
-                <span>{{ (settings.runtime_settings.chainbase_keys || '').split(/\r?\n/).filter(Boolean).length }} chainbase / {{ (settings.runtime_settings.rpc_keys || '').split(/\r?\n/).filter(Boolean).length }} rpc</span>
-              </button>
-              <button class="settings-nav-btn" :class="{ active: settingsSection === 'access' }" type="button" @click="openSettings('access')">
-                <strong>Access</strong>
-                <span>{{ settings.runtime_settings.access.auth_enabled ? 'auth on' : 'auth off' }} / {{ settings.runtime_settings.access.https_enabled ? 'https' : 'http' }}</span>
-              </button>
-              <button class="settings-nav-btn" :class="{ active: settingsSection === 'pattern-sync' }" type="button" @click="openSettings('pattern-sync')">
-                <strong>Pattern Sync</strong>
-                <span>{{ settings.runtime_settings.pattern_sync.host || 'not configured' }}</span>
-              </button>
-              <button class="settings-nav-btn" :class="{ active: settingsSection === 'chains' }" type="button" @click="openSettings('chains')">
-                <strong>Chains</strong>
-                <span>{{ settings.chain_configs.length }} chain configs</span>
-              </button>
-              <button class="settings-nav-btn" :class="{ active: settingsSection === 'whitelist' }" type="button" @click="openSettings('whitelist')">
-                <strong>Whitelist</strong>
-                <span>{{ settings.whitelist_patterns.length }} patterns</span>
-              </button>
-              <button class="settings-nav-btn" :class="{ active: settingsSection === 'ai' }" type="button" @click="openSettings('ai')">
-                <strong>AI Audit</strong>
-                <span>{{ settings.ai_providers.length }} providers / {{ settings.ai_models.length }} models</span>
-              </button>
-              <button class="btn primary settings-save-btn" type="button" @click="saveSettings">Save Settings</button>
-            </aside>
-
-            <section class="settings-content">
-              <div v-if="settingsSection === 'account'" class="settings-panel">
-                <div class="card-head compact">
-                  <h3>My Account</h3>
-                  <span class="muted">Choose your own chains here along with your username, password, and AI audit API key.</span>
-                </div>
-                <div class="settings-inline-grid">
-                  <div class="stack-label">
-                    <span>My Chains</span>
-                    <div class="chain-selector-row">
-                      <select v-model="settings.runtime_settings.account.allowed_chain_candidate">
-                        <option value="">Select chain</option>
-                        <option
-                          v-for="chain in (settings.runtime_settings.account.available_chains || []).filter((chain) => !(settings.runtime_settings.account.allowed_chains || []).includes(chain))"
-                          :key="`admin-account-chain-option-${chain}`"
-                          :value="chain"
-                        >
-                          {{ chain }}
-                        </option>
-                      </select>
-                      <button
-                        class="btn ghost btn-small"
-                        type="button"
-                        :disabled="!settings.runtime_settings.account.allowed_chain_candidate"
-                        @click="addAccountAllowedChain"
-                      >
-                        Add
-                      </button>
+                  </section>
+                  <section class="settings-surface">
+                    <div class="settings-surface-head">
+                      <strong>Credentials</strong>
                     </div>
-                    <div class="chain-badge-list">
-                      <button
-                        v-for="chain in settings.runtime_settings.account.allowed_chains || []"
-                        :key="`admin-account-chain-${chain}`"
-                        class="chain-badge"
-                        type="button"
-                        @click="removeAccountAllowedChain(chain)"
-                      >
-                        <span>{{ chain }}</span>
-                        <span class="chain-badge-remove" aria-hidden="true">×</span>
-                      </button>
-                      <span v-if="!(settings.runtime_settings.account.allowed_chains || []).length" class="chip small plain">all supported chains</span>
+                    <div class="settings-inline-grid">
+                      <label class="stack-label">
+                        <span>Username</span>
+                        <input v-model="settings.runtime_settings.account.username" type="text" autocomplete="username">
+                      </label>
+                      <label class="stack-label">
+                        <span>AI Backend API Key</span>
+                        <input v-model="settings.runtime_settings.account.ai_api_key" type="password" placeholder="tkc_...">
+                      </label>
+                      <label class="stack-label">
+                        <span>Daily Review Target</span>
+                        <input v-model.number="settings.runtime_settings.account.daily_review_target" type="number" min="1" step="1" placeholder="200">
+                      </label>
+                      <label class="stack-label">
+                        <span>Current Password</span>
+                        <input v-model="settings.runtime_settings.account.current_password" type="password" autocomplete="current-password" placeholder="required for username/password changes">
+                      </label>
+                      <label class="stack-label">
+                        <span>New Password</span>
+                        <input v-model="settings.runtime_settings.account.new_password" type="password" autocomplete="new-password" placeholder="leave blank to keep current">
+                      </label>
+                      <label class="stack-label settings-span-2">
+                        <span>Confirm New Password</span>
+                        <input v-model="settings.runtime_settings.account.confirm_password" type="password" autocomplete="new-password">
+                      </label>
                     </div>
-                    <span class="muted">Select the chains you want in your workspace. Leave the list empty to keep all supported chains visible.</span>
-                  </div>
-                  <label class="stack-label">
-                    <span>Username</span>
-                    <input v-model="settings.runtime_settings.account.username" type="text" autocomplete="username">
-                  </label>
-                  <label class="stack-label">
-                    <span>AI API Key</span>
-                    <input v-model="settings.runtime_settings.account.ai_api_key" type="password" placeholder="tkc_...">
-                  </label>
-                  <label class="stack-label">
-                    <span>Current Password</span>
-                    <input v-model="settings.runtime_settings.account.current_password" type="password" autocomplete="current-password" placeholder="required for username/password changes">
-                  </label>
-                  <label class="stack-label">
-                    <span>New Password</span>
-                    <input v-model="settings.runtime_settings.account.new_password" type="password" autocomplete="new-password" placeholder="leave blank to keep current">
-                  </label>
-                  <label class="stack-label">
-                    <span>Confirm New Password</span>
-                    <input v-model="settings.runtime_settings.account.confirm_password" type="password" autocomplete="new-password">
-                  </label>
-                </div>
-                <div class="button-row">
-                  <button class="btn primary" type="button" @click="saveAccountSettings">Save Account</button>
+                  </section>
                 </div>
               </div>
 
               <div v-else-if="settingsSection === 'keys'" class="settings-panel">
-                <div class="card-head compact">
+                <div class="settings-panel-headline">
                   <h3>Shared Keys</h3>
-                  <span class="muted">Current DB values</span>
+                  <button class="btn primary btn-small" type="button" @click="saveSettings('keys')">Save</button>
                 </div>
-                <label class="stack-label">
-                  <span>Chainbase Keys</span>
-                  <textarea v-model="settings.runtime_settings.chainbase_keys" class="code-box compact-area keys-area" placeholder="one key per line"></textarea>
-                </label>
-                <label class="stack-label">
-                  <span>RPC Keys</span>
-                  <textarea v-model="settings.runtime_settings.rpc_keys" class="code-box compact-area keys-area" placeholder="one key per line"></textarea>
-                </label>
+                <div class="settings-dual-grid">
+                  <section class="settings-surface">
+                    <div class="settings-surface-head">
+                      <strong>Chainbase</strong>
+                    </div>
+                    <label class="stack-label">
+                      <span>Keys</span>
+                      <textarea v-model="settings.runtime_settings.chainbase_keys" class="code-box compact-area keys-area" placeholder="one key per line"></textarea>
+                    </label>
+                  </section>
+                  <section class="settings-surface">
+                    <div class="settings-surface-head">
+                      <strong>RPC</strong>
+                    </div>
+                    <label class="stack-label">
+                      <span>Keys</span>
+                      <textarea v-model="settings.runtime_settings.rpc_keys" class="code-box compact-area keys-area" placeholder="one key per line"></textarea>
+                    </label>
+                  </section>
+                </div>
               </div>
 
               <div v-else-if="settingsSection === 'access'" class="settings-panel">
-                <div class="card-head compact">
+                <div class="settings-panel-headline">
                   <h3>Server Access</h3>
-                  <span class="muted">Credentials come from <span class="mono">{{ settings.runtime_settings.access.auth_source || 'user.json' }}</span>. HTTPS takes effect on next process start.</span>
+                  <button class="btn primary btn-small" type="button" @click="saveSettings('access')">Save</button>
                 </div>
-                <div class="settings-inline-grid">
-                  <div class="stack-label">
-                    <span>Sign-In</span>
-                    <span class="chip small" :class="settings.runtime_settings.access.auth_enabled ? 'ok' : 'plain'">
-                      {{ settings.runtime_settings.access.auth_enabled ? 'enabled' : 'disabled' }}
-                    </span>
-                  </div>
-                  <div class="stack-label">
-                    <span>Username</span>
-                    <span class="mono">{{ settings.runtime_settings.access.username || '--' }}</span>
-                  </div>
-                  <div class="stack-label">
-                    <span>Password State</span>
-                    <span class="chip small" :class="settings.runtime_settings.access.has_password ? 'ok' : 'plain'">
-                      {{ settings.runtime_settings.access.has_password ? 'stored in file' : 'missing' }}
-                    </span>
-                  </div>
+                <div class="settings-dual-grid">
+                  <section class="settings-surface">
+                    <div class="settings-surface-head">
+                      <strong>Auth Status</strong>
+                    </div>
+                    <div class="settings-inline-grid">
+                      <div class="stack-label">
+                        <span>Sign-In</span>
+                        <span class="chip small" :class="settings.runtime_settings.access.auth_enabled ? 'ok' : 'plain'">
+                          {{ settings.runtime_settings.access.auth_enabled ? 'enabled' : 'disabled' }}
+                        </span>
+                      </div>
+                      <div class="stack-label">
+                        <span>Username</span>
+                        <span class="mono">{{ settings.runtime_settings.access.username || '--' }}</span>
+                      </div>
+                      <div class="stack-label settings-span-2">
+                        <span>Password State</span>
+                        <span class="chip small" :class="settings.runtime_settings.access.has_password ? 'ok' : 'plain'">
+                          {{ settings.runtime_settings.access.has_password ? 'stored in DB' : 'missing' }}
+                        </span>
+                      </div>
+                    </div>
+                  </section>
+                  <section class="settings-surface">
+                    <div class="settings-surface-head">
+                      <strong>HTTPS</strong>
+                    </div>
+                    <div class="settings-inline-grid">
+                      <label class="stack-label inline settings-span-2">
+                        <input v-model="settings.runtime_settings.access.https_enabled" type="checkbox">
+                        <span>Enable HTTPS</span>
+                      </label>
+                      <label class="stack-label">
+                        <span>TLS Cert Path</span>
+                        <input v-model="settings.runtime_settings.access.tls_cert_path" type="text" placeholder="/etc/ssl/certs/app.crt">
+                      </label>
+                      <label class="stack-label">
+                        <span>TLS Key Path</span>
+                        <input v-model="settings.runtime_settings.access.tls_key_path" type="text" placeholder="/etc/ssl/private/app.key">
+                      </label>
+                    </div>
+                  </section>
                 </div>
 
-                <h3>HTTPS</h3>
-                <div class="settings-inline-grid">
-                  <label class="stack-label inline">
-                    <input v-model="settings.runtime_settings.access.https_enabled" type="checkbox">
-                    <span>Enable HTTPS</span>
-                  </label>
-                  <label class="stack-label">
-                    <span>TLS Cert Path</span>
-                    <input v-model="settings.runtime_settings.access.tls_cert_path" type="text" placeholder="/etc/ssl/certs/app.crt">
-                  </label>
-                  <label class="stack-label">
-                    <span>TLS Key Path</span>
-                    <input v-model="settings.runtime_settings.access.tls_key_path" type="text" placeholder="/etc/ssl/private/app.key">
-                  </label>
-                </div>
-
-                <h3>User Chain Access</h3>
-                <p class="muted">Users manage their own chain list from their Account panel. Empty means all supported chains. Supported chains: <span class="mono">{{ chains.join(', ') || '--' }}</span></p>
-                <div class="table-wrap compact">
-                  <table>
+                <section class="settings-surface settings-surface-spaced">
+                  <div class="settings-surface-head settings-surface-head-actions">
+                    <strong>User Accounts</strong>
+                    <span class="chip small plain">{{ (settings.runtime_settings.access.users || []).length }} users</span>
+                  </div>
+                  <div class="settings-user-create-card">
+                    <div class="settings-inline-grid settings-user-create-grid">
+                      <label class="stack-label">
+                        <span>Username</span>
+                        <input v-model="settings.runtime_settings.access.new_user.username" type="text" placeholder="new user">
+                      </label>
+                      <label class="stack-label">
+                        <span>Password</span>
+                        <input v-model="settings.runtime_settings.access.new_user.password" type="password" placeholder="initial password">
+                      </label>
+                      <label class="stack-label">
+                        <span>Role</span>
+                        <select v-model="settings.runtime_settings.access.new_user.role">
+                          <option value="user">user</option>
+                          <option value="admin">admin</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div class="settings-user-create-actions">
+                      <button class="btn ghost btn-small" type="button" @click="createManagedUserAccount">Add User</button>
+                    </div>
+                  </div>
+                  <div class="settings-surface-head settings-surface-head-actions">
+                    <strong>User Directory</strong>
+                  </div>
+                  <div class="table-wrap compact">
+                    <table>
                     <thead>
                       <tr>
                         <th>User</th>
                         <th>Role</th>
                         <th>Selected Chains</th>
-                        <th>API Key</th>
+                        <th>AI Backend Key</th>
+                        <th>Action</th>
                       </tr>
                     </thead>
                     <tbody>
                       <tr v-if="!(settings.runtime_settings.access.users || []).length">
-                        <td colspan="4" class="muted">No users</td>
+                        <td colspan="5" class="muted">No users</td>
                       </tr>
                       <tr v-for="user in settings.runtime_settings.access.users" :key="`access-user-${user.username}`">
                         <td class="mono">{{ user.username }}</td>
-                        <td>{{ user.role }}</td>
+                        <td>
+                          <span class="chip small" :class="user.role === 'admin' ? 'ok' : 'plain'">{{ user.role }}</span>
+                        </td>
                         <td>
                           <div class="chain-badge-list">
                             <span
@@ -920,67 +1240,98 @@
                             {{ user.has_ai_api_key ? 'stored' : 'none' }}
                           </span>
                         </td>
+                        <td>
+                          <button
+                            v-if="String(user.username || '').trim().toLowerCase() !== String(currentUser || '').trim().toLowerCase()"
+                            class="btn subtle btn-small"
+                            type="button"
+                            @click="deleteManagedUserAccount(user.username)"
+                          >
+                            Delete
+                          </button>
+                          <span v-else class="chip small plain">current</span>
+                        </td>
                       </tr>
                     </tbody>
-                  </table>
-                </div>
+                    </table>
+                  </div>
+                </section>
               </div>
 
               <div v-else-if="settingsSection === 'pattern-sync'" class="settings-panel">
-                <h3>Pattern Sync</h3>
-                <div class="settings-inline-grid">
-                  <label class="stack-label">
-                    <span>Host</span>
-                    <input v-model="settings.runtime_settings.pattern_sync.host" type="text">
-                  </label>
-                  <label class="stack-label">
-                    <span>Port</span>
-                    <input v-model.number="settings.runtime_settings.pattern_sync.port" type="number" min="1">
-                  </label>
-                  <label class="stack-label">
-                    <span>Database</span>
-                    <input v-model="settings.runtime_settings.pattern_sync.database" type="text">
-                  </label>
-                  <label class="stack-label">
-                    <span>User</span>
-                    <input v-model="settings.runtime_settings.pattern_sync.user" type="text">
-                  </label>
-                  <label class="stack-label">
-                    <span>Password</span>
-                    <input v-model="settings.runtime_settings.pattern_sync.password" type="password">
-                  </label>
-                  <label class="stack-label">
-                    <span>Remote Name</span>
-                    <input v-model="settings.runtime_settings.pattern_sync.remote_name" type="text">
-                  </label>
+                <div class="settings-panel-headline">
+                  <h3>Pattern Sync</h3>
+                  <button class="btn primary btn-small" type="button" @click="saveSettings('pattern-sync')">Save</button>
                 </div>
-                <div class="settings-inline-grid">
-                  <label class="stack-label inline">
-                    <input v-model="settings.runtime_settings.pattern_sync.auto_pull" type="checkbox">
-                    <span>Auto Pull</span>
-                  </label>
-                  <label class="stack-label inline">
-                    <input v-model="settings.runtime_settings.pattern_sync.ssl" type="checkbox">
-                    <span>SSL</span>
-                  </label>
+                <div class="settings-dual-grid">
+                  <section class="settings-surface">
+                    <div class="settings-surface-head">
+                      <strong>Connection</strong>
+                    </div>
+                    <div class="settings-inline-grid">
+                      <label class="stack-label">
+                        <span>Host</span>
+                        <input v-model="settings.runtime_settings.pattern_sync.host" type="text">
+                      </label>
+                      <label class="stack-label">
+                        <span>Port</span>
+                        <input v-model.number="settings.runtime_settings.pattern_sync.port" type="number" min="1">
+                      </label>
+                      <label class="stack-label">
+                        <span>Database</span>
+                        <input v-model="settings.runtime_settings.pattern_sync.database" type="text">
+                      </label>
+                      <label class="stack-label">
+                        <span>User</span>
+                        <input v-model="settings.runtime_settings.pattern_sync.user" type="text">
+                      </label>
+                      <label class="stack-label">
+                        <span>Password</span>
+                        <input v-model="settings.runtime_settings.pattern_sync.password" type="password">
+                      </label>
+                      <label class="stack-label">
+                        <span>Remote Name</span>
+                        <input v-model="settings.runtime_settings.pattern_sync.remote_name" type="text">
+                      </label>
+                    </div>
+                  </section>
+                  <section class="settings-surface">
+                    <div class="settings-surface-head">
+                      <strong>Flags</strong>
+                    </div>
+                    <div class="settings-flag-stack">
+                      <label class="stack-label inline settings-flag-row">
+                        <input v-model="settings.runtime_settings.pattern_sync.auto_pull" type="checkbox">
+                        <span>Auto Pull</span>
+                      </label>
+                      <label class="stack-label inline settings-flag-row">
+                        <input v-model="settings.runtime_settings.pattern_sync.ssl" type="checkbox">
+                        <span>SSL</span>
+                      </label>
+                    </div>
+                  </section>
                 </div>
               </div>
 
               <div v-else-if="settingsSection === 'chains'" class="settings-panel chain-settings-panel">
-                <h3>Chain Config</h3>
-                <div class="settings-panel-actions">
-                  <p class="muted">Admins can add supported chains here. Store the Infura network slug here, like <span class="mono">arbitrum-mainnet</span> or <span class="mono">base-mainnet</span>, and RPC URLs will be assembled from the shared RPC keys.</p>
-                  <button class="btn ghost btn-small" type="button" @click="addChainConfigRow">Add Chain</button>
+                <div class="settings-panel-headline">
+                  <h3>Chain Config</h3>
+                  <button class="btn primary btn-small" type="button" @click="saveSettings('chains')">Save</button>
                 </div>
-                <div class="table-wrap compact chain-settings-table">
-                  <table>
+                <section class="settings-surface">
+                  <div class="settings-surface-head settings-surface-head-actions">
+                    <strong>Supported Chains</strong>
+                    <button class="btn ghost btn-small" type="button" @click="addChainConfigRow">Add Chain</button>
+                  </div>
+                  <div class="table-wrap compact chain-settings-table">
+                    <table>
                     <thead>
                       <tr>
                         <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'chain') }" @click="toggleTableSort('chainConfig', 'chain')">Chain <span>{{ sortIndicator('chainConfig', 'chain') }}</span></button></th>
                         <th>Name</th>
                         <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'chain_id') }" @click="toggleTableSort('chainConfig', 'chain_id')">Chain ID <span>{{ sortIndicator('chainConfig', 'chain_id') }}</span></button></th>
+                        <th>Pipeline</th>
                         <th>Table Prefix</th>
-                        <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'blocks_per_scan') }" @click="toggleTableSort('chainConfig', 'blocks_per_scan')">Blocks/Scan <span>{{ sortIndicator('chainConfig', 'blocks_per_scan') }}</span></button></th>
                         <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'rpc_network') }" @click="toggleTableSort('chainConfig', 'rpc_network')">Infura Network <span>{{ sortIndicator('chainConfig', 'rpc_network') }}</span></button></th>
                         <th><button class="th-sort-btn" :class="{ active: isActiveSort('chainConfig', 'multicall3') }" @click="toggleTableSort('chainConfig', 'multicall3')">Multicall <span>{{ sortIndicator('chainConfig', 'multicall3') }}</span></button></th>
                         <th>Wrapped Native</th>
@@ -996,8 +1347,13 @@
                         <td><input v-model="cfg.chain" type="text" placeholder="base-sepolia"></td>
                         <td><input v-model="cfg.name" type="text" placeholder="Base Sepolia"></td>
                         <td><input v-model.number="cfg.chain_id" type="number" min="1"></td>
+                        <td>
+                          <select v-model="cfg.pipeline_source">
+                            <option value="chainbase">chainbase</option>
+                            <option value="rpc">rpc</option>
+                          </select>
+                        </td>
                         <td><input v-model="cfg.table_prefix" type="text" placeholder="base_sepolia"></td>
-                        <td><input v-model.number="cfg.blocks_per_scan" type="number" min="1"></td>
                         <td>
                           <input v-model="cfg.rpc_network" type="text" placeholder="base-mainnet">
                         </td>
@@ -1015,21 +1371,30 @@
                         </td>
                       </tr>
                     </tbody>
-                  </table>
-                </div>
+                    </table>
+                  </div>
+                </section>
               </div>
 
               <div v-else-if="settingsSection === 'whitelist'" class="settings-panel">
-                <h3>Whitelist Patterns</h3>
-                <div class="table-wrap compact settings-pattern-table">
-                  <table>
+                <div class="settings-panel-headline">
+                  <h3>Whitelist Patterns</h3>
+                  <button class="btn primary btn-small" type="button" @click="saveSettings('whitelist')">Save</button>
+                </div>
+                <section class="settings-surface">
+                  <div class="settings-surface-head settings-surface-head-actions">
+                    <strong>Patterns</strong>
+                    <button class="btn ghost btn-small" type="button" @click="addWhitelistPatternRow">Add Pattern</button>
+                  </div>
+                  <div class="table-wrap compact settings-pattern-table">
+                    <table>
                     <thead>
                       <tr>
                         <th>Name</th>
                         <th>Hex Pattern</th>
                         <th>Type</th>
-                        <th>Score</th>
                         <th>Description</th>
+                        <th>Owner</th>
                         <th>Action</th>
                       </tr>
                     </thead>
@@ -1046,50 +1411,56 @@
                             <option value="call">call</option>
                           </select>
                         </td>
-                        <td><input v-model.number="pattern.score" type="number" min="0"></td>
                         <td><input v-model="pattern.description" type="text" placeholder="description"></td>
+                        <td><span class="mono">{{ pattern.created_by_username || '--' }}</span></td>
                         <td><button class="btn ghost btn-small" type="button" @click="removeWhitelistPatternRow(index)">Delete</button></td>
                       </tr>
                     </tbody>
-                  </table>
-                </div>
-                <div class="button-row">
-                  <button class="btn ghost" type="button" @click="addWhitelistPatternRow">Add Pattern</button>
-                </div>
+                    </table>
+                  </div>
+                </section>
               </div>
 
               <div v-else class="settings-panel">
-                <h3>AI Audit Backend</h3>
-                <div class="settings-inline-grid">
-                  <label class="stack-label">
-                    <span>Base URL</span>
-                    <input v-model="settings.runtime_settings.ai_audit_backend.base_url" type="text" placeholder="https://127.0.0.1:5000">
-                  </label>
-                  <label class="stack-label">
-                    <span>API Key</span>
-                    <input v-model="settings.runtime_settings.ai_audit_backend.api_key" type="password" placeholder="tkc_...">
-                  </label>
-                  <label class="stack-label">
-                    <span>Etherscan API Key</span>
-                    <input v-model="settings.runtime_settings.ai_audit_backend.etherscan_api_key" type="password" placeholder="optional">
-                  </label>
-                  <label class="stack-label">
-                    <span>Poll Interval (ms)</span>
-                    <input v-model.number="settings.runtime_settings.ai_audit_backend.poll_interval_ms" type="number" min="1000" step="1000">
-                  </label>
-                  <label class="stack-label">
-                    <span>Dedaub Wait (s)</span>
-                    <input v-model.number="settings.runtime_settings.ai_audit_backend.dedaub_wait_seconds" type="number" min="1">
-                  </label>
-                  <label class="stack-label inline">
-                    <input v-model="settings.runtime_settings.ai_audit_backend.insecure_tls" type="checkbox">
-                    <span>Allow Insecure TLS</span>
-                  </label>
+                <div class="settings-panel-headline">
+                  <h3>AI Audit Backend</h3>
+                  <button class="btn primary btn-small" type="button" @click="saveSettings('ai')">Save</button>
                 </div>
-
-                <h3>AI Providers</h3>
-                <div class="table-wrap compact">
-                  <table>
+                <div class="settings-dual-grid">
+                  <section class="settings-surface">
+                    <div class="settings-surface-head">
+                      <strong>Backend</strong>
+                    </div>
+                    <div class="settings-inline-grid">
+                      <label class="stack-label">
+                        <span>Base URL</span>
+                        <input v-model="settings.runtime_settings.ai_audit_backend.base_url" type="text" placeholder="https://127.0.0.1:5000">
+                      </label>
+                      <label class="stack-label">
+                        <span>Etherscan API Key</span>
+                        <input v-model="settings.runtime_settings.ai_audit_backend.etherscan_api_key" type="password" placeholder="optional">
+                      </label>
+                      <label class="stack-label">
+                        <span>Poll Interval (ms)</span>
+                        <input v-model.number="settings.runtime_settings.ai_audit_backend.poll_interval_ms" type="number" min="1000" step="1000">
+                      </label>
+                      <label class="stack-label">
+                        <span>Dedaub Wait (s)</span>
+                        <input v-model.number="settings.runtime_settings.ai_audit_backend.dedaub_wait_seconds" type="number" min="1">
+                      </label>
+                      <label class="stack-label inline">
+                        <input v-model="settings.runtime_settings.ai_audit_backend.insecure_tls" type="checkbox">
+                        <span>Allow Insecure TLS</span>
+                      </label>
+                    </div>
+                  </section>
+                  <section class="settings-surface">
+                    <div class="settings-surface-head settings-surface-head-actions">
+                      <strong>Providers</strong>
+                      <button class="btn ghost btn-small" type="button" @click="addAiProviderRow">Add Provider</button>
+                    </div>
+                    <div class="table-wrap compact">
+                      <table>
                     <thead>
                       <tr>
                         <th>Provider</th>
@@ -1109,15 +1480,18 @@
                         <td><button class="btn ghost btn-small" type="button" @click="removeAiProviderRow(index)">Delete</button></td>
                       </tr>
                     </tbody>
-                  </table>
-                </div>
-                <div class="button-row">
-                  <button class="btn ghost" type="button" @click="addAiProviderRow">Add Provider</button>
+                      </table>
+                    </div>
+                  </section>
                 </div>
 
-                <h3>AI Models</h3>
-                <div class="table-wrap compact">
-                  <table>
+                <section class="settings-surface settings-surface-spaced">
+                  <div class="settings-surface-head settings-surface-head-actions">
+                    <strong>Models</strong>
+                    <button class="btn ghost btn-small" type="button" @click="addAiModelRow">Add Model</button>
+                  </div>
+                  <div class="table-wrap compact">
+                    <table>
                     <thead>
                       <tr>
                         <th>Provider</th>
@@ -1143,14 +1517,12 @@
                         <td><button class="btn ghost btn-small" type="button" @click="removeAiModelRow(index)">Delete</button></td>
                       </tr>
                     </tbody>
-                  </table>
-                  <datalist id="ai-provider-names">
-                    <option v-for="provider in settings.ai_providers" :key="`provider-opt-${provider.provider}`" :value="provider.provider"></option>
-                  </datalist>
-                </div>
-                <div class="button-row">
-                  <button class="btn ghost" type="button" @click="addAiModelRow">Add Model</button>
-                </div>
+                    </table>
+                    <datalist id="ai-provider-names">
+                      <option v-for="provider in settings.ai_providers" :key="`provider-opt-${provider.provider}`" :value="provider.provider"></option>
+                    </datalist>
+                  </div>
+                </section>
               </div>
             </section>
             </template>
@@ -1241,11 +1613,20 @@
                     </span>
                   </td>
                   <td>
-                    <span v-if="autoAuditStatusLabel(token.auto_audit_status) === 'yes'" class="audit-severity-badge">
-                      <span v-for="entry in auditSeverityPills(token)" :key="`${token.token}:${entry.key}`" class="audit-severity-fragment" :class="entry.className">
-                        <span class="audit-severity-label">{{ entry.shortLabel }}</span><span class="audit-severity-value">{{ entry.count }}</span>
+                    <button
+                      v-if="autoAuditStatusLabel(token.auto_audit_status) === 'yes'"
+                      class="audit-severity-button"
+                      type="button"
+                      @click="openTokenAuditResultDrawer(token)"
+                      :aria-label="`Open AI audit report for ${token.token}`"
+                      title="Open AI audit report"
+                    >
+                      <span class="audit-severity-badge">
+                        <span v-for="entry in auditSeverityPills(token)" :key="`${token.token}:${entry.key}`" class="audit-severity-fragment" :class="entry.className">
+                          <span class="audit-severity-label">{{ entry.shortLabel }}</span><span class="audit-severity-value">{{ entry.count }}</span>
+                        </span>
                       </span>
-                    </span>
+                    </button>
                     <span v-else class="muted">--</span>
                   </td>
                   <td>
@@ -1710,11 +2091,20 @@
                     </span>
                   </td>
                   <td>
-                    <span v-if="autoAuditStatusLabel(row.auto_audit_status) === 'yes'" class="audit-severity-badge">
-                      <span v-for="entry in auditSeverityPills(row)" :key="`${row.contract}:${entry.key}`" class="audit-severity-fragment" :class="entry.className">
-                        <span class="audit-severity-label">{{ entry.shortLabel }}</span><span class="audit-severity-value">{{ entry.count }}</span>
+                    <button
+                      v-if="autoAuditStatusLabel(row.auto_audit_status) === 'yes'"
+                      class="audit-severity-button"
+                      type="button"
+                      @click="openContractAuditResultDrawer(row)"
+                      :aria-label="`Open AI audit report for ${row.contract}`"
+                      title="Open AI audit report"
+                    >
+                      <span class="audit-severity-badge">
+                        <span v-for="entry in auditSeverityPills(row)" :key="`${row.contract}:${entry.key}`" class="audit-severity-fragment" :class="entry.className">
+                          <span class="audit-severity-label">{{ entry.shortLabel }}</span><span class="audit-severity-value">{{ entry.count }}</span>
+                        </span>
                       </span>
-                    </span>
+                    </button>
                     <span v-else class="muted">--</span>
                   </td>
                   <td>
@@ -2426,16 +2816,49 @@
           </div>
         </div>
       </div>
+
+      <div v-if="auditReportDrawer.open" class="audit-report-drawer-shell" @click.self="closeAuditReportDrawer">
+        <aside class="audit-report-drawer">
+          <div class="audit-report-drawer-head">
+            <div>
+              <p class="kicker">AI Audit Report</p>
+              <h2>{{ auditReportDrawer.title || auditReportDrawer.targetAddr || '--' }}</h2>
+              <p class="muted mono">{{ String(auditReportDrawer.chain || '').toUpperCase() }} / {{ auditReportDrawer.targetType }} / {{ auditReportDrawer.targetAddr || '--' }}</p>
+            </div>
+            <button class="icon-action-btn" type="button" @click="closeAuditReportDrawer" aria-label="Close AI audit report" title="Close">
+              <svg viewBox="0 0 16 16" class="icon-svg" aria-hidden="true">
+                <path d="m4.2 4.2 7.6 7.6-1 1-7.6-7.6z" fill="currentColor"></path>
+                <path d="m11.8 4.2-7.6 7.6-1-1 7.6-7.6z" fill="currentColor"></path>
+              </svg>
+            </button>
+          </div>
+          <div class="audit-report-drawer-body">
+            <div v-if="auditReportDrawer.loading" class="audit-report-placeholder muted">Loading report...</div>
+            <div v-else-if="auditReportDrawer.error" class="audit-report-placeholder muted">{{ auditReportDrawer.error }}</div>
+            <article v-else class="audit-report-document">
+              <header class="audit-report-document-head">
+                <strong>{{ auditReportDrawer.title || '--' }}</strong>
+                <span class="mono">{{ auditReportDrawer.reportPath || '--' }}</span>
+              </header>
+              <pre class="audit-report-document-body"><code>{{ auditReportDrawer.content }}</code></pre>
+            </article>
+          </div>
+        </aside>
+      </div>
+
     </div>
 
     <script src="/vendor/vue.global.prod.js"></script>
     <script src="/vendor/vue-router.global.prod.js"></script>
     <script src="/vendor/pinia.iife.prod.js"></script>
+    <script src="/vendor/echarts.min.js"></script>
+    <script src="/vendor/vue-echarts.min.js"></script>
     <script src="/js/dashboard-shared.js"></script>
     <script src="/js/dashboard-runtime.js"></script>
     <script src="/js/dashboard-scroll-sync.js"></script>
     <script src="/js/dashboard-table-state.js"></script>
     <script src="/js/dashboard-view-state.js"></script>
+    <script src="/js/dashboard-data.js"></script>
     <script src="/js/dashboard-loaders.js"></script>
     <script src="/js/dashboard-actions.js"></script>
     <script src="/js/dashboard-modals.js"></script>

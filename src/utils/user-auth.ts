@@ -1,12 +1,18 @@
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import {
+  getAppSetting,
+  listAuthUsers,
+  replaceAuthUsers,
+  setAppSetting,
+} from '../db.js';
 import { hashPassword } from './web-security.js';
 
 const ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
-export const USER_FILE_PATH = path.join(ROOT, 'user.json');
+const LEGACY_USER_FILE_PATH = path.join(ROOT, 'user.json');
 
-interface UserFileShape {
+interface LegacyUserFileShape {
   auth_enabled?: boolean;
   username?: string;
   password_hash?: string;
@@ -21,6 +27,8 @@ interface UserFileShape {
     aiApiKey?: string;
     allowed_chains?: string[];
     allowedChains?: string[];
+    daily_review_target?: number;
+    dailyReviewTarget?: number;
   }>;
 }
 
@@ -32,6 +40,7 @@ export interface UserAuthAccount {
   role: UserRole;
   aiApiKey: string;
   allowedChains: string[];
+  dailyReviewTarget: number;
 }
 
 export interface UserAuthConfig {
@@ -68,9 +77,48 @@ function allowedChainsFor(raw: { allowed_chains?: string[]; allowedChains?: stri
   return [...new Set(source.map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean))];
 }
 
-function normalizeUserConfig(raw: UserFileShape): UserAuthConfig {
+function dailyReviewTargetFor(raw: { daily_review_target?: number; dailyReviewTarget?: number }): number {
+  const parsed = Number(raw.daily_review_target ?? raw.dailyReviewTarget);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.floor(parsed)) : 200;
+}
+
+function ensureAdminPresence(users: UserAuthAccount[]): UserAuthAccount[] {
+  const nextUsers = [...users];
+  if (nextUsers.length > 0 && !nextUsers.some((user) => user.role === 'admin')) {
+    nextUsers[0] = { ...nextUsers[0], role: 'admin' };
+  }
+  return nextUsers;
+}
+
+function serializeUsersForConfig(users: UserAuthAccount[]): UserAuthConfig {
+  const sortedUsers = [...users].sort((a, b) => {
+    if (a.role !== b.role) return a.role === 'admin' ? -1 : 1;
+    return a.username.localeCompare(b.username);
+  });
+  const primary = sortedUsers[0] || { username: '', passwordHash: '', role: 'user' as UserRole, aiApiKey: '', allowedChains: [], dailyReviewTarget: 200 };
+  return {
+    authEnabled: getAppSetting('auth_enabled') !== '0',
+    username: primary.username,
+    passwordHash: primary.passwordHash,
+    role: primary.role,
+    users: sortedUsers,
+  };
+}
+
+function normalizeDbUsers(): UserAuthAccount[] {
+  return listAuthUsers().map((user) => ({
+    username: user.username,
+    passwordHash: user.passwordHash,
+    role: normalizeUserRole(user.role),
+    aiApiKey: user.aiApiKey,
+    allowedChains: [...new Set((user.allowedChains || []).map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean))],
+    dailyReviewTarget: user.dailyReviewTarget,
+  }));
+}
+
+function normalizeLegacyConfig(raw: LegacyUserFileShape): UserAuthAccount[] {
   const usersByName = new Map<string, UserAuthAccount>();
-  const addUser = (entry: { username?: string; password_hash?: string; password?: string; role?: string; ai_api_key?: string; aiApiKey?: string; allowed_chains?: string[]; allowedChains?: string[] }) => {
+  const addUser = (entry: { username?: string; password_hash?: string; password?: string; role?: string; ai_api_key?: string; aiApiKey?: string; allowed_chains?: string[]; allowedChains?: string[]; daily_review_target?: number; dailyReviewTarget?: number }) => {
     const username = normalizeUsername(String(entry.username || ''));
     if (!username) return;
     const passwordHash = passwordHashFor(entry);
@@ -81,57 +129,31 @@ function normalizeUserConfig(raw: UserFileShape): UserAuthConfig {
       role: normalizeUserRole(entry.role),
       aiApiKey: aiApiKeyFor(entry),
       allowedChains: allowedChainsFor(entry),
+      dailyReviewTarget: dailyReviewTargetFor(entry),
     });
   };
 
-  if (Array.isArray(raw.users)) {
-    raw.users.forEach(addUser);
-  }
+  if (Array.isArray(raw.users)) raw.users.forEach(addUser);
   if (raw.username || raw.password_hash || raw.password) {
     addUser({
       username: raw.username,
       password_hash: raw.password_hash,
       password: raw.password,
       role: raw.role || 'admin',
-      ai_api_key: raw.users?.find((item) => normalizeUsername(String(item.username || '')).toLowerCase() === normalizeUsername(String(raw.username || '')).toLowerCase())?.ai_api_key,
-      allowed_chains: raw.users?.find((item) => normalizeUsername(String(item.username || '')).toLowerCase() === normalizeUsername(String(raw.username || '')).toLowerCase())?.allowed_chains,
     });
   }
 
-  let users = Array.from(usersByName.values());
-  if (users.length > 0 && !users.some((user) => user.role === 'admin')) {
-    users = users.map((user, index) => index === 0 ? { ...user, role: 'admin' } : user);
-  }
-  users.sort((a, b) => {
-    if (a.role !== b.role) return a.role === 'admin' ? -1 : 1;
-    return a.username.localeCompare(b.username);
-  });
-  const primary = users[0] || { username: '', passwordHash: '', role: 'user' as UserRole, aiApiKey: '', allowedChains: [] };
-  return {
-    authEnabled: raw.auth_enabled !== false,
-    username: primary.username,
-    passwordHash: primary.passwordHash,
-    role: primary.role,
-    users,
-  };
+  return Array.from(usersByName.values());
 }
 
-function serializeUserConfig(config: UserAuthConfig) {
-  return {
-    auth_enabled: config.authEnabled,
-    users: config.users.map((user) => ({
-      username: user.username,
-      role: user.role,
-      password_hash: user.passwordHash,
-      ai_api_key: user.aiApiKey,
-      allowed_chains: user.allowedChains,
-    })),
-  };
-}
+function migrateLegacyUserFileIfNeeded(): void {
+  const existingUsers = normalizeDbUsers();
+  if (existingUsers.length) return;
 
-function ensureDefaultUsers(config: UserAuthConfig): { config: UserAuthConfig; changed: boolean } {
-  let changed = false;
-  const users = [...config.users];
+  const legacyRaw = existsSync(LEGACY_USER_FILE_PATH)
+    ? JSON.parse(readFileSync(LEGACY_USER_FILE_PATH, 'utf8')) as LegacyUserFileShape
+    : null;
+  let users = legacyRaw ? normalizeLegacyConfig(legacyRaw) : [];
   if (!users.some((user) => user.username.toLowerCase() === 'kecheng')) {
     users.push({
       username: 'kecheng',
@@ -139,66 +161,40 @@ function ensureDefaultUsers(config: UserAuthConfig): { config: UserAuthConfig; c
       passwordHash: hashPassword('kecheng'),
       aiApiKey: '',
       allowedChains: [],
+      dailyReviewTarget: 200,
     });
-    changed = true;
   }
-  if (!users.some((user) => user.role === 'admin') && users.length > 0) {
-    users[0] = { ...users[0], role: 'admin' };
-    changed = true;
-  }
-  users.sort((a, b) => {
-    if (a.role !== b.role) return a.role === 'admin' ? -1 : 1;
-    return a.username.localeCompare(b.username);
-  });
-  const primary = users[0] || { username: '', passwordHash: '', role: 'user' as UserRole, aiApiKey: '', allowedChains: [] };
-  return {
-    changed,
-    config: {
-      ...config,
-      username: primary.username,
-      passwordHash: primary.passwordHash,
-      role: primary.role,
-      users,
-    },
-  };
-}
-
-export function ensureUserAuthFile(): UserAuthConfig {
-  if (!existsSync(USER_FILE_PATH)) {
-    throw new Error(`Missing user auth file: ${USER_FILE_PATH}`);
+  users = ensureAdminPresence(users);
+  if (!users.length) return;
+  if (legacyRaw?.auth_enabled === false) {
+    setAppSetting('auth_enabled', '0');
   }
 
-  const raw = JSON.parse(readFileSync(USER_FILE_PATH, 'utf8')) as UserFileShape;
-  const normalizedResult = ensureDefaultUsers(normalizeUserConfig(raw));
-  const normalized = normalizedResult.config;
-  if (!normalized.username) {
-    throw new Error(`Invalid user auth file: username is required in ${USER_FILE_PATH}`);
-  }
-  if (!normalized.passwordHash) {
-    if (String(raw.password || '').trim()) {
-      const persisted = serializeUserConfig(normalized);
-      writeFileSync(USER_FILE_PATH, `${JSON.stringify(persisted, null, 2)}\n`, 'utf8');
-      return normalizeUserConfig(persisted);
-    }
-    throw new Error(`Invalid user auth file: password_hash is required in ${USER_FILE_PATH}`);
-  }
-  const shouldPersist = normalizedResult.changed
-    || !Array.isArray(raw.users)
-    || Boolean(raw.password)
-    || Boolean(raw.username || raw.password_hash);
-  if (shouldPersist) {
-    writeFileSync(USER_FILE_PATH, `${JSON.stringify(serializeUserConfig(normalized), null, 2)}\n`, 'utf8');
-  }
-  return normalized;
+  replaceAuthUsers(users.map((user) => ({
+    username: user.username,
+    passwordHash: user.passwordHash,
+    role: user.role,
+    aiApiKey: user.aiApiKey,
+    allowedChains: user.allowedChains,
+    dailyReviewTarget: user.dailyReviewTarget,
+  })));
 }
 
 export function getUserAuthConfig(): UserAuthConfig {
-  return ensureUserAuthFile();
-}
-
-function saveUserAuthConfig(config: UserAuthConfig): UserAuthConfig {
-  writeFileSync(USER_FILE_PATH, `${JSON.stringify(serializeUserConfig(config), null, 2)}\n`, 'utf8');
-  return normalizeUserConfig(serializeUserConfig(config));
+  migrateLegacyUserFileIfNeeded();
+  const dbUsers = normalizeDbUsers();
+  const users = ensureAdminPresence(dbUsers);
+  if (users.length !== dbUsers.length || users.some((user, index) => user.role !== dbUsers[index]?.role)) {
+    replaceAuthUsers(users.map((user) => ({
+      username: user.username,
+      passwordHash: user.passwordHash,
+      role: user.role,
+      aiApiKey: user.aiApiKey,
+      allowedChains: user.allowedChains,
+      dailyReviewTarget: user.dailyReviewTarget,
+    })));
+  }
+  return serializeUsersForConfig(users);
 }
 
 export function findUserAuthAccount(config: UserAuthConfig, username: string): UserAuthAccount | null {
@@ -212,6 +208,19 @@ export function isAdminUser(config: UserAuthConfig, username: string): boolean {
   return Boolean(user && user.role === 'admin');
 }
 
+function persistUsers(users: UserAuthAccount[]): UserAuthConfig {
+  const normalized = ensureAdminPresence(users);
+  replaceAuthUsers(normalized.map((user) => ({
+    username: user.username,
+    passwordHash: user.passwordHash,
+    role: user.role,
+    aiApiKey: user.aiApiKey,
+    allowedChains: user.allowedChains,
+    dailyReviewTarget: user.dailyReviewTarget,
+  })));
+  return getUserAuthConfig();
+}
+
 export function updateOwnUserAuthAccount(
   currentUsername: string,
   input: {
@@ -219,22 +228,19 @@ export function updateOwnUserAuthAccount(
     newPassword?: string;
     aiApiKey?: string;
     allowedChains?: string[];
+    dailyReviewTarget?: number;
   },
 ): { previousUsername: string; user: UserAuthAccount; config: UserAuthConfig } {
-  const config = ensureUserAuthFile();
+  const config = getUserAuthConfig();
   const normalizedCurrent = normalizeUsername(currentUsername).toLowerCase();
   const index = config.users.findIndex((user) => user.username.toLowerCase() === normalizedCurrent);
-  if (index < 0) {
-    throw new Error('current user was not found');
-  }
+  if (index < 0) throw new Error('current user was not found');
 
   const previous = config.users[index];
   const nextUsername = normalizeUsername(input.username ?? previous.username);
   if (!nextUsername) throw new Error('username is required');
   const nextUsernameKey = nextUsername.toLowerCase();
-  const duplicate = config.users.some((user, userIndex) => (
-    userIndex !== index && user.username.toLowerCase() === nextUsernameKey
-  ));
+  const duplicate = config.users.some((user, userIndex) => userIndex !== index && user.username.toLowerCase() === nextUsernameKey);
   if (duplicate) throw new Error('username already exists');
 
   const newPassword = String(input.newPassword || '');
@@ -243,6 +249,7 @@ export function updateOwnUserAuthAccount(
     username: nextUsername,
     aiApiKey: String(input.aiApiKey ?? previous.aiApiKey ?? '').trim(),
     allowedChains: [...new Set((input.allowedChains ?? previous.allowedChains ?? []).map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean))],
+    dailyReviewTarget: dailyReviewTargetFor({ dailyReviewTarget: input.dailyReviewTarget ?? previous.dailyReviewTarget }),
   };
   if (newPassword) {
     if (newPassword.length < 4) throw new Error('new password must be at least 4 characters');
@@ -251,17 +258,7 @@ export function updateOwnUserAuthAccount(
 
   const users = [...config.users];
   users[index] = nextUser;
-  users.sort((a, b) => {
-    if (a.role !== b.role) return a.role === 'admin' ? -1 : 1;
-    return a.username.localeCompare(b.username);
-  });
-  const nextConfig = saveUserAuthConfig({
-    ...config,
-    users,
-    username: users[0]?.username || '',
-    passwordHash: users[0]?.passwordHash || '',
-    role: users[0]?.role || 'user',
-  });
+  const nextConfig = persistUsers(users);
   return {
     previousUsername: previous.username,
     user: findUserAuthAccount(nextConfig, nextUsername) || nextUser,
@@ -269,10 +266,73 @@ export function updateOwnUserAuthAccount(
   };
 }
 
+export function createManagedUser(
+  currentUsername: string,
+  input: {
+    username?: string;
+    password?: string;
+    role?: string;
+  },
+): { user: UserAuthAccount; config: UserAuthConfig } {
+  const config = getUserAuthConfig();
+  const actor = findUserAuthAccount(config, currentUsername);
+  if (!actor || actor.role !== 'admin') throw new Error('admin access is required');
+
+  const username = normalizeUsername(String(input.username || ''));
+  if (!username) throw new Error('username is required');
+  if (config.users.some((user) => user.username.toLowerCase() === username.toLowerCase())) {
+    throw new Error('username already exists');
+  }
+
+  const password = String(input.password || '');
+  if (password.length < 4) throw new Error('password must be at least 4 characters');
+
+  const nextUser: UserAuthAccount = {
+    username,
+    passwordHash: hashPassword(password),
+    role: normalizeUserRole(input.role),
+    aiApiKey: '',
+    allowedChains: [],
+    dailyReviewTarget: 200,
+  };
+  const nextConfig = persistUsers([...config.users, nextUser]);
+  return {
+    user: findUserAuthAccount(nextConfig, username) || nextUser,
+    config: nextConfig,
+  };
+}
+
+export function deleteManagedUser(
+  currentUsername: string,
+  targetUsername: string,
+): UserAuthConfig {
+  const config = getUserAuthConfig();
+  const actor = findUserAuthAccount(config, currentUsername);
+  if (!actor || actor.role !== 'admin') throw new Error('admin access is required');
+
+  const targetKey = normalizeUsername(targetUsername).toLowerCase();
+  if (!targetKey) throw new Error('username is required');
+  if (targetKey === normalizeUsername(currentUsername).toLowerCase()) {
+    throw new Error('you cannot delete your own account here');
+  }
+
+  const target = config.users.find((user) => user.username.toLowerCase() === targetKey);
+  if (!target) throw new Error('user was not found');
+
+  if (target.role === 'admin') {
+    const otherAdmins = config.users.filter((user) => user.role === 'admin' && user.username.toLowerCase() !== targetKey);
+    if (!otherAdmins.length) {
+      throw new Error('at least one admin account must remain');
+    }
+  }
+
+  return persistUsers(config.users.filter((user) => user.username.toLowerCase() !== targetKey));
+}
+
 export function updateUserAllowedChains(
   updates: Array<{ username?: string; allowedChains?: string[] }>,
 ): UserAuthConfig {
-  const config = ensureUserAuthFile();
+  const config = getUserAuthConfig();
   const updatesByName = new Map<string, string[]>();
 
   (updates || []).forEach((entry) => {
@@ -291,24 +351,14 @@ export function updateUserAllowedChains(
     const nextAllowedChains = updatesByName.get(user.username.toLowerCase());
     if (!nextAllowedChains) return user;
     const currentAllowedChains = [...new Set((user.allowedChains || []).map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean))];
-    if (
-      currentAllowedChains.length === nextAllowedChains.length
-      && currentAllowedChains.every((chain, index) => chain === nextAllowedChains[index])
-    ) {
+    if (currentAllowedChains.length === nextAllowedChains.length && currentAllowedChains.every((chain, index) => chain === nextAllowedChains[index])) {
       return user;
     }
     changed = true;
-    return {
-      ...user,
-      allowedChains: nextAllowedChains,
-    };
+    return { ...user, allowedChains: nextAllowedChains };
   });
 
-  if (!changed) return config;
-  return saveUserAuthConfig({
-    ...config,
-    users,
-  });
+  return changed ? persistUsers(users) : config;
 }
 
 export function getAllowedChainsForUser(

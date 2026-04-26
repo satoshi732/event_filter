@@ -11,6 +11,7 @@ import {
 } from '../config.js';
 import {
   getWhitelistPatterns,
+  incrementUserDailyActivity,
   getTokenRegistry,
   listTokenPriceSyncTargets,
   getSingleContractAiAudit,
@@ -51,10 +52,25 @@ import { updateManualContractLinkage } from '../modules/contract-manager/index.j
 import { withLiveReviews, type DashboardContractSummary, type DashboardTokenSummary, type LatestRunMeta } from '../modules/dashboard/read-model.js';
 import { deriveAiAuditLifecycleStatus } from '../db/audit-state.js';
 import type { PipelineRunResult } from '../pipeline.js';
-import { getAuthenticatedSession, isAdminAuthUser, renameAuthenticatedSessions } from './auth.js';
-import { findUserAuthAccount, getAllowedChainsForUser, getUserAuthConfig, updateOwnUserAuthAccount } from '../utils/user-auth.js';
+import {
+  getAuthenticatedSession,
+  isAdminAuthUser,
+  renameAuthenticatedSessions,
+  revokeAuthenticatedSessionsForUsername,
+} from './auth.js';
+import {
+  createManagedUser,
+  deleteManagedUser,
+  findUserAuthAccount,
+  getAllowedChainsForUser,
+  getUserAuthConfig,
+  updateOwnUserAuthAccount,
+} from '../utils/user-auth.js';
 import { verifyPassword } from '../utils/web-security.js';
 import { getTokenPricesBatch } from '../utils/rpc.js';
+import { coerceAutoAnalysisRuntimeConfig } from './auto-analysis-config.js';
+import { parseOptionalBlockInput, parseOptionalDeltaInput } from './request-utils.js';
+import { extractDisplayReportText, renderReportHtml } from './report-utils.js';
 
 type StateStreamClient = ServerResponse<IncomingMessage> & {
   __stateHeartbeat?: NodeJS.Timeout;
@@ -89,7 +105,11 @@ interface ApiRouteHandlerDeps {
   resolveDashboardTokens: (chain: string, run: PipelineRunResult) => DashboardTokenSummary[];
   resolveContractDetail: (chain: string, run: PipelineRunResult, contract: string) => unknown;
   latestRunMeta: (run: PipelineRunResult) => LatestRunMeta;
-  handleRun: (chain: string, ownerUsername?: string) => Promise<PipelineRunResult>;
+  handleRun: (
+    chain: string,
+    ownerUsername?: string,
+    range?: { fromBlock?: number | null; toBlock?: number | null; deltaBlocks?: number | null },
+  ) => Promise<PipelineRunResult>;
   applyDashboardContractQuery: (
     rows: DashboardContractSummary[],
     search: string,
@@ -117,104 +137,6 @@ interface ApiRouteHandlerDeps {
     models: Array<{ provider: string; model: string; enabled: boolean; isDefault: boolean; position: number }>,
   ) => Array<{ provider: string; model: string; enabled: boolean; isDefault: boolean; position: number }>;
   writeSseEvent: (client: ServerResponse, event: string, payload: unknown) => void;
-}
-
-function renderReportHtml(title: string, label: string, value: string, chain: string, reportPath: string, reportText: string, escapeHtml: (value: string) => string) {
-  return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>${escapeHtml(title)}</title>
-    <style>
-      body { font-family: Georgia, serif; margin: 0; background: #f7f1e4; color: #2b2318; }
-      main { max-width: 1100px; margin: 0 auto; padding: 24px; }
-      .meta { margin-bottom: 16px; padding: 16px; border: 1px solid #d8c7a7; border-radius: 12px; background: #fffaf0; }
-      pre { white-space: pre-wrap; word-break: break-word; padding: 20px; border-radius: 12px; border: 1px solid #d8c7a7; background: #fff; overflow: auto; }
-      code { font-family: "IBM Plex Mono", monospace; font-size: 13px; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <section class="meta">
-        <strong>${escapeHtml(label)}</strong> ${escapeHtml(value)}<br>
-        <strong>Chain</strong> ${escapeHtml(chain)}<br>
-        <strong>Report Path</strong> ${escapeHtml(reportPath)}
-      </section>
-      <pre><code>${escapeHtml(reportText)}</code></pre>
-    </main>
-  </body>
-</html>`;
-}
-
-function normalizeDateTimeLocalInput(value: unknown): string {
-  const normalized = String(value || '').trim();
-  if (!normalized) return '';
-  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
-  if (!match) return '';
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const hour = Number(match[4]);
-  const minute = Number(match[5]);
-  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return '';
-  if (month < 1 || month > 12 || day < 1 || day > 31) return '';
-  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return '';
-  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return '';
-  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
-}
-
-function coerceAutoAnalysisRuntimeConfig(input: unknown) {
-  const source = input && typeof input === 'object' ? input as Record<string, unknown> : {};
-  const toPositiveInt = (value: unknown, fallback: number) => {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
-  };
-  const toBoolean = (value: unknown, fallback: boolean) => {
-    if (typeof value === 'boolean') return value;
-    if (typeof value === 'number') return value !== 0;
-    if (typeof value === 'string') {
-      const normalized = value.trim().toLowerCase();
-      if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
-      if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-    }
-    return fallback;
-  };
-  const provider = normalizeAiAuditProvider(String(source.provider || '').trim());
-  const selectedChains = Array.isArray(source.selected_chains)
-    ? [...new Set(source.selected_chains.map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean))]
-    : [];
-  const rawChainRatios = source.chain_ratios && typeof source.chain_ratios === 'object'
-    ? source.chain_ratios as Record<string, unknown>
-    : {};
-  const chainRatios = Object.fromEntries(
-    selectedChains.map((chain) => {
-      const parsed = Number(rawChainRatios[chain]);
-      return [chain, Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.floor(parsed)) : 100];
-    }),
-  );
-  return {
-    selectedChains,
-    chainRatios,
-    queueCapacity: toPositiveInt(source.queue_capacity, 10),
-    roundAuditLimit: toPositiveInt(source.round_audit_limit, 5),
-    roundRestSeconds: toPositiveInt(source.round_rest_seconds, 60),
-    continueOnEmptyRound: toBoolean(source.continue_on_empty_round, false),
-    stopAtDateTime: normalizeDateTimeLocalInput(source.stop_at_datetime ?? source.stop_at_time) || null,
-    tokenSharePercent: toPositiveInt(source.token_share_percent, 40),
-    contractSharePercent: toPositiveInt(source.contract_share_percent, 60),
-    provider,
-    model: normalizeAiAuditModel(provider, String(source.model || '').trim()),
-    contractMinTvlUsd: Number.isFinite(Number(source.contract_min_tvl_usd)) ? Number(source.contract_min_tvl_usd) : 10000,
-    tokenMinPriceUsd: Number.isFinite(Number(source.token_min_price_usd)) ? Number(source.token_min_price_usd) : 0.001,
-    requireTokenSync: toBoolean(source.require_token_sync, true),
-    requireContractSelectors: toBoolean(source.require_contract_selectors, true),
-    skipSeenContracts: toBoolean(source.skip_seen_contracts, true),
-    onePerContractPattern: toBoolean(source.one_per_contract_pattern, true),
-    retryFailedAudits: toBoolean(source.retry_failed_audits, true),
-    excludeAuditedContracts: toBoolean(source.exclude_audited_contracts, true),
-    excludeAuditedTokens: toBoolean(source.exclude_audited_tokens, true),
-  };
 }
 
 export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
@@ -286,6 +208,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         ai_api_key: account?.aiApiKey || '',
         has_ai_api_key: Boolean(account?.aiApiKey),
         allowed_chains: account?.allowedChains || [],
+        daily_review_target: account?.dailyReviewTarget || 200,
         available_chains: requestKnownChains,
       };
     };
@@ -320,6 +243,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       const currentPassword = String(body.current_password || '');
       const newPassword = String(body.new_password || '');
       const confirmPassword = String(body.confirm_password || '');
+      const dailyReviewTarget = Number(body.daily_review_target);
       const allowedChains = coerceStringArray(body.allowed_chains)
         .map((chain) => String(chain || '').trim().toLowerCase())
         .filter((chain) => requestKnownChains.includes(chain));
@@ -338,6 +262,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
           newPassword,
           aiApiKey,
           allowedChains,
+          dailyReviewTarget: Number.isFinite(dailyReviewTarget) && dailyReviewTarget > 0 ? Math.floor(dailyReviewTarget) : account.dailyReviewTarget,
         });
         renameAuthenticatedSessions(updated.previousUsername, updated.user.username);
         sendJson(res, 200, {
@@ -350,6 +275,49 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       return true;
     }
 
+    if (reqPath === '/api/admin/users' && method === 'POST') {
+      if (!requireAdmin()) return true;
+      const body = await readJsonBody(req);
+      const username = String(body.username || '').trim();
+      const password = String(body.password || '');
+      const role = String(body.role || 'user').trim().toLowerCase() || 'user';
+      const actorUsername = requestUsername || requestUserAuth.username || '';
+      try {
+        createManagedUser(actorUsername, {
+          username,
+          password,
+          role,
+        });
+        await broadcastStateSnapshot();
+        sendJson(res, 200, {
+          ok: true,
+          settings: await buildSettingsPayload(requestUsername),
+        });
+      } catch (err) {
+        sendJson(res, 400, { error: (err as Error).message || 'User creation failed' });
+      }
+      return true;
+    }
+
+    if (reqPath === '/api/admin/users' && method === 'DELETE') {
+      if (!requireAdmin()) return true;
+      const body = await readJsonBody(req);
+      const username = String(body.username || '').trim();
+      const actorUsername = requestUsername || requestUserAuth.username || '';
+      try {
+        deleteManagedUser(actorUsername, username);
+        revokeAuthenticatedSessionsForUsername(username);
+        await broadcastStateSnapshot();
+        sendJson(res, 200, {
+          ok: true,
+          settings: await buildSettingsPayload(requestUsername),
+        });
+      } catch (err) {
+        sendJson(res, 400, { error: (err as Error).message || 'User deletion failed' });
+      }
+      return true;
+    }
+
     if (reqPath === '/api/auto-analysis' && method === 'GET') {
       sendJson(res, 200, getAutoAnalysisStatus(requestUsername));
       return true;
@@ -358,6 +326,10 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     if (reqPath === '/api/auto-analysis/start' && method === 'POST') {
       const body = await readJsonBody(req);
       const configInput = coerceAutoAnalysisRuntimeConfig(body.config);
+      if (configInput.rangeInputError) {
+        sendJson(res, 400, { error: configInput.rangeInputError });
+        return true;
+      }
       const requestedChains = configInput.selectedChains.length
         ? configInput.selectedChains
         : coerceStringArray(body.chains).map((chain) => normalizeRequestedChain(chain)).filter(Boolean);
@@ -377,7 +349,8 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       for (const chain of selectedChains) {
         if (!requireAllowedChain(chain)) return true;
       }
-      const account = findUserAuthAccount(requestUserAuth, requestUsername);
+      const effectiveRequestUsername = requestUsername || requestUserAuth.username || '';
+      const account = findUserAuthAccount(requestUserAuth, effectiveRequestUsername);
       const config = setAutoAnalysisRuntimeConfig(requestUsername, {
         ...configInput,
         selectedChains,
@@ -538,7 +511,8 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         return true;
       }
       if (!requireAllowedChain(chain)) return true;
-      const hash = queueSeenContractReviewTarget(chain, address, label, targetKind);
+      const effectiveActorUsername = requestUsername || requestUserAuth.username || '';
+      const hash = queueSeenContractReviewTarget(chain, address, label, targetKind, effectiveActorUsername);
       const status = await getPatternSyncStatus();
       sendJson(res, 200, { ok: true, hash, status });
       broadcastNamedEvent('review-updated', {
@@ -563,7 +537,17 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         return true;
       }
       if (!requireAllowedChain(chain)) return true;
-      const result = saveContractReview({ chain, address, targetKind, label, reviewText, exploitable });
+      const effectiveActorUsername = requestUsername || requestUserAuth.username || '';
+      const result = saveContractReview({
+        chain,
+        address,
+        targetKind,
+        label,
+        reviewText,
+        exploitable,
+        createdByUsername: effectiveActorUsername,
+      });
+      incrementUserDailyActivity(effectiveActorUsername, { reviewCount: 1 });
       invalidateDerivedReadCaches(chain);
       const status = await getPatternSyncStatus();
       sendJson(res, 200, { ok: true, hash: result.hash, persisted_only: result.persistedOnly, status });
@@ -586,18 +570,28 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       }
       if (!requireAllowedChain(chain)) return true;
       const title = typeof body.title === 'string' ? body.title.trim() : 'AI Auto Audit';
-      const provider = normalizeAiAuditProvider(typeof body.provider === 'string' ? body.provider.trim() : getDefaultAiAuditProvider());
+      const provider = getDefaultAiAuditProvider();
       const model = normalizeAiAuditModel(provider, typeof body.model === 'string' ? body.model.trim() : getDefaultAiAuditModel(provider));
       const plan = getContractAiAuditPlan(chain, contract);
       if (!plan.accepted) {
         sendJson(res, 400, { error: plan.reason || 'Contract is not eligible for AI audit' });
         return true;
       }
-      const analysis = requestContractAiAudit({ chain, contractAddr: contract, title, provider, model });
-      const account = findUserAuthAccount(requestUserAuth, requestUsername);
+      const effectiveRequestUsername = requestUsername || requestUserAuth.username || '';
+      const account = findUserAuthAccount(requestUserAuth, effectiveRequestUsername);
+      const analysis = requestContractAiAudit({
+        chain,
+        contractAddr: contract,
+        title,
+        provider,
+        model,
+        ownerUsername: effectiveRequestUsername,
+        requestOrigin: 'manual',
+      });
       enqueueContractAiAudit(analysis, {
         backendApiKey: account?.aiApiKey || null,
-        ownerUsername: requestUsername,
+        ownerUsername: effectiveRequestUsername,
+        requestOrigin: 'manual',
       });
       invalidateDerivedReadCaches(chain);
       sendJson(res, 200, { ok: true, analysis, plan });
@@ -614,13 +608,23 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       }
       if (!requireAllowedChain(chain)) return true;
       const title = typeof body.title === 'string' ? body.title.trim() : 'AI Auto Audit';
-      const provider = normalizeAiAuditProvider(typeof body.provider === 'string' ? body.provider.trim() : getDefaultAiAuditProvider());
+      const provider = getDefaultAiAuditProvider();
       const model = normalizeAiAuditModel(provider, typeof body.model === 'string' ? body.model.trim() : getDefaultAiAuditModel(provider));
-      const analysis = requestTokenAiAudit({ chain, tokenAddr: token, title, provider, model });
-      const account = findUserAuthAccount(requestUserAuth, requestUsername);
+      const effectiveRequestUsername = requestUsername || requestUserAuth.username || '';
+      const account = findUserAuthAccount(requestUserAuth, effectiveRequestUsername);
+      const analysis = requestTokenAiAudit({
+        chain,
+        tokenAddr: token,
+        title,
+        provider,
+        model,
+        ownerUsername: effectiveRequestUsername,
+        requestOrigin: 'manual',
+      });
       enqueueTokenAiAudit(analysis, {
         backendApiKey: account?.aiApiKey || null,
-        ownerUsername: requestUsername,
+        ownerUsername: effectiveRequestUsername,
+        requestOrigin: 'manual',
       });
       invalidateDerivedReadCaches(chain);
       sendJson(res, 200, { ok: true, analysis });
@@ -638,14 +642,16 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         return true;
       }
       if (!requireAllowedChain(chain)) return true;
+      const provider = getDefaultAiAuditProvider();
+      const model = normalizeAiAuditModel(provider, typeof body.model === 'string' ? body.model.trim() : getDefaultAiAuditModel(provider));
       const analysis = isContract
         ? saveContractAiAuditResult({
             chain,
             contractAddr: targetAddr,
             requestSession: typeof body.request_session === 'string' ? body.request_session : undefined,
             title: typeof body.title === 'string' ? body.title : undefined,
-            provider: typeof body.provider === 'string' ? body.provider : undefined,
-            model: typeof body.model === 'string' ? body.model : undefined,
+            provider,
+            model,
             critical: typeof body.critical === 'number' ? body.critical : null,
             high: typeof body.high === 'number' ? body.high : null,
             medium: typeof body.medium === 'number' ? body.medium : null,
@@ -658,8 +664,8 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
             tokenAddr: targetAddr,
             requestSession: typeof body.request_session === 'string' ? body.request_session : undefined,
             title: typeof body.title === 'string' ? body.title : undefined,
-            provider: typeof body.provider === 'string' ? body.provider : undefined,
-            model: typeof body.model === 'string' ? body.model : undefined,
+            provider,
+            model,
             critical: typeof body.critical === 'number' ? body.critical : null,
             high: typeof body.high === 'number' ? body.high : null,
             medium: typeof body.medium === 'number' ? body.medium : null,
@@ -695,6 +701,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       const chain = normalizeRequestedChain(url.searchParams.get('chain'), '');
       const targetKey = isContract ? 'contract' : 'token';
       const targetAddr = (url.searchParams.get(targetKey) ?? '').toLowerCase();
+      const format = String(url.searchParams.get('format') || '').trim().toLowerCase();
       if (!chain || !targetAddr) {
         sendJson(res, 400, { error: `chain and ${targetKey} are required` });
         return true;
@@ -712,6 +719,20 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         sendJson(res, 404, { error: 'AI report file could not be read' });
         return true;
       }
+      const displayReportText = extractDisplayReportText(reportPath, reportText);
+      if (format === 'json') {
+        sendJson(res, 200, {
+          title: isContract ? 'AI Analysis Report' : 'Token AI Analysis Report',
+          label: isContract ? 'Contract' : 'Token',
+          target_type: targetKey,
+          target_addr: targetAddr,
+          chain,
+          report_path: reportPath,
+          report_text: displayReportText,
+          raw_report_text: reportText,
+        });
+        return true;
+      }
       sendHtml(
         res,
         200,
@@ -721,7 +742,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
           targetAddr,
           chain,
           reportPath,
-          reportText,
+          displayReportText,
           escapeHtml,
         ),
       );
@@ -731,8 +752,27 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     if (reqPath === '/api/run' && method === 'POST') {
       const body = await readJsonBody(req);
       const chain = normalizeRequestedChain(body.chain);
+      const requestedFromBlock = parseOptionalBlockInput(body.fromBlock ?? body.from_block);
+      const requestedToBlock = parseOptionalBlockInput(body.toBlock ?? body.to_block);
+      const requestedDeltaBlocks = parseOptionalDeltaInput(body.deltaBlocks ?? body.delta_blocks);
       if (!chain || !requestKnownChains.includes(chain)) {
         sendJson(res, 400, { error: 'Invalid chain' });
+        return true;
+      }
+      if (requestedFromBlock === null || requestedToBlock === null) {
+        sendJson(res, 400, { error: 'From/To block must be a non-negative integer' });
+        return true;
+      }
+      if (requestedDeltaBlocks === null) {
+        sendJson(res, 400, { error: 'Delta blocks must be a positive integer' });
+        return true;
+      }
+      if (
+        requestedFromBlock != null
+        && requestedToBlock != null
+        && requestedToBlock <= requestedFromBlock
+      ) {
+        sendJson(res, 400, { error: 'To block must be greater than From block' });
         return true;
       }
       if (!requireAllowedChain(chain)) return true;
@@ -740,7 +780,11 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         sendJson(res, 409, { error: 'Scan already running', running_chain: state.runningChain });
         return true;
       }
-      const run = await handleRun(chain, requestUsername);
+      const run = await handleRun(chain, requestUsername, {
+        fromBlock: requestedFromBlock,
+        toBlock: requestedToBlock,
+        deltaBlocks: requestedDeltaBlocks,
+      });
       sendJson(res, 200, { ok: true, run: latestRunMeta(run) });
       return true;
     }
@@ -866,8 +910,10 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
         return true;
       }
       if (!requireAllowedChain(chain)) return true;
+      const effectiveActorUsername = requestUsername || requestUserAuth.username || '';
       const saved = saveTokenManualReview({ chain, token, reviewText, exploitable });
-      const patternPrep = prepareTokenPatternReview({ chain, token });
+      incrementUserDailyActivity(effectiveActorUsername, { reviewCount: 1 });
+      const patternPrep = prepareTokenPatternReview({ chain, token, createdByUsername: effectiveActorUsername });
       invalidateDerivedReadCaches(chain);
       sendJson(res, 200, { ok: true, token: saved, pattern: patternPrep });
       broadcastNamedEvent('review-updated', {
@@ -955,7 +1001,7 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
           chain_configs: [],
           ai_providers: [],
           ai_models: [],
-          whitelist_patterns: [],
+          whitelist_patterns: payload.whitelist_patterns || [],
         });
         return true;
       }
@@ -964,12 +1010,23 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
     }
 
     if (reqPath === '/api/settings' && method === 'POST') {
-      if (!requireAdmin()) return true;
       const body = await readJsonBody(req);
+      const section = String(body.section || 'full').trim().toLowerCase();
+      const allowSharedWhitelistEdit = !requestIsAdmin && section === 'whitelist';
+      if (!requestIsAdmin && !allowSharedWhitelistEdit) {
+        if (!requireAdmin()) return true;
+      }
       const runtime = (typeof body.runtime_settings === 'object' && body.runtime_settings) ? body.runtime_settings as Record<string, unknown> : {};
       const patternSync = (typeof runtime.pattern_sync === 'object' && runtime.pattern_sync) ? runtime.pattern_sync as Record<string, unknown> : {};
       const aiAuditBackend = (typeof runtime.ai_audit_backend === 'object' && runtime.ai_audit_backend) ? runtime.ai_audit_backend as Record<string, unknown> : {};
       const access = (typeof runtime.access === 'object' && runtime.access) ? runtime.access as Record<string, unknown> : {};
+      const isFullSave = !section || section === 'full';
+      const saveKeys = isFullSave || section === 'keys';
+      const saveAccess = isFullSave || section === 'access';
+      const savePatternSync = isFullSave || section === 'pattern-sync';
+      const saveChains = isFullSave || section === 'chains';
+      const saveWhitelist = isFullSave || section === 'whitelist';
+      const saveAi = isFullSave || section === 'ai';
 
       const chainConfigs = Array.isArray(body.chain_configs) ? body.chain_configs as Array<Record<string, unknown>> : [];
       const aiProviders = Array.isArray(body.ai_providers) ? body.ai_providers as Array<Record<string, unknown>> : [];
@@ -1015,17 +1072,19 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
       const httpsEnabled = coerceBoolean(access.https_enabled, false);
       const tlsCertPath = String(access.tls_cert_path || '').trim();
       const tlsKeyPath = String(access.tls_key_path || '').trim();
-      if (httpsEnabled && (!tlsCertPath || !tlsKeyPath)) {
-        sendJson(res, 400, { error: 'TLS cert path and key path are required when HTTPS is enabled' });
-        return true;
-      }
-      if (httpsEnabled) {
-        try {
-          await readFile(resolveProjectPath(tlsCertPath));
-          await readFile(resolveProjectPath(tlsKeyPath));
-        } catch (err) {
-          sendJson(res, 400, { error: `TLS files could not be read: ${(err as Error).message}` });
+      if (saveAccess) {
+        if (httpsEnabled && (!tlsCertPath || !tlsKeyPath)) {
+          sendJson(res, 400, { error: 'TLS cert path and key path are required when HTTPS is enabled' });
           return true;
+        }
+        if (httpsEnabled) {
+          try {
+            await readFile(resolveProjectPath(tlsCertPath));
+            await readFile(resolveProjectPath(tlsKeyPath));
+          } catch (err) {
+            sendJson(res, 400, { error: `TLS files could not be read: ${(err as Error).message}` });
+            return true;
+          }
         }
       }
 
@@ -1040,6 +1099,9 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
             chainId: coercePositiveInt(row.chain_id ?? row.chainId, 0),
             tablePrefix: String((row.table_prefix ?? row.tablePrefix) || '').trim(),
             blocksPerScan: coercePositiveInt(row.blocks_per_scan ?? row.blocksPerScan, 75),
+            pipelineSource: (String((row.pipeline_source ?? row.pipelineSource) || '').trim().toLowerCase() === 'rpc'
+              ? 'rpc'
+              : 'chainbase') as 'chainbase' | 'rpc',
             chainbaseKeys: coerceStringArray(row.chainbase_keys ?? row.chainbaseKeys),
             rpcNetwork: String((row.rpc_network ?? row.rpcNetwork) || '').trim(),
             rpcUrls: [],
@@ -1070,72 +1132,106 @@ export function createApiRouteHandler(deps: ApiRouteHandlerDeps) {
           };
         })
         .filter((row) => row.chain);
-      const nextKnownChains = normalizedChainRows.map((row) => row.chain);
+      const nextKnownChains = saveChains
+        ? normalizedChainRows.map((row) => row.chain)
+        : getAvailableChains();
 
-      if (!normalizedChainRows.length) {
+      if (saveChains && !normalizedChainRows.length) {
         sendJson(res, 400, { error: 'At least one chain config is required' });
         return true;
       }
-      const duplicateChains = nextKnownChains.filter((chain, index) => nextKnownChains.indexOf(chain) !== index);
-      if (duplicateChains.length) {
-        sendJson(res, 400, { error: `Duplicate chain config: ${duplicateChains[0]}` });
-        return true;
+      if (saveChains) {
+        const duplicateChains = nextKnownChains.filter((chain, index) => nextKnownChains.indexOf(chain) !== index);
+        if (duplicateChains.length) {
+          sendJson(res, 400, { error: `Duplicate chain config: ${duplicateChains[0]}` });
+          return true;
+        }
+        for (const row of normalizedChainRows) {
+          if (!/^[a-z0-9_-]+$/.test(row.chain)) {
+            sendJson(res, 400, { error: `Invalid chain key: ${row.chain}` });
+            return true;
+          }
+          if (row.pipelineSource !== 'chainbase' && row.pipelineSource !== 'rpc') {
+            sendJson(res, 400, { error: `Invalid pipeline source for ${row.chain}` });
+            return true;
+          }
+          if (!row.name || !row.tablePrefix || !row.chainId || !row.nativeCurrencyName || !row.nativeCurrencySymbol) {
+            sendJson(res, 400, { error: `Incomplete chain config for ${row.chain}` });
+            return true;
+          }
+          if (!row.rpcNetwork) {
+            sendJson(res, 400, { error: `Chain ${row.chain} needs an Infura RPC network value` });
+            return true;
+          }
+          if (row.wrappedNativeTokenAddress && !/^0x[a-f0-9]{40}$/i.test(row.wrappedNativeTokenAddress)) {
+            sendJson(res, 400, { error: `Chain ${row.chain} has an invalid wrapped native token address` });
+            return true;
+          }
+        }
       }
-      for (const row of normalizedChainRows) {
-        if (!/^[a-z0-9_-]+$/.test(row.chain)) {
-          sendJson(res, 400, { error: `Invalid chain key: ${row.chain}` });
-          return true;
-        }
-        if (!row.name || !row.tablePrefix || !row.chainId || !row.nativeCurrencyName || !row.nativeCurrencySymbol) {
-          sendJson(res, 400, { error: `Incomplete chain config for ${row.chain}` });
-          return true;
-        }
-        if (!row.rpcNetwork) {
-          sendJson(res, 400, { error: `Chain ${row.chain} needs an Infura RPC network value` });
-          return true;
-        }
-        if (row.wrappedNativeTokenAddress && !/^0x[a-f0-9]{40}$/i.test(row.wrappedNativeTokenAddress)) {
-          sendJson(res, 400, { error: `Chain ${row.chain} has an invalid wrapped native token address` });
-          return true;
-        }
+
+      const appSettingsUpdates: Array<{ key: string; value: string }> = [];
+      if (saveKeys) {
+        appSettingsUpdates.push(
+          { key: 'chainbase_keys', value: JSON.stringify(coerceStringArray(runtime.chainbase_keys)) },
+          { key: 'rpc_keys', value: JSON.stringify(coerceStringArray(runtime.rpc_keys)) },
+        );
+      }
+      if (saveAccess) {
+        appSettingsUpdates.push(
+          { key: 'auth_enabled', value: coerceBoolean(access.auth_enabled, true) ? '1' : '0' },
+          { key: 'web_security.https_enabled', value: httpsEnabled ? '1' : '0' },
+          { key: 'web_security.tls_cert_path', value: tlsCertPath },
+          { key: 'web_security.tls_key_path', value: tlsKeyPath },
+        );
+      }
+      if (savePatternSync) {
+        appSettingsUpdates.push(
+          { key: 'pattern_sync.host', value: String(patternSync.host || '').trim() },
+          { key: 'pattern_sync.port', value: String(coercePositiveInt(patternSync.port, 5432)) },
+          { key: 'pattern_sync.database', value: String(patternSync.database || '').trim() },
+          { key: 'pattern_sync.user', value: String(patternSync.user || '').trim() },
+          { key: 'pattern_sync.password', value: String(patternSync.password || '').trim() },
+          { key: 'pattern_sync.remote_name', value: String(patternSync.remote_name || 'default').trim() || 'default' },
+          { key: 'pattern_sync.auto_pull', value: coerceBoolean(patternSync.auto_pull, true) ? '1' : '0' },
+          { key: 'pattern_sync.ssl', value: coerceBoolean(patternSync.ssl, false) ? '1' : '0' },
+        );
+      }
+      if (saveAi) {
+        appSettingsUpdates.push(
+          { key: 'ai_audit_backend.base_url', value: String(aiAuditBackend.base_url || 'https://127.0.0.1:5000').trim() },
+          { key: 'ai_audit_backend.etherscan_api_key', value: String(aiAuditBackend.etherscan_api_key || '').trim() },
+          { key: 'ai_audit_backend.poll_interval_ms', value: String(coercePositiveInt(aiAuditBackend.poll_interval_ms, 10_000)) },
+          { key: 'ai_audit_backend.dedaub_wait_seconds', value: String(coercePositiveInt(aiAuditBackend.dedaub_wait_seconds, 15)) },
+          { key: 'ai_audit_backend.insecure_tls', value: coerceBoolean(aiAuditBackend.insecure_tls, true) ? '1' : '0' },
+        );
+      }
+      if (appSettingsUpdates.length) {
+        setManyAppSettings(appSettingsUpdates);
       }
 
-      setManyAppSettings([
-        { key: 'chainbase_keys', value: JSON.stringify(coerceStringArray(runtime.chainbase_keys)) },
-        { key: 'rpc_keys', value: JSON.stringify(coerceStringArray(runtime.rpc_keys)) },
-        { key: 'monitor_chains', value: JSON.stringify(coerceStringArray(runtime.monitored_chains).filter((chain) => nextKnownChains.includes(chain))) },
-        { key: 'poll_interval_ms', value: String(coercePositiveInt(runtime.poll_interval_ms, 600_000)) },
-        { key: 'debug', value: coerceBoolean(runtime.debug, false) ? '1' : '0' },
-        { key: 'pattern_sync.host', value: String(patternSync.host || '').trim() },
-        { key: 'pattern_sync.port', value: String(coercePositiveInt(patternSync.port, 5432)) },
-        { key: 'pattern_sync.database', value: String(patternSync.database || '').trim() },
-        { key: 'pattern_sync.user', value: String(patternSync.user || '').trim() },
-        { key: 'pattern_sync.password', value: String(patternSync.password || '').trim() },
-        { key: 'pattern_sync.remote_name', value: String(patternSync.remote_name || 'default').trim() || 'default' },
-        { key: 'pattern_sync.auto_pull', value: coerceBoolean(patternSync.auto_pull, true) ? '1' : '0' },
-        { key: 'pattern_sync.ssl', value: coerceBoolean(patternSync.ssl, false) ? '1' : '0' },
-        { key: 'ai_audit_backend.base_url', value: String(aiAuditBackend.base_url || 'https://127.0.0.1:5000').trim() },
-        { key: 'ai_audit_backend.api_key', value: String(aiAuditBackend.api_key || '').trim() },
-        { key: 'ai_audit_backend.etherscan_api_key', value: String(aiAuditBackend.etherscan_api_key || '').trim() },
-        { key: 'ai_audit_backend.poll_interval_ms', value: String(coercePositiveInt(aiAuditBackend.poll_interval_ms, 10_000)) },
-        { key: 'ai_audit_backend.dedaub_wait_seconds', value: String(coercePositiveInt(aiAuditBackend.dedaub_wait_seconds, 15)) },
-        { key: 'ai_audit_backend.insecure_tls', value: coerceBoolean(aiAuditBackend.insecure_tls, true) ? '1' : '0' },
-        { key: 'web_security.https_enabled', value: httpsEnabled ? '1' : '0' },
-        { key: 'web_security.tls_cert_path', value: tlsCertPath },
-        { key: 'web_security.tls_key_path', value: tlsKeyPath },
-      ]);
-
-      replaceChainSettings(normalizedChainRows);
-
-      replaceAiAuditProviders(providerRows);
-      replaceAiAuditModels(modelRows);
-      replaceWhitelistPatterns(whitelistPatterns.map((row, index) => ({
-        name: String(row.name || '').trim(),
-        hexPattern: String((row.hex_pattern ?? row.hexPattern) || '').trim(),
-        patternType: String((row.pattern_type ?? row.patternType) || 'selector').trim().toLowerCase() || 'selector',
-        score: Number.isFinite(Number(row.score)) ? Number(row.score) : (index + 1),
-        description: String(row.description || '').trim(),
-      })));
+      if (saveChains) {
+        replaceChainSettings(normalizedChainRows);
+      }
+      if (saveAi) {
+        replaceAiAuditProviders(providerRows);
+        replaceAiAuditModels(modelRows);
+      }
+      if (saveWhitelist) {
+        const insertedCount = replaceWhitelistPatterns(whitelistPatterns.map((row) => ({
+          id: Number.isFinite(Number(row.id)) ? Number(row.id) : undefined,
+          name: String(row.name || '').trim(),
+          hexPattern: String((row.hex_pattern ?? row.hexPattern) || '').trim(),
+          patternType: String((row.pattern_type ?? row.patternType) || 'selector').trim().toLowerCase() || 'selector',
+          description: String(row.description || '').trim(),
+          createdByUsername: String((row.created_by_username ?? row.createdByUsername) || '').trim().toLowerCase(),
+        })), requestUsername || requestUserAuth.username || '');
+        if (insertedCount > 0) {
+          incrementUserDailyActivity(requestUsername || requestUserAuth.username || '', {
+            syncPatternCount: insertedCount,
+          });
+        }
+      }
       reloadRuntimeConfig();
       await broadcastStateSnapshot();
 

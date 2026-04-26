@@ -5,16 +5,16 @@ import { logger } from '../utils/logger.js';
 // ── Types ─────────────────────────────────────────────────────────────────────
 export interface TransferRow {
   transaction_hash: string;
-  from_address:     string;
-  to_address:       string;
+  from_address:     string | null;
+  to_address:       string | null;
   contract_address: string;
   value:            string | null;
 }
 
 export interface TraceRow {
   transaction_hash: string;
-  from_address:     string;
-  to_address:       string;
+  from_address:     string | null;
+  to_address:       string | null;
   value:            string;
 }
 

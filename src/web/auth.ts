@@ -115,6 +115,16 @@ export function revokeAuthenticatedSession(token: string | null | undefined): vo
   sessions.delete(String(token));
 }
 
+export function revokeAuthenticatedSessionsForUsername(username: string): void {
+  const normalized = String(username || '').trim().toLowerCase();
+  if (!normalized) return;
+  for (const [token, session] of sessions.entries()) {
+    if (String(session.username || '').trim().toLowerCase() === normalized) {
+      sessions.delete(token);
+    }
+  }
+}
+
 export function setSessionCookie(res: ServerResponse, token: string, secure: boolean): void {
   const cookie = [
     `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,

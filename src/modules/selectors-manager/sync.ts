@@ -21,6 +21,7 @@ interface RemotePatternRow {
   label: string;
   selectors: string[];
   bytecode_size: number;
+  created_by_username: string;
   created_at: string;
 }
 
@@ -100,9 +101,11 @@ async function withRemoteClient<T>(fn: (client: Client) => Promise<T>): Promise<
         label TEXT NOT NULL,
         selectors TEXT[] NOT NULL,
         bytecode_size INTEGER NOT NULL,
+        created_by_username TEXT NOT NULL DEFAULT '',
         created_at TIMESTAMP NOT NULL DEFAULT now()
       );
     `);
+    await client.query(`ALTER TABLE patterns ADD COLUMN IF NOT EXISTS created_by_username TEXT NOT NULL DEFAULT '';`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_patterns_hash ON patterns (hash);`);
     return await fn(client);
   } finally {
@@ -110,7 +113,7 @@ async function withRemoteClient<T>(fn: (client: Client) => Promise<T>): Promise<
   }
 }
 
-export function queueSeenPattern(label: string, selectors: string[], bytecodeSize = 0): string {
+export function queueSeenPattern(label: string, selectors: string[], bytecodeSize = 0, createdByUsername = ''): string {
   const normalized = normalizeSelectors(selectors);
   const hash = selectorHash(normalized);
   upsertSeenContractReview({
@@ -124,11 +127,12 @@ export function queueSeenPattern(label: string, selectors: string[], bytecodeSiz
     exploitable: false,
     selectors: normalized,
     bytecodeSize,
+    createdByUsername,
   });
   return hash;
 }
 
-export function queueSeenContractReviewTarget(chain: string, address: string, label: string, targetKind = 'auto'): string {
+export function queueSeenContractReviewTarget(chain: string, address: string, label: string, targetKind = 'auto', createdByUsername = ''): string {
   const entry = findReviewTarget(chain, address, targetKind);
   if (!entry) {
     throw new Error(`Contract ${address} (${targetKind}) not found in selectors registry`);
@@ -146,6 +150,7 @@ export function queueSeenContractReviewTarget(chain: string, address: string, la
     exploitable: false,
     selectors: normalized,
     bytecodeSize: entry.bytecodeSize ?? 0,
+    createdByUsername,
   });
   return hash;
 }
@@ -157,6 +162,7 @@ export function saveSeenContractReview(input: {
   reviewText?: string;
   exploitable?: boolean;
   targetKind?: string;
+  createdByUsername?: string;
 }): string {
   const entry = findReviewTarget(input.chain, input.address, input.targetKind ?? 'auto');
   if (!entry) {
@@ -176,6 +182,7 @@ export function saveSeenContractReview(input: {
     exploitable: input.exploitable ?? false,
     selectors: normalized,
     bytecodeSize: entry.bytecodeSize ?? 0,
+    createdByUsername: input.createdByUsername ?? '',
   });
   return hash;
 }
@@ -187,6 +194,7 @@ export function saveContractReview(input: {
   reviewText?: string;
   exploitable?: boolean;
   targetKind?: string;
+  createdByUsername?: string;
 }): { hash: string | null; persistedOnly: boolean } {
   const targetAddress = String(input.address || '').trim().toLowerCase();
   const chain = String(input.chain || '').trim().toLowerCase();
@@ -204,6 +212,7 @@ export function saveContractReview(input: {
       reviewText,
       exploitable,
       targetKind,
+      createdByUsername: input.createdByUsername ?? '',
     });
     return { hash, persistedOnly: false };
   }
@@ -239,6 +248,7 @@ export function prepareTokenPatternReview(input: {
   chain: string;
   token: string;
   label?: string;
+  createdByUsername?: string;
 }): { prepared: boolean; reason?: string; hash: string | null } {
   const chain = String(input.chain || '').trim().toLowerCase();
   const token = String(input.token || '').trim().toLowerCase();
@@ -272,6 +282,7 @@ export function prepareTokenPatternReview(input: {
     selectors: registry.selectors,
     label,
     bytecodeSize: registry.codeSize,
+    preparedByUsername: input.createdByUsername ?? '',
     status: 'prepared',
     lastError: null,
   }]);
@@ -284,14 +295,14 @@ export async function pullPatterns(): Promise<{ pulled: number; lastPullAt: stri
   const rows = await withRemoteClient(async (client) => {
     const result = state.lastPullAt
       ? await client.query<RemotePatternRow>(
-          `SELECT hash, label, selectors, bytecode_size, created_at
+          `SELECT hash, label, selectors, bytecode_size, created_by_username, created_at
            FROM patterns
            WHERE created_at > $1
            ORDER BY created_at ASC`,
           [state.lastPullAt],
         )
       : await client.query<RemotePatternRow>(
-          `SELECT hash, label, selectors, bytecode_size, created_at
+          `SELECT hash, label, selectors, bytecode_size, created_by_username, created_at
            FROM patterns
            ORDER BY created_at ASC`,
         );
@@ -301,7 +312,7 @@ export async function pullPatterns(): Promise<{ pulled: number; lastPullAt: stri
   let highest = state.lastPullAt;
   for (const row of rows) {
     const selectors = normalizeSelectors(row.selectors ?? []);
-    saveSeenSelectorPattern(selectors, row.label ?? '', row.bytecode_size ?? 0);
+    saveSeenSelectorPattern(selectors, row.label ?? '', row.bytecode_size ?? 0, row.created_by_username ?? '');
     const createdAt = row.created_at ? new Date(row.created_at).toISOString() : null;
     if (createdAt && (!highest || createdAt > highest)) highest = createdAt;
   }
@@ -335,14 +346,19 @@ async function pushPatternsByStatuses(statuses: string[]): Promise<{ pushed: num
     for (const item of queue) {
       try {
         await client.query(
-          `INSERT INTO patterns (hash, label, selectors, bytecode_size)
-           VALUES ($1, $2, $3, $4)
+          `INSERT INTO patterns (hash, label, selectors, bytecode_size, created_by_username)
+           VALUES ($1, $2, $3, $4, $5)
            ON CONFLICT (hash) DO UPDATE SET
              label = EXCLUDED.label,
              selectors = EXCLUDED.selectors,
-             bytecode_size = EXCLUDED.bytecode_size`,
-          [item.hash, item.label, item.selectors, item.bytecodeSize],
+             bytecode_size = EXCLUDED.bytecode_size,
+             created_by_username = CASE
+               WHEN patterns.created_by_username = '' THEN EXCLUDED.created_by_username
+               ELSE patterns.created_by_username
+             END`,
+          [item.hash, item.label, item.selectors, item.bytecodeSize, item.createdByUsername || ''],
         );
+        saveSeenSelectorPattern(item.selectors, item.label, item.bytecodeSize, item.createdByUsername || '');
         markSeenContractPushResult(item.hash, 'synced', null);
         pushed += 1;
       } catch (err) {
@@ -364,14 +380,14 @@ export async function verifyPatterns(): Promise<{ checked: number; mismatches: A
   const rows = await withRemoteClient(async (client) => {
     const result = state.lastVerifyAt
       ? await client.query<RemotePatternRow>(
-          `SELECT hash, label, selectors, bytecode_size, created_at
+          `SELECT hash, label, selectors, bytecode_size, created_by_username, created_at
            FROM patterns
            WHERE created_at > $1
            ORDER BY created_at ASC`,
           [state.lastVerifyAt],
         )
       : await client.query<RemotePatternRow>(
-          `SELECT hash, label, selectors, bytecode_size, created_at
+          `SELECT hash, label, selectors, bytecode_size, created_by_username, created_at
            FROM patterns
            ORDER BY created_at ASC`,
         );

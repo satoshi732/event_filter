@@ -60,7 +60,6 @@ export interface AppConfig {
   };
   ai_audit_backend?: {
     base_url?: string;
-    api_key?: string;
     etherscan_api_key?: string;
     poll_interval_ms?: number;
     dedaub_wait_seconds?: number;
@@ -108,6 +107,7 @@ export interface ChainConfig {
   chainId: number;
   tablePrefix: string;
   blocksPerScan: number;
+  pipelineSource: 'chainbase' | 'rpc';
   chainbaseKeys: string[];
   rpcNetwork: string;
   rpcUrls: string[];
@@ -170,13 +170,13 @@ interface LegacyKeysFile {
 }
 
 const BASE_CHAIN_CONFIGS: Record<string, Omit<ChainConfig, 'blocksPerScan' | 'chainbaseKeys' | 'rpcNetwork' | 'rpcUrls' | 'multicall3Address'>> = {
-  ethereum:  { name: 'Ethereum',  chainId: 1,     tablePrefix: 'ethereum',  wrappedNativeTokenAddress: '0xc02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
-  bsc:       { name: 'BSC',       chainId: 56,    tablePrefix: 'bsc',       wrappedNativeTokenAddress: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c', nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 } },
-  polygon:   { name: 'Polygon',   chainId: 137,   tablePrefix: 'polygon',   wrappedNativeTokenAddress: '0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270', nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 } },
-  arbitrum:  { name: 'Arbitrum',  chainId: 42161, tablePrefix: 'arbitrum',  wrappedNativeTokenAddress: '0x82af49447d8a07e3bd95bd0d56f35241523fbab1', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
-  optimism:  { name: 'Optimism',  chainId: 10,    tablePrefix: 'op',        wrappedNativeTokenAddress: '0x4200000000000000000000000000000000000006', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
-  base:      { name: 'Base',      chainId: 8453,  tablePrefix: 'base',      wrappedNativeTokenAddress: '0x4200000000000000000000000000000000000006', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
-  avalanche: { name: 'Avalanche', chainId: 43114, tablePrefix: 'avalanche', wrappedNativeTokenAddress: '0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7', nativeCurrency: { name: 'Avalanche', symbol: 'AVAX', decimals: 18 } },
+  ethereum:  { name: 'Ethereum',  chainId: 1,     tablePrefix: 'ethereum',  pipelineSource: 'chainbase', wrappedNativeTokenAddress: '0xc02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
+  bsc:       { name: 'BSC',       chainId: 56,    tablePrefix: 'bsc',       pipelineSource: 'chainbase', wrappedNativeTokenAddress: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c', nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 } },
+  polygon:   { name: 'Polygon',   chainId: 137,   tablePrefix: 'polygon',   pipelineSource: 'chainbase', wrappedNativeTokenAddress: '0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270', nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 } },
+  arbitrum:  { name: 'Arbitrum',  chainId: 42161, tablePrefix: 'arbitrum',  pipelineSource: 'chainbase', wrappedNativeTokenAddress: '0x82af49447d8a07e3bd95bd0d56f35241523fbab1', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
+  optimism:  { name: 'Optimism',  chainId: 10,    tablePrefix: 'op',        pipelineSource: 'chainbase', wrappedNativeTokenAddress: '0x4200000000000000000000000000000000000006', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
+  base:      { name: 'Base',      chainId: 8453,  tablePrefix: 'base',      pipelineSource: 'chainbase', wrappedNativeTokenAddress: '0x4200000000000000000000000000000000000006', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 } },
+  avalanche: { name: 'Avalanche', chainId: 43114, tablePrefix: 'avalanche', pipelineSource: 'chainbase', wrappedNativeTokenAddress: '0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7', nativeCurrency: { name: 'Avalanche', symbol: 'AVAX', decimals: 18 } },
 };
 
 const DEFAULT_BLOCKS_PER_SCAN: Record<string, number> = {
@@ -528,6 +528,7 @@ function seedRuntimeConfigIfNeeded(): void {
         chainId: base.chainId,
         tablePrefix: base.tablePrefix,
         blocksPerScan: DEFAULT_BLOCKS_PER_SCAN[chain] ?? 75,
+        pipelineSource: base.pipelineSource,
         chainbaseKeys: [],
         rpcNetwork: INFURA_NETWORK_BY_CHAIN[chain] ?? '',
         rpcUrls: [],
@@ -595,7 +596,6 @@ function seedRuntimeConfigIfNeeded(): void {
   }
   if (getAppSetting('ai_audit_backend.base_url') == null) {
     appEntries.push({ key: 'ai_audit_backend.base_url', value: 'https://127.0.0.1:5000' });
-    appEntries.push({ key: 'ai_audit_backend.api_key', value: '' });
     appEntries.push({ key: 'ai_audit_backend.etherscan_api_key', value: '' });
     appEntries.push({ key: 'ai_audit_backend.poll_interval_ms', value: '10000' });
     appEntries.push({ key: 'ai_audit_backend.dedaub_wait_seconds', value: '15' });
@@ -681,6 +681,7 @@ function buildChainConfigs(rows: ChainSettingRow[]): Record<string, ChainConfig>
       chainId: parsePositiveInt(row?.chainId, base?.chainId ?? 0),
       tablePrefix: String(row?.tablePrefix || base?.tablePrefix || chain).trim(),
       blocksPerScan: parsePositiveInt(row?.blocksPerScan, DEFAULT_BLOCKS_PER_SCAN[chain] ?? 75),
+      pipelineSource: row?.pipelineSource === 'rpc' ? 'rpc' : (base?.pipelineSource ?? 'chainbase'),
       chainbaseKeys: configuredChainbaseKeys.length ? configuredChainbaseKeys : sharedChainbaseKeys,
       rpcNetwork,
       rpcUrls: buildInfuraRpcUrls(rpcNetwork, sharedRpcKeys),
@@ -747,7 +748,6 @@ function loadRuntimeConfigFromDb(): RuntimeConfigCache {
     },
     ai_audit_backend: {
       base_url: String(getAppSetting('ai_audit_backend.base_url') || 'https://127.0.0.1:5000'),
-      api_key: String(getAppSetting('ai_audit_backend.api_key') || ''),
       etherscan_api_key: String(getAppSetting('ai_audit_backend.etherscan_api_key') || ''),
       poll_interval_ms: parsePositiveInt(getAppSetting('ai_audit_backend.poll_interval_ms'), 10_000),
       dedaub_wait_seconds: parsePositiveInt(getAppSetting('ai_audit_backend.dedaub_wait_seconds'), 15),
@@ -921,7 +921,7 @@ export function getAiAuditBackendConfig(): {
   const raw = ensureRuntimeCache().appConfig.ai_audit_backend ?? {};
   return {
     baseUrl: String(raw.base_url || 'https://127.0.0.1:5000').trim().replace(/\/+$/, ''),
-    apiKey: String(raw.api_key || '').trim(),
+    apiKey: '',
     etherscanApiKey: String(raw.etherscan_api_key || '').trim(),
     pollIntervalMs: parsePositiveInt(raw.poll_interval_ms, 10_000),
     dedaubWaitSeconds: parsePositiveInt(raw.dedaub_wait_seconds, 15),

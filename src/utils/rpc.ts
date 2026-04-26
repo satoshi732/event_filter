@@ -14,13 +14,29 @@ const AGGREGATE3_SELECTOR = '82ad56cb';
 const PANCAKESWAP_PRICE_API_BASE = 'https://wallet-api.pancakeswap.com/v1/prices/list';
 const ONEINCH_AUTH_TOKEN_URL = 'https://proxy-app.1inch.io/v2.0/auth/token?ngsw-bypass';
 const ONEINCH_TOKENS_MARKET_API_BASE = 'https://proxy-app.1inch.io/v2.0/bff/v1.0/tokens-market';
+const GECKOTERMINAL_API_BASE = 'https://api.geckoterminal.com/api/v2';
 const PANCAKESWAP_NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
+const TRANSFER_TOPIC_0 = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 const PANCAKESWAP_PRICE_BATCH_SIZE = 50;
 const ONEINCH_PRICE_BATCH_SIZE = 30;
 const PANCAKESWAP_SUPPORTED_CHAIN_IDS = new Set([56]);
 const ONEINCH_REFRESH_BUFFER_MS = 120_000;
+const GECKOTERMINAL_MIN_REQUEST_INTERVAL_MS = 1_000;
 let pancakeLimiterLock: Promise<void> = Promise.resolve();
 const pancakePriceRequestTimestamps: number[] = [];
+let geckoTerminalLimiterLock: Promise<void> = Promise.resolve();
+let geckoTerminalLastRequestAt = 0;
+
+const GECKOTERMINAL_NETWORK_BY_CHAIN: Record<string, string> = {
+  ethereum: 'eth',
+  bsc: 'bsc',
+  polygon: 'polygon_pos',
+  avalanche: 'avax',
+  arbitrum: 'arbitrum',
+  optimism: 'optimism',
+  base: 'base',
+  pulsechain: 'pulsechain',
+};
 
 interface OneInchAuthResponse {
   access_token: string;
@@ -30,6 +46,14 @@ interface OneInchAuthResponse {
 interface OneInchTokenCache {
   token: string;
   expiresAt: number;
+}
+
+interface RpcTransferLog {
+  removed?: boolean;
+  address?: unknown;
+  transactionHash?: unknown;
+  topics?: unknown[];
+  data?: unknown;
 }
 
 function errorMessage(err: unknown): string {
@@ -64,6 +88,11 @@ function strip0x(value: string): string {
   return value.startsWith('0x') || value.startsWith('0X') ? value.slice(2) : value;
 }
 
+function toHexBlock(value: number): string {
+  if (!Number.isInteger(value) || value < 0) throw new Error(`Invalid block number: ${value}`);
+  return `0x${value.toString(16)}`;
+}
+
 function pad32(hex: string): string {
   return strip0x(hex).padStart(64, '0');
 }
@@ -77,6 +106,55 @@ function decodeUint256(hex: string): bigint {
   if (!raw) return 0n;
   const word = raw.length > 64 ? raw.slice(0, 64) : raw;
   return BigInt(`0x${word}`);
+}
+
+function normalizeAddress(value: unknown): string | null {
+  const address = String(value ?? '').trim().toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(address)) return null;
+  return address;
+}
+
+function topicToAddress(value: unknown): string | null {
+  const raw = String(value ?? '').trim().toLowerCase();
+  if (!/^0x[a-f0-9]{64}$/.test(raw)) return null;
+  return normalizeAddress(`0x${raw.slice(26)}`);
+}
+
+function isRangeOverflowError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return lower.includes('more than 10000 results')
+    || lower.includes('too many results')
+    || lower.includes('query returned more than')
+    || lower.includes('result set is too large');
+}
+
+function extractSuggestedOverflowRange(message: string): { fromBlock: number; toBlock: number } | null {
+  const match = message.match(/try with this block range\s*\[\s*(0x[0-9a-f]+)\s*,\s*(0x[0-9a-f]+)\s*\]/i);
+  if (!match) return null;
+  const fromBlock = Number.parseInt(match[1], 16);
+  const endInclusive = Number.parseInt(match[2], 16);
+  if (!Number.isInteger(fromBlock) || !Number.isInteger(endInclusive) || endInclusive < fromBlock) return null;
+  return {
+    fromBlock,
+    toBlock: endInclusive,
+  };
+}
+
+function decodeTransferLogValue(item: RpcTransferLog): string {
+  const rawData = String(item.data ?? '').trim().toLowerCase();
+  const topics = Array.isArray(item.topics) ? item.topics : [];
+  try {
+    if (/^0x[0-9a-f]{64,}$/i.test(rawData)) {
+      return decodeUint256(rawData).toString();
+    }
+    const topic3 = String(topics[3] ?? '').trim().toLowerCase();
+    if (/^0x[0-9a-f]{64}$/i.test(topic3)) {
+      return BigInt(topic3).toString();
+    }
+  } catch {
+    // Ignore malformed log payloads and fall back to zero.
+  }
+  return '0';
 }
 
 function encodeUint256(value: bigint | number): string {
@@ -289,6 +367,112 @@ export async function getContractBytecode(chain: string, address: string): Promi
   return String(result || '').trim().toLowerCase();
 }
 
+export async function getStorageAt(chain: string, address: string, slot: string): Promise<string> {
+  const result = await rpcCall<string>(chain, 'eth_getStorageAt', [
+    address.toLowerCase(),
+    slot,
+    'latest',
+  ]);
+  return String(result || '').trim().toLowerCase();
+}
+
+export async function callContractData(chain: string, to: string, data: string): Promise<string> {
+  const result = await rpcCall<string>(chain, 'eth_call', [
+    { to: to.toLowerCase(), data },
+    'latest',
+  ]);
+  return String(result || '').trim().toLowerCase();
+}
+
+export async function getLatestBlockNumber(chain: string): Promise<number> {
+  const raw = await rpcCall<string>(chain, 'eth_blockNumber', []);
+  const normalized = String(raw || '').trim().toLowerCase();
+  if (!/^0x[0-9a-f]+$/.test(normalized)) return 0;
+  return Number.parseInt(normalized.slice(2), 16);
+}
+
+async function fetchTransferLogsRange(
+  chain: string,
+  fromBlock: number,
+  toBlock: number,
+): Promise<RpcTransferLog[]> {
+  if (toBlock < fromBlock) return [];
+  try {
+    const logs = await rpcCall<RpcTransferLog[]>(chain, 'eth_getLogs', [{
+      fromBlock: toHexBlock(fromBlock),
+      toBlock: toHexBlock(toBlock),
+      topics: [TRANSFER_TOPIC_0],
+    }]);
+    return Array.isArray(logs) ? logs : [];
+  } catch (err) {
+    const message = errorMessage(err);
+    if (!isRangeOverflowError(message) || fromBlock >= toBlock) throw err;
+
+    const suggested = extractSuggestedOverflowRange(message);
+    const splitRanges = suggested
+      && suggested.fromBlock >= fromBlock
+      && suggested.toBlock <= toBlock
+      && suggested.fromBlock <= suggested.toBlock
+      && (suggested.fromBlock > fromBlock || suggested.toBlock < toBlock)
+      ? [
+          { fromBlock, toBlock: suggested.fromBlock - 1 },
+          { fromBlock: suggested.fromBlock, toBlock: suggested.toBlock },
+          { fromBlock: suggested.toBlock + 1, toBlock },
+        ].filter((entry) => entry.toBlock >= entry.fromBlock)
+      : (() => {
+          const midpoint = fromBlock + Math.floor((toBlock - fromBlock) / 2);
+          return [
+            { fromBlock, toBlock: midpoint },
+            { fromBlock: midpoint + 1, toBlock },
+          ].filter((entry) => entry.toBlock >= entry.fromBlock);
+        })();
+
+    logger.warn(`[${chain}] eth_getLogs overflow for ${fromBlock}-${toBlock}; splitting into ${splitRanges.map((entry) => `${entry.fromBlock}-${entry.toBlock}`).join(', ')}`);
+    const nested = await Promise.all(splitRanges.map((entry) =>
+      fetchTransferLogsRange(chain, entry.fromBlock, entry.toBlock),
+    ));
+    return nested.flat();
+  }
+}
+
+export async function getTransferLogs(chain: string, fromBlockExclusive: number, toBlockInclusive: number): Promise<Array<{
+  transaction_hash: string;
+  from_address: string | null;
+  to_address: string | null;
+  contract_address: string;
+  value: string | null;
+}>> {
+  const startBlock = Math.max(0, Math.floor(fromBlockExclusive) + 1);
+  const endBlock = Math.max(0, Math.floor(toBlockInclusive));
+  if (endBlock < startBlock) return [];
+
+  const logs = await fetchTransferLogsRange(chain, startBlock, endBlock);
+  const transfers: Array<{
+    transaction_hash: string;
+    from_address: string | null;
+    to_address: string | null;
+    contract_address: string;
+    value: string | null;
+  }> = [];
+
+  for (const item of logs) {
+    if (item.removed) continue;
+    const topics = Array.isArray(item.topics) ? item.topics : [];
+    const contractAddress = normalizeAddress(item.address);
+    const transactionHash = String(item.transactionHash ?? '').trim().toLowerCase();
+    if (!contractAddress || !transactionHash) continue;
+    transfers.push({
+      transaction_hash: transactionHash,
+      from_address: topicToAddress(topics[1]),
+      to_address: topicToAddress(topics[2]),
+      contract_address: contractAddress,
+      value: decodeTransferLogValue(item),
+    });
+  }
+
+  return transfers;
+}
+
 export async function getContractCodeSize(chain: string, address: string): Promise<number> {
   const normalized = strip0x(await getContractBytecode(chain, address));
   if (!normalized) return 0;
@@ -457,6 +641,12 @@ function withPancakeLimiter<T>(task: () => Promise<T>): Promise<T> {
   return run;
 }
 
+function withGeckoTerminalLimiter<T>(task: () => Promise<T>): Promise<T> {
+  const run = geckoTerminalLimiterLock.then(task, task);
+  geckoTerminalLimiterLock = run.then(() => undefined, () => undefined);
+  return run;
+}
+
 async function acquirePancakePriceRateSlot(): Promise<void> {
   await withPancakeLimiter(async () => {
     while (true) {
@@ -491,6 +681,17 @@ async function acquirePancakePriceRateSlot(): Promise<void> {
 
       await sleep(waitMs + 5);
     }
+  });
+}
+
+async function acquireGeckoTerminalRateSlot(): Promise<void> {
+  await withGeckoTerminalLimiter(async () => {
+    const now = Date.now();
+    const waitMs = Math.max(0, geckoTerminalLastRequestAt + GECKOTERMINAL_MIN_REQUEST_INTERVAL_MS - now);
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+    geckoTerminalLastRequestAt = Date.now();
   });
 }
 
@@ -563,6 +764,28 @@ async function fetch1inchTokensMarketBatch(chainId: number, addresses: string[])
     }
   }
   throw lastErr;
+}
+
+function getGeckoTerminalNetworkId(chain: string): string | null {
+  return GECKOTERMINAL_NETWORK_BY_CHAIN[String(chain || '').trim().toLowerCase()] || null;
+}
+
+async function fetchGeckoTerminalTokenPrice(chain: string, address: string): Promise<number | null> {
+  const networkId = getGeckoTerminalNetworkId(chain);
+  if (!networkId || !isAddressLike(address)) return null;
+
+  const url = `${GECKOTERMINAL_API_BASE}/networks/${encodeURIComponent(networkId)}/tokens/${encodeURIComponent(address)}`;
+  try {
+    await acquireGeckoTerminalRateSlot();
+    const res = await axios.get<{ data?: { attributes?: { price_usd?: unknown } } }>(url, {
+      timeout: RPC_TIMEOUT_MS,
+      headers: { accept: 'application/json' },
+    });
+    return sanitizeTokenPriceUsd(res.data?.data?.attributes?.price_usd ?? null);
+  } catch (err) {
+    logger.warn(`[${chain}] GeckoTerminal price fetch failed for ${address}: ${errorMessage(err)}`);
+    return null;
+  }
 }
 
 function encodeSupportsInterface(interfaceId: string): string {
@@ -696,6 +919,14 @@ export async function getTokenPricesBatch(
         );
         for (const { token, address } of batch) {
           out.set(token, sanitizeTokenPriceUsd(normalizedPayload.get(address.toLowerCase()) ?? null));
+        }
+
+        const zeroPriceEntries = batch.filter(({ token }) => out.get(token) === 0);
+        for (const { token, address } of zeroPriceEntries) {
+          const geckoPrice = await fetchGeckoTerminalTokenPrice(chain, address);
+          if (geckoPrice != null) {
+            out.set(token, geckoPrice);
+          }
         }
       }
     } catch (err) {

@@ -8,6 +8,7 @@ import {
 import {
   getDefaultAiAuditModel,
   getDefaultAiAuditProvider,
+  getChainConfig,
   normalizeAiAuditModel,
   normalizeAiAuditProvider,
 } from '../../config.js';
@@ -18,6 +19,7 @@ import {
   getAiAuditWorkerStatus,
   getContractAiAuditPlan,
   setAiAuditWorkerCapacity,
+  subscribeAiAuditEvents,
 } from '../ai-audit-runner/index.js';
 import {
   listDashboardContractsRegistry,
@@ -41,6 +43,10 @@ export interface AutoAnalysisStatus {
   active: number;
   capacity: number;
   cycle: number;
+  queuedThisRound: number;
+  runningThisRound: number;
+  completedThisRound: number;
+  failedThisRound: number;
   lastAction: string;
   updatedAt: string;
 }
@@ -48,13 +54,9 @@ export interface AutoAnalysisStatus {
 export interface AutoAnalysisRuntimeConfig {
   selectedChains: string[];
   chainRatios: Record<string, number>;
+  chainConfigs: Record<string, AutoAnalysisChainConfig>;
   queueCapacity: number;
-  roundAuditLimit: number;
-  roundRestSeconds: number;
   continueOnEmptyRound: boolean;
-  stopAtDateTime: string | null;
-  tokenSharePercent: number;
-  contractSharePercent: number;
   provider: string;
   model: string;
   contractMinTvlUsd: number;
@@ -68,9 +70,27 @@ export interface AutoAnalysisRuntimeConfig {
   excludeAuditedTokens: boolean;
 }
 
+export interface AutoAnalysisChainConfig {
+  fromBlock: number | null;
+  toBlock: number | null;
+  deltaBlocks: number | null;
+  tokenSharePercent: number;
+  contractSharePercent: number;
+}
+
 interface AutoAnalysisControls {
-  runRound: (chain: string, ownerUsername?: string | null) => Promise<unknown>;
+  runRound: (
+    chain: string,
+    ownerUsername?: string | null,
+    range?: { fromBlock?: number | null; toBlock?: number | null; deltaBlocks?: number | null },
+  ) => Promise<{ block_from?: number; block_to?: number } | unknown>;
   isRoundRunning: () => boolean;
+}
+
+interface AutoAnalysisRangeState {
+  initialized: boolean;
+  nextFromBlock: number | null;
+  nextToBlock: number | null;
 }
 
 export interface AutoAnalysisStatusEvent extends AutoAnalysisStatus {
@@ -84,9 +104,9 @@ interface AutoAnalysisContext {
   runtimeConfig: AutoAnalysisRuntimeConfig;
   state: AutoAnalysisStatus;
   loopPromise: Promise<void> | null;
-  roundQueuedSinceRest: number;
-  roundRestUntilMs: number;
   roundChainCursor: number;
+  roundRangeStateByChain: Record<string, AutoAnalysisRangeState>;
+  mixUsageByChain: Record<string, { token: number; contract: number }>;
   backendApiKey: string;
 }
 
@@ -96,13 +116,9 @@ const contexts = new Map<string, AutoAnalysisContext>();
 const DEFAULT_AUTO_ANALYSIS_CONFIG: AutoAnalysisRuntimeConfig = {
   selectedChains: [],
   chainRatios: {},
+  chainConfigs: {},
   queueCapacity: 10,
-  roundAuditLimit: 5,
-  roundRestSeconds: 60,
   continueOnEmptyRound: false,
-  stopAtDateTime: null,
-  tokenSharePercent: 40,
-  contractSharePercent: 60,
   provider: DEFAULT_AUTO_ANALYSIS_PROVIDER,
   model: getDefaultAiAuditModel(DEFAULT_AUTO_ANALYSIS_PROVIDER),
   contractMinTvlUsd: 10_000,
@@ -138,6 +154,20 @@ function parsePositiveFloat(value: unknown, fallback: number): number {
   return parsed;
 }
 
+function parsePercentInt(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return Math.max(0, Math.min(100, Math.floor(parsed)));
+}
+
+function parseOptionalNonNegativeInt(value: unknown): number | null {
+  if (value == null) return null;
+  if (typeof value === 'string' && !value.trim()) return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.floor(parsed);
+}
+
 function parseBoolean(value: unknown, fallback: boolean): boolean {
   if (typeof value === 'boolean') return value;
   if (typeof value === 'number') return value !== 0;
@@ -147,23 +177,6 @@ function parseBoolean(value: unknown, fallback: boolean): boolean {
     if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
   }
   return fallback;
-}
-
-function normalizeDateTimeLocal(value: unknown): string | null {
-  const normalized = String(value || '').trim();
-  if (!normalized) return null;
-  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
-  if (!match) return null;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const hour = Number(match[4]);
-  const minute = Number(match[5]);
-  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
-  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
-  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
-  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
 function normalizeSelectedChains(value: unknown): string[] {
@@ -187,6 +200,41 @@ function normalizeChainRatios(
   return next;
 }
 
+function normalizeChainConfigs(
+  value: unknown,
+  selectedChains: string[],
+  fallback: Record<string, AutoAnalysisChainConfig> = {},
+): Record<string, AutoAnalysisChainConfig> {
+  const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const next: Record<string, AutoAnalysisChainConfig> = {};
+  for (const chain of selectedChains) {
+    const raw = source[chain] && typeof source[chain] === 'object'
+      ? source[chain] as Record<string, unknown>
+      : {};
+    const fallbackRow = fallback[chain] || {
+      fromBlock: null,
+      toBlock: null,
+      deltaBlocks: null,
+      tokenSharePercent: 40,
+      contractSharePercent: 60,
+    };
+    next[chain] = {
+      fromBlock: parseOptionalNonNegativeInt(raw.fromBlock ?? raw.from_block ?? fallbackRow.fromBlock),
+      toBlock: parseOptionalNonNegativeInt(raw.toBlock ?? raw.to_block ?? fallbackRow.toBlock),
+      deltaBlocks: parseOptionalNonNegativeInt(raw.deltaBlocks ?? raw.delta_blocks ?? fallbackRow.deltaBlocks),
+      tokenSharePercent: parsePercentInt(
+        raw.tokenSharePercent ?? raw.token_share_percent ?? fallbackRow.tokenSharePercent,
+        fallbackRow.tokenSharePercent,
+      ),
+      contractSharePercent: parsePercentInt(
+        raw.contractSharePercent ?? raw.contract_share_percent ?? fallbackRow.contractSharePercent,
+        fallbackRow.contractSharePercent,
+      ),
+    };
+  }
+  return next;
+}
+
 function describeChainSet(chains: string[]): string {
   if (!chains.length) return '--';
   return chains.map((chain) => chain.toUpperCase()).join(', ');
@@ -198,19 +246,16 @@ function normalizeRuntimeConfig(input: Partial<AutoAnalysisRuntimeConfig> | null
     ...base,
     ...(input || {}),
   };
-  const provider = normalizeAiAuditProvider(merged.provider);
+  const provider = getDefaultAiAuditProvider();
   const selectedChains = normalizeSelectedChains(merged.selectedChains);
   const chainRatios = normalizeChainRatios(merged.chainRatios, selectedChains, base.chainRatios);
+  const chainConfigs = normalizeChainConfigs(merged.chainConfigs, selectedChains, base.chainConfigs);
   return {
     selectedChains,
     chainRatios,
+    chainConfigs,
     queueCapacity: parsePositiveInt(merged.queueCapacity, DEFAULT_AUTO_ANALYSIS_CONFIG.queueCapacity),
-    roundAuditLimit: parsePositiveInt(merged.roundAuditLimit, DEFAULT_AUTO_ANALYSIS_CONFIG.roundAuditLimit),
-    roundRestSeconds: parsePositiveInt(merged.roundRestSeconds, DEFAULT_AUTO_ANALYSIS_CONFIG.roundRestSeconds),
     continueOnEmptyRound: parseBoolean(merged.continueOnEmptyRound, DEFAULT_AUTO_ANALYSIS_CONFIG.continueOnEmptyRound),
-    stopAtDateTime: normalizeDateTimeLocal(merged.stopAtDateTime),
-    tokenSharePercent: parsePositiveInt(merged.tokenSharePercent, DEFAULT_AUTO_ANALYSIS_CONFIG.tokenSharePercent),
-    contractSharePercent: parsePositiveInt(merged.contractSharePercent, DEFAULT_AUTO_ANALYSIS_CONFIG.contractSharePercent),
     provider,
     model: normalizeAiAuditModel(provider, merged.model),
     contractMinTvlUsd: parsePositiveFloat(merged.contractMinTvlUsd, DEFAULT_AUTO_ANALYSIS_CONFIG.contractMinTvlUsd),
@@ -238,6 +283,10 @@ function createDefaultState(): AutoAnalysisStatus {
     active: 0,
     capacity: getAiAuditWorkerStatus().capacity,
     cycle: persisted.cycle,
+    queuedThisRound: 0,
+    runningThisRound: 0,
+    completedThisRound: 0,
+    failedThisRound: 0,
     lastAction: persisted.lastAction,
     updatedAt: new Date().toISOString(),
   };
@@ -252,9 +301,9 @@ function ensureContext(username: string): AutoAnalysisContext {
     runtimeConfig: { ...DEFAULT_AUTO_ANALYSIS_CONFIG },
     state: createDefaultState(),
     loopPromise: null,
-    roundQueuedSinceRest: 0,
-    roundRestUntilMs: 0,
     roundChainCursor: 0,
+    roundRangeStateByChain: {},
+    mixUsageByChain: {},
     backendApiKey: '',
   };
   context.state.enabled = false;
@@ -393,40 +442,85 @@ function syncContextChainState(context: AutoAnalysisContext): void {
   context.roundChainCursor = Math.max(0, Math.min(context.roundChainCursor, chains.length - 1));
 }
 
-function resetRoundWindow(context: AutoAnalysisContext): void {
-  context.roundQueuedSinceRest = 0;
-  context.roundRestUntilMs = 0;
+function resetRoundRanges(context: AutoAnalysisContext): void {
+  context.roundRangeStateByChain = {};
+  context.mixUsageByChain = {};
 }
 
-function parseDateTimeLocal(value: string | null | undefined): { timestamp: number; label: string } | null {
-  const normalized = String(value || '').trim();
-  if (!normalized) return null;
-  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
-  if (!match) return null;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const hour = Number(match[4]);
-  const minute = Number(match[5]);
-  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
-  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
-  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
-  const deadline = new Date(year, month - 1, day, hour, minute, 0, 0);
-  if (Number.isNaN(deadline.getTime())) return null;
-  return {
-    timestamp: deadline.getTime(),
-    label: `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')} ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`,
-  };
+function resetRoundAuditCounters(context: AutoAnalysisContext): void {
+  context.state.queuedThisRound = 0;
+  context.state.runningThisRound = 0;
+  context.state.completedThisRound = 0;
+  context.state.failedThisRound = 0;
 }
 
-function hasReachedConfiguredStopTime(stopAtDateTime: string | null | undefined, now = new Date()): { reached: boolean; label: string | null } {
-  const parsed = parseDateTimeLocal(stopAtDateTime);
-  if (!parsed) return { reached: false, label: null };
-  return {
-    reached: now.getTime() >= parsed.timestamp,
-    label: parsed.label,
+function resolveAutoRoundRequest(
+  context: AutoAnalysisContext,
+  chain: string,
+): { fromBlock?: number | null; toBlock?: number | null; deltaBlocks?: number | null } | null {
+  const chainConfig = context.runtimeConfig.chainConfigs[chain] || {
+    fromBlock: null,
+    toBlock: null,
+    deltaBlocks: null,
+    tokenSharePercent: 40,
+    contractSharePercent: 60,
   };
+  const configuredFrom = chainConfig.fromBlock;
+  const configuredTo = chainConfig.toBlock;
+  const delta = Math.max(1, Math.floor(chainConfig.deltaBlocks || getChainConfig(chain).blocksPerScan));
+  const state = context.roundRangeStateByChain[chain] ?? {
+    initialized: false,
+    nextFromBlock: configuredFrom,
+    nextToBlock: configuredTo,
+  };
+  context.roundRangeStateByChain[chain] = state;
+
+  if (configuredFrom != null && configuredTo != null) {
+    const nextFrom = state.nextFromBlock ?? configuredFrom;
+    if (nextFrom >= configuredTo) return null;
+    return { fromBlock: nextFrom, toBlock: configuredTo, deltaBlocks: delta };
+  }
+
+  if (configuredFrom != null) {
+    return { fromBlock: state.nextFromBlock ?? configuredFrom, deltaBlocks: delta };
+  }
+
+  if (configuredTo != null) {
+    if (!state.initialized) {
+      return { toBlock: configuredTo, deltaBlocks: delta };
+    }
+    const nextUpper = state.nextToBlock;
+    if (nextUpper == null || nextUpper <= configuredTo) return null;
+    return {
+      fromBlock: Math.max(configuredTo, nextUpper - delta),
+      toBlock: nextUpper,
+      deltaBlocks: delta,
+    };
+  }
+
+  return { deltaBlocks: delta };
+}
+
+function updateAutoRoundRangeState(
+  context: AutoAnalysisContext,
+  chain: string,
+  result: { block_from?: number; block_to?: number } | unknown,
+): void {
+  const chainConfig = context.runtimeConfig.chainConfigs[chain] || {
+    fromBlock: null,
+    toBlock: null,
+  };
+  const state = context.roundRangeStateByChain[chain] ?? {
+    initialized: false,
+    nextFromBlock: chainConfig.fromBlock,
+    nextToBlock: chainConfig.toBlock,
+  };
+  const blockFrom = Number((result as { block_from?: number } | null)?.block_from);
+  const blockTo = Number((result as { block_to?: number } | null)?.block_to);
+  if (Number.isFinite(blockFrom)) state.nextToBlock = Math.max(0, Math.floor(blockFrom));
+  if (Number.isFinite(blockTo)) state.nextFromBlock = Math.max(0, Math.floor(blockTo));
+  state.initialized = true;
+  context.roundRangeStateByChain[chain] = state;
 }
 
 function selectEligibleContracts(context: AutoAnalysisContext, chain: string, limit: number): ContractRegistryRow[] {
@@ -506,16 +600,6 @@ function selectEligibleTokens(context: AutoAnalysisContext, chain: string, limit
     .slice(0, Math.max(0, limit));
 }
 
-function computeTargetSlots(context: AutoAnalysisContext, capacity: number) {
-  const safeCapacity = Math.max(1, capacity);
-  const tokenShare = Math.max(0, context.runtimeConfig.tokenSharePercent);
-  const contractShare = Math.max(0, context.runtimeConfig.contractSharePercent);
-  const totalShare = tokenShare + contractShare || 100;
-  const contractSlots = Math.max(0, Math.round((safeCapacity * contractShare) / totalShare));
-  const tokenSlots = Math.max(0, safeCapacity - contractSlots);
-  return { contractSlots, tokenSlots };
-}
-
 function allocateSlotsByRatio(chains: string[], ratios: Record<string, number>, totalSlots: number): Map<string, number> {
   const allocations = new Map<string, number>();
   if (!chains.length || totalSlots <= 0) return allocations;
@@ -557,44 +641,87 @@ function queueChainBatch(
   if (totalSlots <= 0) {
     return { used: 0, queuedContracts: 0, queuedTokens: 0 };
   }
-  const targets = computeTargetSlots(context, totalSlots);
-  const contractNeed = Math.max(0, Math.min(totalSlots, targets.contractSlots));
-  const tokenNeed = Math.max(0, Math.min(totalSlots - contractNeed, targets.tokenSlots));
-  const contractCandidates = selectEligibleContracts(context, chain, contractNeed);
-  const tokenCandidates = selectEligibleTokens(context, chain, tokenNeed);
+  const chainConfig = context.runtimeConfig.chainConfigs[chain];
+  const tokenShare = Math.max(0, Number(chainConfig?.tokenSharePercent) || 0);
+  const contractShare = Math.max(0, Number(chainConfig?.contractSharePercent) || 0);
+  const totalShare = tokenShare + contractShare || 100;
+  const contractCandidates = selectEligibleContracts(context, chain, totalSlots);
+  const tokenCandidates = selectEligibleTokens(context, chain, totalSlots);
+  const baselineUsage = context.mixUsageByChain[chain] || { token: 0, contract: 0 };
+  let plannedTokenCount = 0;
+  let plannedContractCount = 0;
+
+  for (let slot = 0; slot < totalSlots; slot += 1) {
+    const tokenAvailable = plannedTokenCount < tokenCandidates.length;
+    const contractAvailable = plannedContractCount < contractCandidates.length;
+    if (!tokenAvailable && !contractAvailable) break;
+    if (!tokenAvailable) {
+      plannedContractCount += 1;
+      continue;
+    }
+    if (!contractAvailable) {
+      plannedTokenCount += 1;
+      continue;
+    }
+
+    const projectedTotal = baselineUsage.token
+      + baselineUsage.contract
+      + plannedTokenCount
+      + plannedContractCount
+      + 1;
+    const tokenDeficit = ((tokenShare / totalShare) * projectedTotal) - (baselineUsage.token + plannedTokenCount);
+    const contractDeficit = ((contractShare / totalShare) * projectedTotal) - (baselineUsage.contract + plannedContractCount);
+
+    if (tokenDeficit > contractDeficit) {
+      plannedTokenCount += 1;
+    } else {
+      plannedContractCount += 1;
+    }
+  }
 
   let queuedContracts = 0;
   let queuedTokens = 0;
 
-  for (const candidate of contractCandidates) {
+  for (const candidate of contractCandidates.slice(0, plannedContractCount)) {
     const row = requestContractAiAudit({
       chain,
       contractAddr: candidate.contractAddr,
       title: 'AI Auto Audit',
       provider: context.runtimeConfig.provider,
       model: context.runtimeConfig.model,
+      ownerUsername: context.username,
+      requestOrigin: 'auto',
     });
     enqueueContractAiAudit(row, {
       backendApiKey: context.backendApiKey || null,
       ownerUsername: context.username,
+      requestOrigin: 'auto',
     });
     queuedContracts += 1;
   }
 
-  for (const candidate of tokenCandidates) {
+  for (const candidate of tokenCandidates.slice(0, plannedTokenCount)) {
     const row = requestTokenAiAudit({
       chain,
       tokenAddr: candidate.token,
       title: 'AI Auto Audit',
       provider: context.runtimeConfig.provider,
       model: context.runtimeConfig.model,
+      ownerUsername: context.username,
+      requestOrigin: 'auto',
     });
     enqueueTokenAiAudit(row, {
       backendApiKey: context.backendApiKey || null,
       ownerUsername: context.username,
+      requestOrigin: 'auto',
     });
     queuedTokens += 1;
   }
+
+  context.mixUsageByChain[chain] = {
+    token: baselineUsage.token + queuedTokens,
+    contract: baselineUsage.contract + queuedContracts,
+  };
 
   return {
     used: queuedContracts + queuedTokens,
@@ -614,10 +741,7 @@ async function fillAuditPool(context: AutoAnalysisContext): Promise<number> {
   if (!availableSlots) return 0;
   const chains = getConfiguredChains(context);
   if (!chains.length) return 0;
-  const roundLimit = Math.max(1, context.runtimeConfig.roundAuditLimit);
-  const roundRemaining = Math.max(0, roundLimit - context.roundQueuedSinceRest);
-  if (!roundRemaining) return 0;
-  const queueableSlots = Math.min(availableSlots, roundRemaining);
+  const queueableSlots = availableSlots;
   if (!queueableSlots) return 0;
 
   let queuedContracts = 0;
@@ -652,17 +776,11 @@ async function fillAuditPool(context: AutoAnalysisContext): Promise<number> {
 
   const used = queuedContracts + queuedTokens;
   if (!used) return 0;
-  context.roundQueuedSinceRest = Math.min(roundLimit, context.roundQueuedSinceRest + used);
-  const shouldRestAfterBatch = context.roundQueuedSinceRest >= roundLimit;
-  if (shouldRestAfterBatch) {
-    context.roundRestUntilMs = Date.now() + (Math.max(1, context.runtimeConfig.roundRestSeconds) * 1000);
-  }
-
   const activeChain = [...perChainQueued.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || chains[0] || null;
   setStatus(context, {
     chain: activeChain,
     phase: 'auditing',
-    lastAction: `Queued ${queuedContracts} contract / ${queuedTokens} token audit${used === 1 ? '' : 's'} across ${Array.from(perChainQueued.entries()).map(([chain, count]) => `${chain.toUpperCase()} x${count}`).join(', ')}${shouldRestAfterBatch ? `. Cooling down for ${Math.max(1, context.runtimeConfig.roundRestSeconds)}s after this batch` : ''}`,
+    lastAction: `Queued ${queuedContracts} contract / ${queuedTokens} token audit${used === 1 ? '' : 's'} across ${Array.from(perChainQueued.entries()).map(([chain, count]) => `${chain.toUpperCase()} x${count}`).join(', ')}`,
   });
   return used;
 }
@@ -710,16 +828,6 @@ async function runLoop(context: AutoAnalysisContext): Promise<void> {
         continue;
       }
 
-      const stopTimeState = hasReachedConfiguredStopTime(context.runtimeConfig.stopAtDateTime);
-      if (stopTimeState.reached) {
-        stopAutoAnalysis(
-          context.username,
-          stopTimeState.label ? `Auto analysis stop time ${stopTimeState.label} reached for ${chainSummary}` : 'Configured cutoff reached',
-        );
-        await sleep(LOOP_INTERVAL_MS);
-        continue;
-      }
-
       if (controls.isRoundRunning()) {
         setStatus(context, {
           phase: 'round',
@@ -727,20 +835,6 @@ async function runLoop(context: AutoAnalysisContext): Promise<void> {
         });
         await sleep(LOOP_INTERVAL_MS);
         continue;
-      }
-
-      const now = Date.now();
-      if (context.roundRestUntilMs > now) {
-        const remainingSeconds = Math.max(1, Math.ceil((context.roundRestUntilMs - now) / 1000));
-        setStatus(context, {
-          phase: 'resting',
-          lastAction: `Cooling down for ${remainingSeconds}s before the next auto-analysis batch across ${chainSummary}`,
-        });
-        await sleep(Math.min(LOOP_INTERVAL_MS, context.roundRestUntilMs - now));
-        continue;
-      }
-      if (context.roundRestUntilMs > 0) {
-        resetRoundWindow(context);
       }
 
       setStatus(context, {
@@ -769,8 +863,23 @@ async function runLoop(context: AutoAnalysisContext): Promise<void> {
         continue;
       }
 
-      const nextRoundChain = chains[context.roundChainCursor % chains.length] || chains[0];
-      context.roundChainCursor = (context.roundChainCursor + 1) % Math.max(1, chains.length);
+      const orderedChains = chains.map((_, offset) => chains[(context.roundChainCursor + offset) % Math.max(1, chains.length)]);
+      const nextRoundCandidates = orderedChains.map((chain, offset) => ({
+        chain,
+        index: (context.roundChainCursor + offset) % Math.max(1, chains.length),
+        request: resolveAutoRoundRequest(context, chain),
+      }));
+      const nextRoundEntry = nextRoundCandidates.find((entry) => entry.request !== null) || null;
+      if (!nextRoundEntry) {
+        stopAutoAnalysis(
+          context.username,
+          `No eligible candidates left and no auto round range remains across ${chainSummary}`,
+        );
+        await sleep(LOOP_INTERVAL_MS);
+        continue;
+      }
+      const nextRoundChain = nextRoundEntry.chain;
+      context.roundChainCursor = (nextRoundEntry.index + 1) % Math.max(1, chains.length);
 
       setStatus(context, {
         chain: nextRoundChain,
@@ -778,7 +887,9 @@ async function runLoop(context: AutoAnalysisContext): Promise<void> {
         lastAction: `No eligible candidates left across ${chainSummary}. Starting the next ${nextRoundChain.toUpperCase()} round`,
       });
       try {
-        await controls.runRound(nextRoundChain, context.username);
+        resetRoundAuditCounters(context);
+        const roundResult = await controls.runRound(nextRoundChain, context.username, nextRoundEntry.request || {});
+        updateAutoRoundRangeState(context, nextRoundChain, roundResult);
         setStatus(context, {
           chain: nextRoundChain,
           cycle: context.state.cycle + 1,
@@ -865,7 +976,8 @@ export function startAutoAnalysis(
   if (options.backendApiKey !== undefined) {
     context.backendApiKey = String(options.backendApiKey || '').trim();
   }
-  resetRoundWindow(context);
+  resetRoundRanges(context);
+  resetRoundAuditCounters(context);
   setStatus(context, {
     enabled: true,
     stopping: false,
@@ -881,7 +993,8 @@ export function stopAutoAnalysis(username: string, reason?: string): AutoAnalysi
   const context = ensureContext(username);
   syncContextChainState(context);
   const inflight = totalInFlight(context);
-  resetRoundWindow(context);
+  resetRoundRanges(context);
+  resetRoundAuditCounters(context);
   const chainSummary = describeChainSet(getConfiguredChains(context));
   const message = reason
     ? (inflight > 0
@@ -908,3 +1021,28 @@ export function startAutoAnalysisEngine(): void {
     publish(context);
   }
 }
+
+subscribeAiAuditEvents((event) => {
+  if (event.requestOrigin !== 'auto') return;
+  const ownerKey = normalizeUsernameKey(event.ownerUsername || '');
+  if (!ownerKey) return;
+  const context = contexts.get(ownerKey);
+  if (!context) return;
+
+  if (event.kind === 'queued') {
+    context.state.queuedThisRound += 1;
+  } else if (event.kind === 'started') {
+    context.state.queuedThisRound = Math.max(0, context.state.queuedThisRound - 1);
+    context.state.runningThisRound += 1;
+  } else if (event.kind === 'completed') {
+    context.state.runningThisRound = Math.max(0, context.state.runningThisRound - 1);
+    context.state.completedThisRound += 1;
+  } else if (event.kind === 'failed') {
+    context.state.runningThisRound = Math.max(0, context.state.runningThisRound - 1);
+    context.state.failedThisRound += 1;
+  } else {
+    return;
+  }
+
+  publish(context);
+});

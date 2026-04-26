@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import {
   type BaseAiAuditRow,
   type ContractRegistryRow,
+  incrementUserDailyActivity,
   getContractsRegistry,
   listPendingAiAudits,
   reconcileTerminalAiAuditRows,
@@ -17,7 +18,6 @@ import {
 } from '../../db.js';
 import { getAiAuditBackendConfig, normalizeAiAuditModel } from '../../config.js';
 import { logger } from '../../utils/logger.js';
-import type { ProviderAuditMode } from './providers/index.js';
 
 const ROOT = path.dirname(path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url)))));
 const REPORT_DIR = path.join(ROOT, 'reports', 'ai-audits');
@@ -30,8 +30,9 @@ const AUDIT_START_STAGGER_MS = 400;
 type QueuedAuditJob = BaseAiAuditRow & {
   backendApiKeyOverride?: string | null;
   ownerUsername?: string | null;
+  requestOrigin?: 'manual' | 'auto';
 };
-type AuditMode = ProviderAuditMode;
+type AuditMode = 'single' | 'proxy';
 
 interface ChainSpec {
   canonical: string;
@@ -94,6 +95,7 @@ interface ParsedAuditReport {
 
 export interface AiAuditEvent {
   ownerUsername: string | null;
+  requestOrigin: 'manual' | 'auto';
   kind: 'queued' | 'started' | 'completed' | 'failed' | 'worker';
   chain: string;
   targetType: 'contract' | 'token';
@@ -185,6 +187,7 @@ function publishAiAuditEvent(job: QueuedAuditJob, patch: {
   const worker = getAiAuditWorkerStatus();
   const event: AiAuditEvent = {
     ownerUsername: String(job.ownerUsername || '').trim() || null,
+    requestOrigin: job.requestOrigin === 'auto' ? 'auto' : 'manual',
     kind: patch.kind,
     chain: job.chain,
     targetType: job.targetType,
@@ -473,6 +476,10 @@ async function startQuickAnalyzeRequest(
       chain: chain.dedaubChain,
       contract: auditAddress,
       linkage,
+      ...(backend.etherscanApiKey ? {
+        etherscanApiKey: backend.etherscanApiKey,
+        etherscan_api_key: backend.etherscanApiKey,
+      } : {}),
       provider: QUICK_ANALYZE_PROVIDER,
       model,
       title,
@@ -668,9 +675,22 @@ function persistFailure(
   };
 
   if (job.targetType === 'contract') {
-    saveContractAiAuditResult({ ...payload, contractAddr: job.targetAddr });
+    saveContractAiAuditResult({
+      ...payload,
+      contractAddr: job.targetAddr,
+      ownerUsername: job.ownerUsername,
+      requestOrigin: job.requestOrigin,
+    });
   } else {
-    saveTokenAiAuditResult({ ...payload, tokenAddr: job.targetAddr });
+    saveTokenAiAuditResult({
+      ...payload,
+      tokenAddr: job.targetAddr,
+      ownerUsername: job.ownerUsername,
+      requestOrigin: job.requestOrigin,
+    });
+  }
+  if (job.requestOrigin === 'auto' && job.ownerUsername) {
+    incrementUserDailyActivity(job.ownerUsername, { autoAnalysisCount: 1 });
   }
 
   publishAiAuditEvent(job, {
@@ -702,9 +722,22 @@ function persistSuccess(
   };
 
   if (job.targetType === 'contract') {
-    saveContractAiAuditResult({ ...payload, contractAddr: job.targetAddr });
+    saveContractAiAuditResult({
+      ...payload,
+      contractAddr: job.targetAddr,
+      ownerUsername: job.ownerUsername,
+      requestOrigin: job.requestOrigin,
+    });
   } else {
-    saveTokenAiAuditResult({ ...payload, tokenAddr: job.targetAddr });
+    saveTokenAiAuditResult({
+      ...payload,
+      tokenAddr: job.targetAddr,
+      ownerUsername: job.ownerUsername,
+      requestOrigin: job.requestOrigin,
+    });
+  }
+  if (job.requestOrigin === 'auto' && job.ownerUsername) {
+    incrementUserDailyActivity(job.ownerUsername, { autoAnalysisCount: 1 });
   }
 
   publishAiAuditEvent(job, {
@@ -729,7 +762,7 @@ function resolveExecutionContext(job: QueuedAuditJob): {
   const baseBackend = getAiAuditBackendConfig();
   const backend = {
     ...baseBackend,
-    apiKey: String(job.backendApiKeyOverride || baseBackend.apiKey || '').trim(),
+    apiKey: String(job.backendApiKeyOverride || '').trim(),
   };
   const chain = getChainSpec(job.chain);
   const model = resolveAuditModel(job.model);
@@ -770,7 +803,7 @@ async function continueAuditJob(
   try {
     const { backend, chain, mode, auditAddress, verificationAddress, linkage, model } = resolveExecutionContext(job);
     if (!backend.baseUrl || !backend.apiKey) {
-      throw new Error('backend config is incomplete');
+      throw new Error('AI backend API key is missing for this user');
     }
 
     if (options.reason === 'fresh') {
@@ -1002,24 +1035,26 @@ export function subscribeAiAuditEvents(
 
 export function enqueueContractAiAudit(
   row: BaseAiAuditRow | null | undefined,
-  options: { backendApiKey?: string | null; ownerUsername?: string | null } = {},
+  options: { backendApiKey?: string | null; ownerUsername?: string | null; requestOrigin?: 'manual' | 'auto' } = {},
 ): void {
   if (!row || row.targetType !== 'contract') return;
   enqueueAudit({
     ...row,
     backendApiKeyOverride: String(options.backendApiKey || '').trim() || null,
-    ownerUsername: String(options.ownerUsername || '').trim() || null,
+    ownerUsername: String(options.ownerUsername || row.ownerUsername || '').trim() || null,
+    requestOrigin: options.requestOrigin || row.requestOrigin || 'manual',
   });
 }
 
 export function enqueueTokenAiAudit(
   row: BaseAiAuditRow | null | undefined,
-  options: { backendApiKey?: string | null; ownerUsername?: string | null } = {},
+  options: { backendApiKey?: string | null; ownerUsername?: string | null; requestOrigin?: 'manual' | 'auto' } = {},
 ): void {
   if (!row || row.targetType !== 'token') return;
   enqueueAudit({
     ...row,
     backendApiKeyOverride: String(options.backendApiKey || '').trim() || null,
-    ownerUsername: String(options.ownerUsername || '').trim() || null,
+    ownerUsername: String(options.ownerUsername || row.ownerUsername || '').trim() || null,
+    requestOrigin: options.requestOrigin || row.requestOrigin || 'manual',
   });
 }

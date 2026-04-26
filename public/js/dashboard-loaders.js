@@ -30,30 +30,29 @@
       hydrateTokenReviewForm,
       hydrateReviewForm,
       applySettingsPayload,
+      applyStatePayload,
       apiFetch,
       withPageLoading,
       runSharedLoad,
     } = deps;
 
     async function loadDashboard(options = {}) {
-      if (!state.selectedChain) return;
+      const request = () => apiFetch('/api/state');
       try {
         const data = options.showLoading === false
-          ? await apiFetch(`/api/dashboard?chain=${encodeURIComponent(state.selectedChain)}`)
+          ? await request()
           : await withPageLoading(
             'Loading dashboard',
-            () => apiFetch(`/api/dashboard?chain=${encodeURIComponent(state.selectedChain)}`),
+            request,
           );
-        state.dashboard.run = data.run || null;
-        state.dashboard.tokens = data.tokens || [];
-        state.dashboard.contracts = data.contracts || [];
+        await applyStatePayload(data);
         if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
           await loadSettings({ showLoading: false });
         }
       } catch {
-        state.dashboard.run = null;
-        state.dashboard.tokens = [];
-        state.dashboard.contracts = [];
+        state.dashboardHome = {
+          ...state.dashboardHome,
+        };
       }
     }
 
@@ -325,6 +324,10 @@
           await loadSettings(nextOptions);
           return;
         }
+        if (state.dashboardTab === 'dashboard') {
+          await loadDashboard(nextOptions);
+          return;
+        }
         await loadDashboardContracts(nextOptions);
       } else if (currentView.value === 'token') {
         await loadDashboardTokens(nextOptions);
@@ -339,6 +342,10 @@
       if (currentView.value === 'dashboard') {
         if (state.dashboardTab === 'settings' || state.dashboardTab === 'auto') {
           await loadSettings(options);
+          return;
+        }
+        if (state.dashboardTab === 'dashboard') {
+          await loadDashboard(options);
           return;
         }
         await loadDashboardContracts(options);

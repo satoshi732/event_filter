@@ -3,8 +3,8 @@ export interface PatternRow {
   name: string;
   hex_pattern: string;
   pattern_type: string;
-  score?: number;
   description: string;
+  created_by_username: string;
 }
 
 export type TokenKind = 'fungible' | 'erc721' | 'erc1155' | 'native' | 'unknown';
@@ -32,6 +32,7 @@ export interface PatternPushQueueRow {
   label: string;
   selectors: string[];
   bytecodeSize: number;
+  createdByUsername: string;
   status: string;
   lastError: string | null;
   createdAt: string;
@@ -71,8 +72,8 @@ export interface PrimitiveDbSnapshot {
     name: string;
     hex_pattern: string;
     pattern_type: string;
-    score: number;
     description: string;
+    created_by_username: string;
     created_at: string;
   }>;
   seen_selectors: Array<{
@@ -81,6 +82,7 @@ export interface PrimitiveDbSnapshot {
     selectors: string[];
     level: number | null;
     bytecode_size: number;
+    created_by_username: string;
     created_at: string;
   }>;
   selectors_temp: Array<{
@@ -91,6 +93,7 @@ export interface PrimitiveDbSnapshot {
     selectors: string[];
     label: string;
     bytecode_size: number;
+    prepared_by_username: string;
     status: string;
     last_error: string | null;
     created_at: string;
@@ -132,6 +135,7 @@ export interface SeenSelectorEntry {
   selectors: Set<string>;
   level: number | null;
   bytecodeSize: number;
+  createdByUsername: string;
 }
 
 export interface SelectorTempReviewTarget {
@@ -210,6 +214,8 @@ export interface BaseAiAuditRow {
   chain: string;
   targetType: AiAuditTargetType;
   targetAddr: string;
+  ownerUsername: string | null;
+  requestOrigin: 'manual' | 'auto';
   status: 'requested' | 'running' | 'completed' | 'failed';
   title: string;
   provider: string;

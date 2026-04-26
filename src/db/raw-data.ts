@@ -8,6 +8,25 @@ export function getLastBlock(chain: string): number {
   return row?.last_block ?? 0;
 }
 
+export function getLatestRawRoundBounds(chain: string): { blockFrom: number; blockTo: number } | null {
+  const row = getDb().prepare(`
+    SELECT block_from, block_to
+    FROM raw_rounds
+    WHERE chain = ?
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(chain.toLowerCase()) as {
+    block_from: number;
+    block_to: number;
+  } | undefined;
+
+  if (!row) return null;
+  return {
+    blockFrom: row.block_from,
+    blockTo: row.block_to,
+  };
+}
+
 export function setLastBlock(chain: string, block: number): void {
   getDb().prepare(`
     INSERT INTO scan_state (chain, last_block, updated_at) VALUES (?, ?, datetime('now'))
@@ -36,6 +55,13 @@ export function saveRawRoundData(input: {
   `);
   const deleteTransfers = db.prepare(`DELETE FROM raw_token_transfers WHERE round_id = ? AND chain = ?`);
   const deleteTraces = db.prepare(`DELETE FROM raw_value_traces WHERE round_id = ? AND chain = ?`);
+  const upsertScanState = db.prepare(`
+    INSERT INTO scan_state (chain, last_block, updated_at)
+    VALUES (?, ?, datetime('now'))
+    ON CONFLICT(chain) DO UPDATE SET
+      last_block = excluded.last_block,
+      updated_at = datetime('now')
+  `);
   const insertTransfer = db.prepare(`
     INSERT INTO raw_token_transfers (
       round_id, chain, transaction_hash, from_address, to_address, token_address, value, created_at
@@ -49,6 +75,7 @@ export function saveRawRoundData(input: {
 
   const run = db.transaction(() => {
     upsertRound.run(input.roundId, chain, input.blockFrom, input.blockTo);
+    upsertScanState.run(chain, input.blockTo);
     deleteTransfers.run(input.roundId, chain);
     deleteTraces.run(input.roundId, chain);
     for (const row of input.transfers) {

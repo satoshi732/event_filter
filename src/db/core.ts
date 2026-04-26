@@ -43,8 +43,8 @@ function initSchema(db: Database.Database): void {
       name         TEXT UNIQUE NOT NULL,
       hex_pattern  TEXT NOT NULL,
       pattern_type TEXT NOT NULL DEFAULT 'selector',
-      score        INTEGER NOT NULL DEFAULT 1,
       description  TEXT DEFAULT '',
+      created_by_username TEXT NOT NULL DEFAULT '',
       created_at   TEXT DEFAULT (datetime('now'))
     );
 
@@ -54,6 +54,7 @@ function initSchema(db: Database.Database): void {
       selectors      TEXT NOT NULL,
       level          INTEGER DEFAULT NULL,
       bytecode_size  INTEGER NOT NULL DEFAULT 0,
+      created_by_username TEXT NOT NULL DEFAULT '',
       created_at     TEXT DEFAULT (datetime('now'))
     );
 
@@ -77,6 +78,7 @@ function initSchema(db: Database.Database): void {
       chain_id                  INTEGER NOT NULL DEFAULT 0,
       table_prefix              TEXT NOT NULL DEFAULT '',
       blocks_per_scan           INTEGER NOT NULL DEFAULT 12,
+      pipeline_source           TEXT NOT NULL DEFAULT 'chainbase',
       chainbase_keys            TEXT NOT NULL DEFAULT '[]',
       rpc_network               TEXT NOT NULL DEFAULT '',
       rpc_urls                  TEXT NOT NULL DEFAULT '[]',
@@ -107,6 +109,17 @@ function initSchema(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_ai_audit_models_provider
       ON ai_audit_models (provider, position, id);
+
+    CREATE TABLE IF NOT EXISTS auth_users (
+      username       TEXT PRIMARY KEY,
+      password_hash  TEXT NOT NULL,
+      role           TEXT NOT NULL DEFAULT 'user',
+      ai_api_key     TEXT NOT NULL DEFAULT '',
+      allowed_chains TEXT NOT NULL DEFAULT '[]',
+      daily_review_target INTEGER NOT NULL DEFAULT 200,
+      created_at     TEXT DEFAULT (datetime('now')),
+      updated_at     TEXT DEFAULT (datetime('now'))
+    );
 
     CREATE TABLE IF NOT EXISTS raw_rounds (
       round_id      TEXT PRIMARY KEY,
@@ -205,6 +218,8 @@ function initSchema(db: Database.Database): void {
       chain             TEXT NOT NULL,
       target_type       TEXT NOT NULL,
       target_addr       TEXT NOT NULL,
+      owner_username    TEXT NOT NULL DEFAULT '',
+      request_origin    TEXT NOT NULL DEFAULT 'manual',
       status            TEXT NOT NULL DEFAULT 'requested',
       title             TEXT NOT NULL DEFAULT '',
       provider          TEXT NOT NULL DEFAULT '',
@@ -230,6 +245,7 @@ function initSchema(db: Database.Database): void {
       selectors     TEXT NOT NULL DEFAULT '',
       label         TEXT DEFAULT '',
       bytecode_size INTEGER NOT NULL DEFAULT 0,
+      prepared_by_username TEXT NOT NULL DEFAULT '',
       status        TEXT NOT NULL DEFAULT 'pending',
       last_error    TEXT DEFAULT NULL,
       created_at    TEXT DEFAULT (datetime('now')),
@@ -250,10 +266,25 @@ function initSchema(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_token_contract_balances_chain_token
       ON token_contract_balances (chain, token_address);
+
+    CREATE TABLE IF NOT EXISTS user_daily_activity (
+      activity_date        TEXT NOT NULL,
+      username             TEXT NOT NULL,
+      sync_pattern_count   INTEGER NOT NULL DEFAULT 0,
+      review_count         INTEGER NOT NULL DEFAULT 0,
+      auto_analysis_count  INTEGER NOT NULL DEFAULT 0,
+      created_at           TEXT DEFAULT (datetime('now')),
+      updated_at           TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (activity_date, username)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_daily_activity_username_date
+      ON user_daily_activity (username, activity_date);
   `);
 
-  seedWhitelist(db);
   migrateDrop(db);
+  ensureWhitelistPatternsSchema(db);
+  seedWhitelist(db);
+  ensureSeenSelectorsSchema(db);
   ensureTokensRegistrySchema(db);
   migrateTokenMetadataIntoRegistry(db);
   ensureSelectorsTempSchema(db);
@@ -262,6 +293,13 @@ function initSchema(db: Database.Database): void {
   ensureAiAuditSchema(db);
   migrateLegacyContractAiAudits(db);
   ensureRuntimeSettingsSchema(db);
+}
+
+function ensureSeenSelectorsSchema(db: Database.Database): void {
+  const cols = db.prepare(`PRAGMA table_info(seen_selectors)`).all() as Array<{ name: string }>;
+  if (!cols.some((col) => col.name === 'created_by_username')) {
+    db.exec(`ALTER TABLE seen_selectors ADD COLUMN created_by_username TEXT NOT NULL DEFAULT '';`);
+  }
 }
 
 function migrateDrop(db: Database.Database): void {
@@ -278,10 +316,51 @@ function migrateDrop(db: Database.Database): void {
   db.exec(`DROP TABLE IF EXISTS contract_auto_analysis;`);
 }
 
+function ensureWhitelistPatternsSchema(db: Database.Database): void {
+  const cols = db.prepare(`PRAGMA table_info(whitelist_patterns)`).all() as Array<{ name: string }>;
+  const hasScore = cols.some((col) => col.name === 'score');
+  const hasOwner = cols.some((col) => col.name === 'created_by_username');
+  if (!hasScore && hasOwner) return;
+
+  const run = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE whitelist_patterns_v2 (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        name         TEXT UNIQUE NOT NULL,
+        hex_pattern  TEXT NOT NULL,
+        pattern_type TEXT NOT NULL DEFAULT 'selector',
+        description  TEXT DEFAULT '',
+        created_by_username TEXT NOT NULL DEFAULT '',
+        created_at   TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    if (hasOwner) {
+      db.exec(`
+        INSERT INTO whitelist_patterns_v2 (id, name, hex_pattern, pattern_type, description, created_by_username, created_at)
+        SELECT id, name, hex_pattern, pattern_type, description, COALESCE(created_by_username, ''), created_at
+        FROM whitelist_patterns;
+      `);
+    } else {
+      db.exec(`
+        INSERT INTO whitelist_patterns_v2 (id, name, hex_pattern, pattern_type, description, created_by_username, created_at)
+        SELECT id, name, hex_pattern, pattern_type, description, '', created_at
+        FROM whitelist_patterns;
+      `);
+    }
+    db.exec(`DROP TABLE whitelist_patterns;`);
+    db.exec(`ALTER TABLE whitelist_patterns_v2 RENAME TO whitelist_patterns;`);
+  });
+
+  run();
+}
+
 function ensureSelectorsTempSchema(db: Database.Database): void {
   const cols = db.prepare(`PRAGMA table_info(selectors_temp)`).all() as Array<{ name: string }>;
   if (!cols.some((col) => col.name === 'bytecode_size')) {
     db.exec(`ALTER TABLE selectors_temp ADD COLUMN bytecode_size INTEGER NOT NULL DEFAULT 0;`);
+  }
+  if (!cols.some((col) => col.name === 'prepared_by_username')) {
+    db.exec(`ALTER TABLE selectors_temp ADD COLUMN prepared_by_username TEXT NOT NULL DEFAULT '';`);
   }
   if (!cols.some((col) => col.name === 'status')) {
     db.exec(`ALTER TABLE selectors_temp ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';`);
@@ -358,6 +437,8 @@ function ensureAiAuditSchema(db: Database.Database): void {
         chain             TEXT NOT NULL,
         target_type       TEXT NOT NULL,
         target_addr       TEXT NOT NULL,
+        owner_username    TEXT NOT NULL DEFAULT '',
+        request_origin    TEXT NOT NULL DEFAULT 'manual',
         status            TEXT NOT NULL DEFAULT 'requested',
         title             TEXT NOT NULL DEFAULT '',
         provider          TEXT NOT NULL DEFAULT '',
@@ -380,6 +461,12 @@ function ensureAiAuditSchema(db: Database.Database): void {
   }
   if (!cols.some((col) => col.name === 'target_addr')) {
     db.exec(`ALTER TABLE ai_audits ADD COLUMN target_addr TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!cols.some((col) => col.name === 'owner_username')) {
+    db.exec(`ALTER TABLE ai_audits ADD COLUMN owner_username TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!cols.some((col) => col.name === 'request_origin')) {
+    db.exec(`ALTER TABLE ai_audits ADD COLUMN request_origin TEXT NOT NULL DEFAULT 'manual';`);
   }
   if (!cols.some((col) => col.name === 'status')) {
     db.exec(`ALTER TABLE ai_audits ADD COLUMN status TEXT NOT NULL DEFAULT 'requested';`);
@@ -435,7 +522,7 @@ function migrateLegacyContractAiAudits(db: Database.Database): void {
 
   db.exec(`
     INSERT OR IGNORE INTO ai_audits (
-      request_session, chain, target_type, target_addr, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
+      request_session, chain, target_type, target_addr, owner_username, request_origin, status, title, provider, model, dedaub_job_id, analysis_session_id, result_path,
       critical, high, medium, is_success, requested_at, audited_at
     )
     SELECT
@@ -443,6 +530,8 @@ function migrateLegacyContractAiAudits(db: Database.Database): void {
       chain,
       'contract' AS target_type,
       contract_addr AS target_addr,
+      '' AS owner_username,
+      'manual' AS request_origin,
       CASE
         WHEN audited_at IS NULL THEN 'requested'
         WHEN is_success = 0 THEN 'failed'
@@ -477,6 +566,13 @@ function ensureRuntimeSettingsSchema(db: Database.Database): void {
   }
   if (!cols.some((col) => col.name === 'chainbase_keys')) {
     db.exec(`ALTER TABLE chain_settings ADD COLUMN chainbase_keys TEXT NOT NULL DEFAULT '[]';`);
+  }
+  const authCols = db.prepare(`PRAGMA table_info(auth_users)`).all() as Array<{ name: string }>;
+  if (!authCols.some((col) => col.name === 'daily_review_target')) {
+    db.exec(`ALTER TABLE auth_users ADD COLUMN daily_review_target INTEGER NOT NULL DEFAULT 200;`);
+  }
+  if (!cols.some((col) => col.name === 'pipeline_source')) {
+    db.exec(`ALTER TABLE chain_settings ADD COLUMN pipeline_source TEXT NOT NULL DEFAULT 'chainbase';`);
   }
   if (!cols.some((col) => col.name === 'rpc_network')) {
     db.exec(`ALTER TABLE chain_settings ADD COLUMN rpc_network TEXT NOT NULL DEFAULT '';`);
@@ -649,19 +745,19 @@ function ensureContractsRegistrySchema(db: Database.Database): void {
 
 function seedWhitelist(db: Database.Database): void {
   const wlInsert = db.prepare(`
-    INSERT OR IGNORE INTO whitelist_patterns (name, hex_pattern, pattern_type, score, description)
-    VALUES (@name, @hex_pattern, @pattern_type, @score, @description)
+    INSERT OR IGNORE INTO whitelist_patterns (name, hex_pattern, pattern_type, description)
+    VALUES (@name, @hex_pattern, @pattern_type, @description)
   `);
   const defaults = [
-    { name: 'multicall',       hex_pattern: 'ac9650d8', pattern_type: 'selector', score: 3, description: 'multicall() - has batch call' },
-    { name: 'univ2_call',      hex_pattern: '10d1e85c', pattern_type: 'selector', score: 4, description: 'uniswapV2Call() - has flash callback' },
-    { name: 'pancake_call',    hex_pattern: '84800812', pattern_type: 'selector', score: 4, description: 'pancakeCall() - has flash callback' },
-    { name: 'execute_op',      hex_pattern: 'b61d27f6', pattern_type: 'selector', score: 3, description: 'execute() - has generic proxy call' },
-    { name: 'get_amounts_out', hex_pattern: 'd06ca61f', pattern_type: 'call',     score: 2, description: 'calls getAmountsOut() - V2 oracle dep' },
-    { name: 'get_reserves',    hex_pattern: '0902f1ac', pattern_type: 'call',     score: 1, description: 'calls getReserves() - V2 oracle dep' },
-    { name: 'slot0',           hex_pattern: '3850c7bd', pattern_type: 'call',     score: 2, description: 'calls slot0() - V3 oracle dep' },
-    { name: 'flash_loan',      hex_pattern: 'ab9c4b5d', pattern_type: 'call',     score: 6, description: 'calls flashLoan()' },
-    { name: 'flash_loan_aave', hex_pattern: '42b0b77c', pattern_type: 'call',     score: 6, description: 'calls flashLoan() Aave' },
+    { name: 'multicall',       hex_pattern: 'ac9650d8', pattern_type: 'selector', description: 'multicall() - has batch call' },
+    { name: 'univ2_call',      hex_pattern: '10d1e85c', pattern_type: 'selector', description: 'uniswapV2Call() - has flash callback' },
+    { name: 'pancake_call',    hex_pattern: '84800812', pattern_type: 'selector', description: 'pancakeCall() - has flash callback' },
+    { name: 'execute_op',      hex_pattern: 'b61d27f6', pattern_type: 'selector', description: 'execute() - has generic proxy call' },
+    { name: 'get_amounts_out', hex_pattern: 'd06ca61f', pattern_type: 'call',     description: 'calls getAmountsOut() - V2 oracle dep' },
+    { name: 'get_reserves',    hex_pattern: '0902f1ac', pattern_type: 'call',     description: 'calls getReserves() - V2 oracle dep' },
+    { name: 'slot0',           hex_pattern: '3850c7bd', pattern_type: 'call',     description: 'calls slot0() - V3 oracle dep' },
+    { name: 'flash_loan',      hex_pattern: 'ab9c4b5d', pattern_type: 'call',     description: 'calls flashLoan()' },
+    { name: 'flash_loan_aave', hex_pattern: '42b0b77c', pattern_type: 'call',     description: 'calls flashLoan() Aave' },
   ];
   for (const p of defaults) wlInsert.run(p);
 }

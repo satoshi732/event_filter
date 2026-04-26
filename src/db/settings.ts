@@ -12,6 +12,7 @@ export interface ChainSettingRow {
   chainId: number;
   tablePrefix: string;
   blocksPerScan: number;
+  pipelineSource: 'chainbase' | 'rpc';
   chainbaseKeys: string[];
   rpcNetwork: string;
   rpcUrls: string[];
@@ -116,6 +117,7 @@ export function listChainSettings(): ChainSettingRow[] {
       chain_id,
       table_prefix,
       blocks_per_scan,
+      pipeline_source,
       chainbase_keys,
       rpc_network,
       rpc_urls,
@@ -133,6 +135,7 @@ export function listChainSettings(): ChainSettingRow[] {
     chain_id: number | null;
     table_prefix: string | null;
     blocks_per_scan: number;
+    pipeline_source: string | null;
     chainbase_keys: string;
     rpc_network: string | null;
     rpc_urls: string;
@@ -149,6 +152,7 @@ export function listChainSettings(): ChainSettingRow[] {
     chainId: row.chain_id ?? 0,
     tablePrefix: row.table_prefix ?? '',
     blocksPerScan: row.blocks_per_scan,
+    pipelineSource: row.pipeline_source === 'rpc' ? 'rpc' : 'chainbase',
     chainbaseKeys: parseJsonArray(row.chainbase_keys),
     rpcNetwork: row.rpc_network ?? '',
     rpcUrls: parseJsonArray(row.rpc_urls),
@@ -167,6 +171,7 @@ export function upsertChainSettings(rows: Array<{
   chainId: number;
   tablePrefix: string;
   blocksPerScan: number;
+  pipelineSource: 'chainbase' | 'rpc';
   chainbaseKeys: string[];
   rpcNetwork: string;
   rpcUrls: string[];
@@ -180,15 +185,16 @@ export function upsertChainSettings(rows: Array<{
     const stmt = getDb().prepare(`
       INSERT INTO chain_settings (
         chain, name, chain_id, table_prefix, blocks_per_scan,
-        chainbase_keys, rpc_network, rpc_urls, multicall3_address,
+        pipeline_source, chainbase_keys, rpc_network, rpc_urls, multicall3_address,
         wrapped_native_token_address,
         native_currency_name, native_currency_symbol, native_currency_decimals, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       ON CONFLICT(chain) DO UPDATE SET
         name = excluded.name,
         chain_id = excluded.chain_id,
         table_prefix = excluded.table_prefix,
         blocks_per_scan = excluded.blocks_per_scan,
+        pipeline_source = excluded.pipeline_source,
         chainbase_keys = excluded.chainbase_keys,
         rpc_network = excluded.rpc_network,
         rpc_urls = excluded.rpc_urls,
@@ -206,6 +212,7 @@ export function upsertChainSettings(rows: Array<{
         row.chainId,
         row.tablePrefix.trim(),
         row.blocksPerScan,
+        row.pipelineSource === 'rpc' ? 'rpc' : 'chainbase',
         stringifyJsonArray(row.chainbaseKeys),
         row.rpcNetwork.trim(),
         stringifyJsonArray(row.rpcUrls),
@@ -226,6 +233,7 @@ export function replaceChainSettings(rows: Array<{
   chainId: number;
   tablePrefix: string;
   blocksPerScan: number;
+  pipelineSource: 'chainbase' | 'rpc';
   chainbaseKeys: string[];
   rpcNetwork: string;
   rpcUrls: string[];
@@ -242,6 +250,7 @@ export function replaceChainSettings(rows: Array<{
       chainId: row.chainId,
       tablePrefix: row.tablePrefix.trim(),
       blocksPerScan: row.blocksPerScan,
+      pipelineSource: row.pipelineSource === 'rpc' ? 'rpc' : 'chainbase',
       chainbaseKeys: row.chainbaseKeys,
       rpcNetwork: row.rpcNetwork.trim(),
       rpcUrls: row.rpcUrls,
@@ -260,10 +269,10 @@ export function replaceChainSettings(rows: Array<{
     const stmt = db.prepare(`
       INSERT INTO chain_settings (
         chain, name, chain_id, table_prefix, blocks_per_scan,
-        chainbase_keys, rpc_network, rpc_urls, multicall3_address,
+        pipeline_source, chainbase_keys, rpc_network, rpc_urls, multicall3_address,
         wrapped_native_token_address,
         native_currency_name, native_currency_symbol, native_currency_decimals, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     `);
     for (const row of entries) {
       stmt.run(
@@ -272,6 +281,7 @@ export function replaceChainSettings(rows: Array<{
         row.chainId,
         row.tablePrefix,
         row.blocksPerScan,
+        row.pipelineSource,
         stringifyJsonArray(row.chainbaseKeys),
         row.rpcNetwork.trim(),
         stringifyJsonArray(row.rpcUrls),

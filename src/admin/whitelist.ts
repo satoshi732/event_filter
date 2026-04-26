@@ -13,12 +13,12 @@ export async function runWhitelistAdminCommand(args: string[]): Promise<number |
   }
 
   if (flag(args, '--add-whitelist-pat')) {
-    const [name, hex, type, scoreStr, ...rest] = after(args, '--add-whitelist-pat');
-    if (!name || !hex || !type || !scoreStr) {
-      console.error('Usage: --add-whitelist-pat <name> <hex> <selector|opcode|call> <score> [description]');
+    const [name, hex, type, ...rest] = after(args, '--add-whitelist-pat');
+    if (!name || !hex || !type) {
+      console.error('Usage: --add-whitelist-pat <name> <hex> <selector|opcode|call> [description]');
       return 1;
     }
-    addWhitelistPattern(name, hex, type, parseInt(scoreStr, 10), rest.join(' '));
+    addWhitelistPattern(name, hex, type, rest.join(' '));
     return 0;
   }
 

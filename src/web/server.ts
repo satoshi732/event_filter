@@ -52,6 +52,9 @@ import {
   type LatestRunMeta,
 } from '../modules/dashboard/read-model.js';
 import {
+  getDashboardInventorySummary,
+  getGlobalSyncPatternDailySeries,
+  getUserDailyActivitySeries,
   getWhitelistPatterns,
   getTokenRegistry,
   getSingleContractAiAudit,
@@ -94,7 +97,25 @@ import {
   stopAutoAnalysis,
   subscribeAutoAnalysisStatus,
 } from '../modules/auto-analysis/index.js';
-import { getAllowedChainsForUser, getUserAuthConfig, USER_FILE_PATH } from '../utils/user-auth.js';
+import { findUserAuthAccount, getAllowedChainsForUser, getUserAuthConfig } from '../utils/user-auth.js';
+import {
+  escapeHtml,
+  readJsonBody,
+  readTextFileSafe,
+  resolveProjectPath,
+  resolveReportFilePath,
+  sendHtml,
+  sendJson,
+} from './http-helpers.js';
+import {
+  coerceBoolean,
+  coercePositiveInt,
+  coerceStringArray,
+  normalizeAiModelRows,
+  parsePositiveInt,
+  sanitizeRuntimeConfig,
+} from './request-utils.js';
+import { applyDashboardContractQuery, applyDashboardTokenQuery } from './dashboard-query.js';
 
 const ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -108,84 +129,16 @@ interface WebState {
   latestRuns: Map<string, PipelineRunResult>;
 }
 
+interface RequestedRunRange {
+  fromBlock?: number | null;
+  toBlock?: number | null;
+  deltaBlocks?: number | null;
+}
+
 type StateStreamClient = ServerResponse<IncomingMessage> & {
   __stateHeartbeat?: NodeJS.Timeout;
   __username?: string;
 };
-
-function sendJson(res: ServerResponse, statusCode: number, body: unknown): void {
-  res.writeHead(statusCode, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store',
-  });
-  res.end(JSON.stringify(body));
-}
-
-function sendHtml(res: ServerResponse, statusCode: number, html: string): void {
-  res.writeHead(statusCode, {
-    'Content-Type': 'text/html; charset=utf-8',
-    'Cache-Control': 'no-store',
-  });
-  res.end(html);
-}
-
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(Buffer.from(chunk));
-  if (!chunks.length) return {};
-  return JSON.parse(Buffer.concat(chunks).toString('utf-8')) as Record<string, unknown>;
-}
-
-async function readTextFileSafe(filePath: string): Promise<string> {
-  try {
-    return await readFile(filePath, 'utf-8');
-  } catch {
-    return '';
-  }
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
-}
-
-function resolveReportFilePath(rawPath: string): string {
-  const candidate = path.isAbsolute(rawPath) ? rawPath : path.join(ROOT, rawPath);
-  return path.normalize(candidate);
-}
-
-function resolveProjectPath(rawPath: string): string {
-  const candidate = path.isAbsolute(rawPath) ? rawPath : path.join(ROOT, rawPath);
-  return path.normalize(candidate);
-}
-
-function sanitizeRuntimeConfig(snapshot: ReturnType<typeof getConfigSnapshot>) {
-  const access = snapshot.web_security ?? {};
-  return {
-    ...snapshot,
-    web_security: {
-      ...access,
-    },
-  };
-}
-
-function parsePositiveInt(value: string | null, fallback: number): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return Math.floor(parsed);
-}
-
-function compareNumberLike(a: number | null | undefined, b: number | null | undefined): number {
-  return (Number(a) || 0) - (Number(b) || 0);
-}
-
-function compareStringLike(a: string | null | undefined, b: string | null | undefined): number {
-  return String(a || '').localeCompare(String(b || ''));
-}
 
 function isAiAuditRateLimitFailure(event: AiAuditEvent): boolean {
   if (event.kind !== 'failed' || event.status !== 'failed') return false;
@@ -202,13 +155,17 @@ function serializeAutoAnalysisRuntimeConfig(username = '') {
   return {
     selected_chains: config.selectedChains,
     chain_ratios: config.chainRatios,
+    chain_configs: Object.fromEntries(
+      Object.entries(config.chainConfigs || {}).map(([chain, row]) => [chain, {
+        from_block: row.fromBlock ?? '',
+        to_block: row.toBlock ?? '',
+        delta_blocks: row.deltaBlocks ?? '',
+        token_share_percent: row.tokenSharePercent,
+        contract_share_percent: row.contractSharePercent,
+      }]),
+    ),
     queue_capacity: config.queueCapacity,
-    round_audit_limit: config.roundAuditLimit,
-    round_rest_seconds: config.roundRestSeconds,
     continue_on_empty_round: config.continueOnEmptyRound,
-    stop_at_datetime: config.stopAtDateTime || '',
-    token_share_percent: config.tokenSharePercent,
-    contract_share_percent: config.contractSharePercent,
     provider: config.provider,
     model: config.model,
     contract_min_tvl_usd: config.contractMinTvlUsd,
@@ -223,177 +180,15 @@ function serializeAutoAnalysisRuntimeConfig(username = '') {
   };
 }
 
-function applyDashboardContractQuery(
-  rows: DashboardContractSummary[],
-  search: string,
-  risk: string,
-  link: string,
-  sortKey: string,
-  sortDir: string,
-  page: number,
-  pageSize: number,
-) {
-  const compareAuditSeverity = (a: { auto_audit_critical?: number | null; auto_audit_high?: number | null; auto_audit_medium?: number | null }, b: { auto_audit_critical?: number | null; auto_audit_high?: number | null; auto_audit_medium?: number | null }) => {
-    const criticalDelta = compareNumberLike(a.auto_audit_critical ?? 0, b.auto_audit_critical ?? 0);
-    if (criticalDelta !== 0) return criticalDelta;
-    const highDelta = compareNumberLike(a.auto_audit_high ?? 0, b.auto_audit_high ?? 0);
-    if (highDelta !== 0) return highDelta;
-    return compareNumberLike(a.auto_audit_medium ?? 0, b.auto_audit_medium ?? 0);
-  };
-
-  const queryText = String(search || '').trim().toLowerCase();
-  let filtered = rows.filter((row) => {
-    const isSeen = Boolean(row.is_seen_pattern || row.is_manual_audit || row.group_kind === 'seen');
-    const riskMatch = risk === 'all'
-      || (risk === 'exploitable' && row.is_exploitable)
-      || (risk === 'seen' && isSeen)
-      || (risk === 'unseen' && !isSeen);
-    const linkType = row.link_type || 'plain';
-    const linkMatch = link === 'all' || link === linkType;
-    const searchBlob = [
-      row.contract,
-      row.linkage,
-      row.label,
-      ...(row.patterns || []),
-      ...(row.tokens || []).map((token) => `${token.token} ${token.token_symbol || ''} ${token.token_name || ''}`),
-    ].join(' ').toLowerCase();
-    const queryMatch = !queryText || searchBlob.includes(queryText);
-    return riskMatch && linkMatch && queryMatch;
-  });
-
-  filtered = [...filtered].sort((a, b) => {
-    let delta = 0;
-    switch (sortKey) {
-      case 'contract':
-        delta = compareStringLike(a.contract, b.contract);
-        break;
-      case 'label':
-        delta = compareStringLike(a.label, b.label);
-        break;
-      case 'linkage':
-        delta = compareStringLike(a.linkage, b.linkage);
-        break;
-      case 'patterns':
-        delta = compareStringLike((a.patterns || []).join(','), (b.patterns || []).join(','));
-        break;
-      case 'deployed':
-        delta = compareStringLike(a.deployed_at, b.deployed_at);
-        break;
-      case 'auto_audit_status':
-        delta = compareStringLike(a.auto_audit_status, b.auto_audit_status);
-        break;
-      case 'audit_result':
-        delta = compareAuditSeverity(a, b);
-        break;
-      case 'total_usd':
-      default:
-        delta = compareNumberLike(a.portfolio_usd, b.portfolio_usd);
-        break;
-    }
-    if (delta === 0) {
-      delta = compareStringLike(a.contract, b.contract);
-    }
-    return sortDir === 'asc' ? delta : -delta;
-  });
-
-  const totalRows = filtered.length;
-  const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
-  const normalizedPage = Math.max(1, Math.min(page, totalPages));
-  const start = (normalizedPage - 1) * pageSize;
-  return {
-    rows: filtered.slice(start, start + pageSize),
-    totalRows,
-    page: normalizedPage,
-    pageSize,
-  };
-}
-
-function applyDashboardTokenQuery(
-  rows: DashboardTokenSummary[],
-  search: string,
-  sortKey: string,
-  sortDir: string,
-  page: number,
-  pageSize: number,
-) {
-  const compareAuditSeverity = (a: { auto_audit_critical?: number | null; auto_audit_high?: number | null; auto_audit_medium?: number | null }, b: { auto_audit_critical?: number | null; auto_audit_high?: number | null; auto_audit_medium?: number | null }) => {
-    const criticalDelta = compareNumberLike(a.auto_audit_critical ?? 0, b.auto_audit_critical ?? 0);
-    if (criticalDelta !== 0) return criticalDelta;
-    const highDelta = compareNumberLike(a.auto_audit_high ?? 0, b.auto_audit_high ?? 0);
-    if (highDelta !== 0) return highDelta;
-    return compareNumberLike(a.auto_audit_medium ?? 0, b.auto_audit_medium ?? 0);
-  };
-
-  const queryText = String(search || '').trim().toLowerCase();
-  let filtered = rows.filter((row) => {
-    const searchBlob = `${row.token} ${row.token_name || ''} ${row.token_symbol || ''}`.toLowerCase();
-    return !queryText || searchBlob.includes(queryText);
-  });
-
-  filtered = [...filtered].sort((a, b) => {
-    let delta = 0;
-    switch (sortKey) {
-      case 'token':
-        delta = compareStringLike(a.token, b.token);
-        break;
-      case 'name':
-        delta = compareStringLike(a.token_name || a.token, b.token_name || b.token);
-        break;
-      case 'symbol':
-        delta = compareStringLike(a.token_symbol, b.token_symbol);
-        break;
-      case 'sync':
-        delta = compareStringLike(String(a.token_calls_sync), String(b.token_calls_sync));
-        break;
-      case 'auto_audit_status':
-        delta = compareStringLike(a.auto_audit_status, b.auto_audit_status);
-        break;
-      case 'audit_result':
-        delta = compareAuditSeverity(a, b);
-        break;
-      case 'manual_audit':
-        delta = compareNumberLike(a.is_manual_audit ? 1 : 0, b.is_manual_audit ? 1 : 0);
-        break;
-      case 'deployed':
-        delta = compareStringLike(a.token_created_at || '', b.token_created_at || '');
-        break;
-      case 'price':
-        delta = compareNumberLike(a.token_price_usd, b.token_price_usd);
-        break;
-      case 'processing':
-        delta = compareNumberLike(a.processing_percent, b.processing_percent);
-        break;
-      case 'contracts':
-      default:
-        delta = compareNumberLike(a.related_contract_count, b.related_contract_count);
-        break;
-    }
-    if (delta === 0) {
-      delta = compareStringLike(a.token, b.token);
-    }
-    return sortDir === 'asc' ? delta : -delta;
-  });
-
-  const totalRows = filtered.length;
-  const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
-  const normalizedPage = Math.max(1, Math.min(page, totalPages));
-  const start = (normalizedPage - 1) * pageSize;
-  return {
-    rows: filtered.slice(start, start + pageSize),
-    totalRows,
-    page: normalizedPage,
-    pageSize,
-  };
-}
-
 async function buildSettingsPayload(username = '') {
   const snapshot = getConfigSnapshot();
   const chainConfigs = getChainConfigsSnapshot();
   const security = getWebSecurityConfig();
   const userAuth = getUserAuthConfig();
   const effectiveUsername = String(username || userAuth.username || '').trim();
+  const allChains = Object.keys(chainConfigs);
   const allowedChains = getAllowedChainsForUser(userAuth, effectiveUsername, Object.keys(chainConfigs));
-  const currentUserRecord = userAuth.users.find((user) => user.username === effectiveUsername) || userAuth.users[0] || null;
+  const currentUserRecord = findUserAuthAccount(userAuth, effectiveUsername) || userAuth.users[0] || null;
 
   return {
     runtime_settings: {
@@ -411,8 +206,9 @@ async function buildSettingsPayload(username = '') {
         role: currentUserRecord?.role || userAuth.role,
         ai_api_key: currentUserRecord?.aiApiKey || '',
         has_ai_api_key: Boolean(currentUserRecord?.aiApiKey),
-        allowed_chains: allowedChains,
-        available_chains: allowedChains,
+        allowed_chains: currentUserRecord?.allowedChains || [],
+        daily_review_target: currentUserRecord?.dailyReviewTarget || 200,
+        available_chains: allChains,
       },
       access: {
         auth_enabled: userAuth.authEnabled,
@@ -423,10 +219,11 @@ async function buildSettingsPayload(username = '') {
           role: user.role,
           has_ai_api_key: Boolean(user.aiApiKey),
           allowed_chains: user.allowedChains || [],
+          daily_review_target: user.dailyReviewTarget || 200,
         })),
         password: '',
         has_password: Boolean(userAuth.passwordHash),
-        auth_source: path.relative(ROOT, USER_FILE_PATH),
+        auth_source: 'state.db / auth_users',
         https_enabled: security.httpsEnabled,
         tls_cert_path: security.tlsCertPath,
         tls_key_path: security.tlsKeyPath,
@@ -438,6 +235,7 @@ async function buildSettingsPayload(username = '') {
       chain_id: cfg.chainId,
       table_prefix: cfg.tablePrefix,
       blocks_per_scan: cfg.blocksPerScan,
+      pipeline_source: cfg.pipelineSource,
       chainbase_keys: cfg.chainbaseKeys,
       rpc_network: cfg.rpcNetwork,
       multicall3: cfg.multicall3Address,
@@ -452,6 +250,41 @@ async function buildSettingsPayload(username = '') {
   };
 }
 
+function buildDashboardHomePayload(username: string, visibleChains: string[]) {
+  const userAuth = getUserAuthConfig();
+  const effectiveUsername = String(username || userAuth.username || '').trim().toLowerCase();
+  const account = findUserAuthAccount(userAuth, effectiveUsername);
+  const autoStatus = getAutoAnalysisStatus(effectiveUsername);
+  const activitySeries = getUserDailyActivitySeries(effectiveUsername, 14);
+  const todayActivity = activitySeries[activitySeries.length - 1] || null;
+  const dailyReviewTarget = account?.dailyReviewTarget || 200;
+  const todayReviewCount = Number(todayActivity?.review_count || 0);
+  return {
+    username: effectiveUsername,
+    activity_series: activitySeries,
+    global_sync_series: getGlobalSyncPatternDailySeries(14),
+    daily_assign: {
+      target: dailyReviewTarget,
+      review_count: todayReviewCount,
+      percent: dailyReviewTarget > 0 ? Math.max(0, Math.min(100, Math.round((todayReviewCount / dailyReviewTarget) * 100))) : 0,
+    },
+    inventory: getDashboardInventorySummary(visibleChains),
+    auto_status: {
+      enabled: autoStatus.enabled,
+      phase: autoStatus.phase,
+      chain: autoStatus.chain,
+      queued: autoStatus.queuedThisRound,
+      running: autoStatus.runningThisRound,
+      completed: autoStatus.completedThisRound,
+      failed: autoStatus.failedThisRound,
+      capacity: autoStatus.capacity,
+      cycle: autoStatus.cycle,
+      last_action: autoStatus.lastAction,
+      updated_at: autoStatus.updatedAt,
+    },
+  };
+}
+
 function buildAiAuditConfigPayload() {
   return {
     ai_providers: getAiAuditProviderConfigs(),
@@ -459,78 +292,6 @@ function buildAiAuditConfigPayload() {
     default_provider: getDefaultAiAuditProvider(),
     default_model: getDefaultAiAuditModel(getDefaultAiAuditProvider()),
   };
-}
-
-function coerceStringArray(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return [...new Set(value.map((entry) => String(entry || '').trim()).filter(Boolean))];
-  }
-  if (typeof value === 'string') {
-    return [...new Set(
-      value
-        .split(/\r?\n|,/)
-        .map((entry) => entry.trim())
-        .filter(Boolean),
-    )];
-  }
-  return [];
-}
-
-function coercePositiveInt(value: unknown, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
-}
-
-function coerceBoolean(value: unknown, fallback = false): boolean {
-  if (typeof value === 'boolean') return value;
-  if (typeof value === 'number') return value !== 0;
-  if (typeof value === 'string') {
-    const normalized = value.trim().toLowerCase();
-    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
-    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-  }
-  return fallback;
-}
-
-function normalizeAiModelRows(
-  providers: Array<{ provider: string; enabled: boolean; position: number }>,
-  models: Array<{ provider: string; model: string; enabled: boolean; isDefault: boolean; position: number }>,
-): Array<{ provider: string; model: string; enabled: boolean; isDefault: boolean; position: number }> {
-  const activeProviders = new Set(providers.map((row) => row.provider.trim().toLowerCase()).filter(Boolean));
-  const filtered = models
-    .map((row) => ({
-      provider: row.provider.trim().toLowerCase(),
-      model: row.model.trim(),
-      enabled: row.enabled,
-      isDefault: row.isDefault,
-      position: row.position,
-    }))
-    .filter((row) => row.provider && row.model && activeProviders.has(row.provider));
-
-  const byProvider = new Map<string, typeof filtered>();
-  for (const row of filtered) {
-    const bucket = byProvider.get(row.provider) ?? [];
-    bucket.push(row);
-    byProvider.set(row.provider, bucket);
-  }
-
-  for (const rows of byProvider.values()) {
-    rows.sort((a, b) => a.position - b.position || a.model.localeCompare(b.model));
-    if (!rows.some((row) => row.isDefault)) {
-      if (rows[0]) rows[0].isDefault = true;
-      continue;
-    }
-    let seenDefault = false;
-    for (const row of rows) {
-      if (row.isDefault && !seenDefault) {
-        seenDefault = true;
-      } else if (row.isDefault) {
-        row.isDefault = false;
-      }
-    }
-  }
-
-  return filtered;
 }
 
 async function renderPage(res: ServerResponse, viewPath: string, data: Record<string, unknown>): Promise<void> {
@@ -618,8 +379,9 @@ export async function startWebServer(
   async function buildStatePayload(username = '') {
     const syncStatus = await getPatternSyncStatus();
     const userAuth = getUserAuthConfig();
+    const effectiveUsername = String(username || userAuth.username || '').trim().toLowerCase();
     const runtimeChains = getAvailableChains();
-    const visibleChains = getAllowedChainsForUser(userAuth, username, runtimeChains);
+    const visibleChains = getAllowedChainsForUser(userAuth, effectiveUsername, runtimeChains);
     const latestRuns = visibleChains.flatMap((chain) => {
       const inMemory = state.latestRuns.get(chain);
       if (inMemory) return [latestRunMeta(inMemory)];
@@ -641,7 +403,8 @@ export async function startWebServer(
       default_chain: visibleChains[0] ?? null,
       latest_runs: latestRuns,
       sync_status: syncStatus,
-      auto_analysis: getAutoAnalysisStatus(username),
+      auto_analysis: getAutoAnalysisStatus(effectiveUsername),
+      dashboard_home: buildDashboardHomePayload(effectiveUsername, visibleChains),
     };
   }
 
@@ -683,7 +446,11 @@ export async function startWebServer(
     }
   }
 
-  async function handleRun(chain: string, ownerUsername: string | null = ''): Promise<PipelineRunResult> {
+  async function handleRun(
+    chain: string,
+    ownerUsername: string | null = '',
+    range: RequestedRunRange = {},
+  ): Promise<PipelineRunResult> {
     if (state.running) {
       throw new Error(`Scan already running for ${state.runningChain ?? 'unknown chain'}`);
     }
@@ -709,6 +476,7 @@ export async function startWebServer(
 
     try {
       const run = await runPipeline(chain, {
+        range,
         onProgress: (update) => {
           state.progress = update;
           void broadcastStateSnapshot();
@@ -797,8 +565,8 @@ export async function startWebServer(
     readJsonBody,
     readTextFileSafe,
     escapeHtml,
-    resolveReportFilePath,
-    resolveProjectPath,
+    resolveReportFilePath: (rawPath) => resolveReportFilePath(ROOT, rawPath),
+    resolveProjectPath: (rawPath) => resolveProjectPath(ROOT, rawPath),
     buildStatePayload,
     buildSettingsPayload,
     buildAiAuditConfigPayload,
@@ -925,8 +693,8 @@ export async function startWebServer(
   }
   const server = useHttps
     ? createHttpsServer({
-        key: await readFile(resolveProjectPath(startupSecurity.tlsKeyPath)),
-        cert: await readFile(resolveProjectPath(startupSecurity.tlsCertPath)),
+        key: await readFile(resolveProjectPath(ROOT, startupSecurity.tlsKeyPath)),
+        cert: await readFile(resolveProjectPath(ROOT, startupSecurity.tlsCertPath)),
       }, requestHandler)
     : createServer(requestHandler);
 

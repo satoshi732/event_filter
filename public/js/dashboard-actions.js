@@ -33,6 +33,7 @@
     } = deps;
 
     let copiedAddressTimer = null;
+    let autoAnalysisRatioDrag = null;
 
     function upsertContractReview(reviews, nextReview) {
       const rows = Array.isArray(reviews) ? reviews.slice() : [];
@@ -203,12 +204,73 @@
       await loaders.refreshCurrent();
     }
 
-    async function runScan() {
-      if (!state.selectedChain || state.running) return;
+    function openRunRoundModal() {
+      Object.assign(state.runRoundModal, {
+        open: true,
+        chain: String(state.selectedChain || state.runRoundModal?.chain || state.chains?.[0] || '').trim().toLowerCase(),
+        fromBlock: String(state.runRange?.fromBlock || ''),
+        toBlock: String(state.runRange?.toBlock || ''),
+        deltaBlocks: String(state.runRange?.deltaBlocks || ''),
+        error: '',
+      });
+    }
+
+    function closeRunRoundModal() {
+      Object.assign(state.runRoundModal, {
+        open: false,
+        error: '',
+      });
+    }
+
+    async function runScan(input = null) {
+      const requestedChain = String(input?.chain || state.selectedChain || '').trim().toLowerCase();
+      if (!requestedChain || state.running) return false;
+      const rawFromBlock = String(input?.fromBlock ?? state.runRange?.fromBlock ?? '').trim();
+      const rawToBlock = String(input?.toBlock ?? state.runRange?.toBlock ?? '').trim();
+      const rawDeltaBlocks = String(input?.deltaBlocks ?? state.runRange?.deltaBlocks ?? '').trim();
+      const parseBlockInput = (label, value) => {
+        if (!value) return undefined;
+        if (!/^\d+$/.test(value)) {
+          throw new Error(`${label} block must be a non-negative integer`);
+        }
+        return Number(value);
+      };
+      const parseDeltaInput = (value) => {
+        if (!value) return undefined;
+        if (!/^\d+$/.test(value)) {
+          throw new Error('Delta blocks must be a positive integer');
+        }
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+          throw new Error('Delta blocks must be a positive integer');
+        }
+        return parsed;
+      };
+
+      let fromBlock;
+      let toBlock;
+      let deltaBlocks;
+      try {
+        fromBlock = parseBlockInput('From', rawFromBlock);
+        toBlock = parseBlockInput('To', rawToBlock);
+        deltaBlocks = parseDeltaInput(rawDeltaBlocks);
+        if (fromBlock != null && toBlock != null && toBlock <= fromBlock) {
+          throw new Error('To block must be greater than From block');
+        }
+      } catch (err) {
+        pushNotification(err instanceof Error ? err.message : String(err), 'error', 4200);
+        return;
+      }
+
+      Object.assign(state.runRange, {
+        fromBlock: rawFromBlock,
+        toBlock: rawToBlock,
+        deltaBlocks: rawDeltaBlocks,
+      });
       state.running = true;
-      state.runningChain = state.selectedChain;
+      state.runningChain = requestedChain;
       state.progress = {
-        chain: state.selectedChain,
+        chain: requestedChain,
         stage: 'boot',
         label: 'Starting pipeline round',
         percent: 1,
@@ -218,13 +280,44 @@
         await apiFetch('/api/run', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chain: state.selectedChain }),
+          body: JSON.stringify({
+            chain: requestedChain,
+            ...(fromBlock != null ? { fromBlock } : {}),
+            ...(toBlock != null ? { toBlock } : {}),
+            ...(deltaBlocks != null ? { deltaBlocks } : {}),
+          }),
         });
-        await loaders.refreshCurrent();
+        const chainChanged = requestedChain !== state.selectedChain;
+        if (chainChanged) {
+          state.selectedChain = requestedChain;
+          await handleChainChanged();
+        } else {
+          await loaders.refreshCurrent();
+        }
+        return true;
       } catch (err) {
         pushNotification(err instanceof Error ? err.message : String(err), 'error', 5200);
+        return false;
       } finally {
         state.running = false;
+      }
+    }
+
+    async function confirmRunRoundModal() {
+      const targetChain = String(state.runRoundModal?.chain || '').trim().toLowerCase();
+      if (!targetChain) {
+        state.runRoundModal.error = 'Chain is required';
+        return;
+      }
+      state.runRoundModal.error = '';
+      const didRun = await runScan({
+        chain: targetChain,
+        fromBlock: state.runRoundModal.fromBlock,
+        toBlock: state.runRoundModal.toBlock,
+        deltaBlocks: state.runRoundModal.deltaBlocks,
+      });
+      if (didRun) {
+        closeRunRoundModal();
       }
     }
 
@@ -258,7 +351,35 @@
         ? state.settings.runtime_settings.auto_analysis.selected_chains
         : [];
       if (!selectedAutoChains.length && !wasEnabled) return;
+      const autoRange = state.settings.runtime_settings.auto_analysis || {};
+      const parseOptionalBlock = (label, value) => {
+        const normalized = String(value ?? '').trim();
+        if (!normalized) return undefined;
+        if (!/^\d+$/.test(normalized)) {
+          throw new Error(`Auto ${label} block must be a non-negative integer`);
+        }
+        return Number(normalized);
+      };
       try {
+        if (!wasEnabled) {
+          const chainConfigs = autoRange.chain_configs && typeof autoRange.chain_configs === 'object'
+            ? autoRange.chain_configs
+            : {};
+          for (const chain of selectedAutoChains) {
+            const chainConfig = chainConfigs[chain] && typeof chainConfigs[chain] === 'object'
+              ? chainConfigs[chain]
+              : {};
+            const fromBlock = parseOptionalBlock(`${String(chain).toUpperCase()} From`, chainConfig.from_block);
+            const toBlock = parseOptionalBlock(`${String(chain).toUpperCase()} To`, chainConfig.to_block);
+            const deltaBlocks = parseOptionalBlock(`${String(chain).toUpperCase()} Delta`, chainConfig.delta_blocks);
+            if (fromBlock != null && toBlock != null && toBlock <= fromBlock) {
+              throw new Error(`${String(chain).toUpperCase()} To block must be greater than From block`);
+            }
+            if (deltaBlocks != null && deltaBlocks <= 0) {
+              throw new Error(`${String(chain).toUpperCase()} Delta blocks must be a positive integer`);
+            }
+          }
+        }
         const data = wasEnabled
           ? await apiFetch('/api/auto-analysis/stop', {
             method: 'POST',
@@ -309,8 +430,18 @@
       }
     }
 
-    function openDashboardMain() {
-      state.dashboardTab = 'tokens';
+    async function openDashboardMain() {
+      state.dashboardTab = 'dashboard';
+      if (currentView.value === 'dashboard') {
+        syncDashboardUrlState();
+        await loaders.loadDashboard({ force: true });
+        return;
+      }
+      navigateDashboard();
+    }
+
+    function openContractsMain() {
+      state.dashboardTab = 'contracts';
       navigateDashboard();
     }
 
@@ -595,6 +726,79 @@
       window.open(targetUrl, '_blank', 'noopener');
     }
 
+    function closeAuditReportDrawer() {
+      Object.assign(state.auditReportDrawer, {
+        open: false,
+        loading: false,
+        targetType: 'contract',
+        targetAddr: '',
+        title: '',
+        chain: '',
+        reportPath: '',
+        content: '',
+        error: '',
+      });
+    }
+
+    async function openAuditResultDrawer(targetType, targetAddr, title) {
+      const normalizedType = String(targetType || '').trim().toLowerCase() === 'token' ? 'token' : 'contract';
+      const normalizedAddr = String(targetAddr || '').trim().toLowerCase();
+      const normalizedChain = String(state.selectedChain || '').trim().toLowerCase();
+      if (!normalizedChain || !normalizedAddr) return;
+      Object.assign(state.auditReportDrawer, {
+        open: true,
+        loading: true,
+        targetType: normalizedType,
+        targetAddr: normalizedAddr,
+        title: String(title || normalizedAddr).trim(),
+        chain: normalizedChain,
+        reportPath: '',
+        content: '',
+        error: '',
+      });
+      try {
+        const queryKey = normalizedType === 'token' ? 'token' : 'contract';
+        const data = await apiFetch(
+          `/api/${normalizedType}-analysis/report?chain=${encodeURIComponent(normalizedChain)}&${queryKey}=${encodeURIComponent(normalizedAddr)}&format=json`,
+        );
+        if (
+          state.auditReportDrawer.targetType !== normalizedType
+          || state.auditReportDrawer.targetAddr !== normalizedAddr
+          || state.auditReportDrawer.chain !== normalizedChain
+        ) return;
+        Object.assign(state.auditReportDrawer, {
+          open: true,
+          loading: false,
+          title: String(data.title || title || normalizedAddr).trim(),
+          reportPath: String(data.report_path || '').trim(),
+          content: String(data.report_text || ''),
+          error: '',
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        Object.assign(state.auditReportDrawer, {
+          open: true,
+          loading: false,
+          reportPath: '',
+          content: '',
+          error: message,
+        });
+        pushNotification(message, 'error', 4200);
+      }
+    }
+
+    async function openContractAuditResultDrawer(row) {
+      if (autoAuditStatusLabel(row?.auto_audit_status) !== 'yes' || !row?.contract) return;
+      const title = row?.label || row?.contract;
+      await openAuditResultDrawer('contract', row.contract, title);
+    }
+
+    async function openTokenAuditResultDrawer(row) {
+      if (autoAuditStatusLabel(row?.auto_audit_status) !== 'yes' || !row?.token) return;
+      const title = row?.token_symbol || row?.token_name || row?.token;
+      await openAuditResultDrawer('token', row.token, title);
+    }
+
     function buildChainConfigDraft() {
       return {
         chain: '',
@@ -602,6 +806,7 @@
         chain_id: '',
         table_prefix: '',
         blocks_per_scan: 75,
+        pipeline_source: 'chainbase',
         rpc_network: '',
         multicall3: '',
         wrapped_native_token_address: '',
@@ -618,6 +823,7 @@
         chain_id: Number.isFinite(Number(row?.chain_id)) ? Number(row.chain_id) : '',
         table_prefix: String(row?.table_prefix || '').trim(),
         blocks_per_scan: Number.isFinite(Number(row?.blocks_per_scan)) ? Number(row.blocks_per_scan) : 75,
+        pipeline_source: String(row?.pipeline_source || '').trim().toLowerCase() === 'rpc' ? 'rpc' : 'chainbase',
         rpc_network: String(row?.rpc_network || '').trim(),
         multicall3: String(row?.multicall3 || '').trim().toLowerCase(),
         wrapped_native_token_address: String(row?.wrapped_native_token_address || '').trim().toLowerCase(),
@@ -675,6 +881,20 @@
             ? Math.max(1, Math.floor(Number(auto.chain_ratios[candidate])))
             : 100,
         },
+        chain_configs: {
+          ...(auto.chain_configs || {}),
+          [candidate]: {
+            from_block: String(auto.chain_configs?.[candidate]?.from_block || '').trim(),
+            to_block: String(auto.chain_configs?.[candidate]?.to_block || '').trim(),
+            delta_blocks: String(auto.chain_configs?.[candidate]?.delta_blocks || '').trim(),
+            token_share_percent: Number.isFinite(Number(auto.chain_configs?.[candidate]?.token_share_percent))
+              ? Math.max(0, Math.min(100, Math.floor(Number(auto.chain_configs[candidate].token_share_percent))))
+              : 40,
+            contract_share_percent: Number.isFinite(Number(auto.chain_configs?.[candidate]?.contract_share_percent))
+              ? Math.max(0, Math.min(100, Math.floor(Number(auto.chain_configs[candidate].contract_share_percent))))
+              : 60,
+          },
+        },
         chain_candidate: availableChains.find((chain) => !nextSelectedChains.includes(chain)) || '',
       };
     }
@@ -701,7 +921,9 @@
       const normalized = String(chain || '').trim().toLowerCase();
       const nextSelectedChains = (auto.selected_chains || []).filter((entry) => String(entry || '').trim().toLowerCase() !== normalized);
       const nextChainRatios = { ...(auto.chain_ratios || {}) };
+      const nextChainConfigs = { ...(auto.chain_configs || {}) };
       delete nextChainRatios[normalized];
+      delete nextChainConfigs[normalized];
       const availableChains = Array.isArray(state.chains) && state.chains.length
         ? state.chains.map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean)
         : (Array.isArray(state.settings.runtime_settings.account?.available_chains)
@@ -711,8 +933,125 @@
         ...auto,
         selected_chains: nextSelectedChains,
         chain_ratios: nextChainRatios,
+        chain_configs: nextChainConfigs,
         chain_candidate: availableChains.find((entry) => !nextSelectedChains.includes(entry)) || '',
       };
+    }
+
+    function beginAutoAnalysisRatioDrag(index, event) {
+      const auto = state.settings.runtime_settings.auto_analysis || {};
+      const selectedChains = Array.isArray(auto.selected_chains)
+        ? auto.selected_chains.map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean)
+        : [];
+      if (!Number.isInteger(index) || index < 0 || index >= selectedChains.length - 1) return;
+
+      const bar = event?.currentTarget?.closest?.('[data-auto-ratio-bar]');
+      if (!bar) return;
+
+      const ratios = selectedChains.map((chain) => {
+        const parsed = Number(auto.chain_ratios?.[chain]);
+        return Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.floor(parsed)) : 100;
+      });
+      const totalWeight = ratios.reduce((sum, value) => sum + value, 0);
+      if (!Number.isFinite(totalWeight) || totalWeight <= 1) return;
+
+      const pairWeight = ratios[index] + ratios[index + 1];
+      const beforeWeight = ratios.slice(0, index).reduce((sum, value) => sum + value, 0);
+      if (pairWeight <= 1) return;
+
+      const rect = bar.getBoundingClientRect();
+      const minWeight = 1;
+
+      const applyPointer = (clientX) => {
+        if (!Number.isFinite(clientX) || rect.width <= 0) return;
+        const relative = Math.max(0, Math.min(rect.width, clientX - rect.left));
+        const boundaryRatio = relative / rect.width;
+        const minBoundary = (beforeWeight + minWeight) / totalWeight;
+        const maxBoundary = (beforeWeight + pairWeight - minWeight) / totalWeight;
+        const clampedBoundary = Math.max(minBoundary, Math.min(maxBoundary, boundaryRatio));
+        const pairLeftRatio = (clampedBoundary - (beforeWeight / totalWeight)) / (pairWeight / totalWeight);
+        const nextLeft = Math.max(minWeight, Math.min(pairWeight - minWeight, Math.round(pairWeight * pairLeftRatio)));
+        const nextRight = pairWeight - nextLeft;
+        const nextRatios = {
+          ...(auto.chain_ratios || {}),
+          [selectedChains[index]]: nextLeft,
+          [selectedChains[index + 1]]: nextRight,
+        };
+        state.settings.runtime_settings.auto_analysis = {
+          ...auto,
+          chain_ratios: nextRatios,
+        };
+      };
+
+      const handleMove = (moveEvent) => {
+        moveEvent.preventDefault();
+        applyPointer(moveEvent.clientX);
+      };
+
+      const finish = () => {
+        if (!autoAnalysisRatioDrag) return;
+        window.removeEventListener('pointermove', autoAnalysisRatioDrag.handleMove);
+        window.removeEventListener('pointerup', autoAnalysisRatioDrag.finish);
+        window.removeEventListener('pointercancel', autoAnalysisRatioDrag.finish);
+        autoAnalysisRatioDrag = null;
+      };
+
+      finish();
+      autoAnalysisRatioDrag = { handleMove, finish };
+      window.addEventListener('pointermove', handleMove);
+      window.addEventListener('pointerup', finish, { once: true });
+      window.addEventListener('pointercancel', finish, { once: true });
+      applyPointer(event.clientX);
+    }
+
+    function beginAutoAnalysisMixDrag(chain, event) {
+      const auto = state.settings.runtime_settings.auto_analysis || {};
+      const normalizedChain = String(chain || '').trim().toLowerCase();
+      if (!normalizedChain) return;
+
+      const bar = event?.currentTarget?.closest?.('[data-auto-mix-bar]');
+      if (!bar) return;
+
+      const rect = bar.getBoundingClientRect();
+      const currentConfig = auto.chain_configs?.[normalizedChain] || {};
+
+      const applyPointer = (clientX) => {
+        if (!Number.isFinite(clientX) || rect.width <= 0) return;
+        const relative = Math.max(0, Math.min(rect.width, clientX - rect.left));
+        const tokenPercent = Math.max(0, Math.min(100, Math.round((relative / rect.width) * 100)));
+        const contractPercent = Math.max(0, 100 - tokenPercent);
+        state.settings.runtime_settings.auto_analysis = {
+          ...auto,
+          chain_configs: {
+            ...(auto.chain_configs || {}),
+            [normalizedChain]: {
+              ...currentConfig,
+              token_share_percent: tokenPercent,
+              contract_share_percent: contractPercent,
+            },
+          },
+        };
+      };
+
+      const handleMove = (moveEvent) => {
+        moveEvent.preventDefault();
+        applyPointer(moveEvent.clientX);
+      };
+
+      const finish = () => {
+        if (!autoAnalysisRatioDrag) return;
+        window.removeEventListener('pointermove', autoAnalysisRatioDrag.handleMove);
+        window.removeEventListener('pointerup', autoAnalysisRatioDrag.finish);
+        window.removeEventListener('pointercancel', autoAnalysisRatioDrag.finish);
+        autoAnalysisRatioDrag = null;
+      };
+
+      finish();
+      autoAnalysisRatioDrag = { handleMove, finish };
+      window.addEventListener('pointermove', handleMove);
+      window.addEventListener('pointerup', finish, { once: true });
+      window.addEventListener('pointercancel', finish, { once: true });
+      applyPointer(event.clientX);
     }
 
     function addAiProviderRow() {
@@ -756,8 +1095,8 @@
         name: '',
         hex_pattern: '',
         pattern_type: 'selector',
-        score: 1,
         description: '',
+        created_by_username: String(state.currentUser || state.settings.runtime_settings.account?.username || '').trim().toLowerCase(),
       });
     }
 
@@ -765,8 +1104,55 @@
       state.settings.whitelist_patterns.splice(index, 1);
     }
 
-    async function saveSettings() {
-      if (!state.isAdmin) {
+    async function createManagedUserAccount() {
+      const draft = state.settings.runtime_settings.access?.new_user || {};
+      try {
+        const data = await apiFetch('/api/admin/users', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: String(draft.username || '').trim(),
+            password: String(draft.password || ''),
+            role: String(draft.role || 'user').trim().toLowerCase() || 'user',
+          }),
+        });
+        applySettingsPayload(data.settings || {});
+        if (state.settings.runtime_settings.access) {
+          state.settings.runtime_settings.access.new_user = {
+            username: '',
+            password: '',
+            role: 'user',
+          };
+        }
+        viewDataCache.settings = null;
+        pushNotification('User added', 'success');
+      } catch (err) {
+        pushNotification(err instanceof Error ? err.message : String(err), 'error', 5200);
+      }
+    }
+
+    async function deleteManagedUserAccount(username) {
+      const normalized = String(username || '').trim();
+      if (!normalized) return;
+      try {
+        const data = await apiFetch('/api/admin/users', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: normalized,
+          }),
+        });
+        applySettingsPayload(data.settings || {});
+        viewDataCache.settings = null;
+        pushNotification('User deleted', 'success');
+      } catch (err) {
+        pushNotification(err instanceof Error ? err.message : String(err), 'error', 5200);
+      }
+    }
+
+    async function saveSettings(section = '') {
+      const targetSection = String(section || state.settingsSection || '').trim().toLowerCase();
+      if (!state.isAdmin && targetSection !== 'whitelist') {
         await saveAccountSettings();
         return;
       }
@@ -789,12 +1175,13 @@
         .filter((row) => row.provider && row.model);
 
       const whitelistPatterns = (state.settings.whitelist_patterns || [])
-        .map((row, index) => ({
+        .map((row) => ({
+          id: Number.isFinite(Number(row.id)) ? Number(row.id) : undefined,
           name: String(row.name || '').trim(),
           hex_pattern: String(row.hex_pattern || '').trim().toLowerCase().replace(/^0x/, ''),
           pattern_type: String(row.pattern_type || 'selector').trim().toLowerCase() || 'selector',
-          score: Number.isFinite(Number(row.score)) ? Number(row.score) : (index + 1),
           description: String(row.description || '').trim(),
+          created_by_username: String(row.created_by_username || '').trim().toLowerCase(),
         }))
         .filter((row) => row.name && row.hex_pattern);
       const accessUsers = ((state.settings.runtime_settings.access?.users) || [])
@@ -816,21 +1203,37 @@
           state.settings.runtime_settings.auto_analysis.provider,
           state.settings.runtime_settings.auto_analysis.model,
         );
+        const runtimeSettingsPayload = {};
+        if (targetSection === 'keys') {
+          runtimeSettingsPayload.chainbase_keys = state.settings.runtime_settings.chainbase_keys;
+          runtimeSettingsPayload.rpc_keys = state.settings.runtime_settings.rpc_keys;
+        }
+        if (targetSection === 'access') {
+          runtimeSettingsPayload.access = {
+            ...(state.settings.runtime_settings.access || {}),
+            users: accessUsers,
+          };
+        }
+        if (targetSection === 'pattern-sync') {
+          runtimeSettingsPayload.pattern_sync = { ...(state.settings.runtime_settings.pattern_sync || {}) };
+        }
+        if (targetSection === 'ai') {
+          runtimeSettingsPayload.ai_audit_backend = { ...(state.settings.runtime_settings.ai_audit_backend || {}) };
+        }
         const data = await apiFetch('/api/settings', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            runtime_settings: {
-              ...state.settings.runtime_settings,
-              access: {
-                ...(state.settings.runtime_settings.access || {}),
-                users: accessUsers,
-              },
-            },
-            chain_configs: chainConfigs,
-            ai_providers: aiProviders,
-            ai_models: aiModels,
-            whitelist_patterns: whitelistPatterns,
+            section: targetSection,
+            runtime_settings: runtimeSettingsPayload,
+            ...(targetSection === 'chains' ? { chain_configs: chainConfigs } : {}),
+            ...(targetSection === 'ai'
+              ? {
+                  ai_providers: aiProviders,
+                  ai_models: aiModels,
+                }
+              : {}),
+            ...(targetSection === 'whitelist' ? { whitelist_patterns: whitelistPatterns } : {}),
           }),
         });
         applySettingsPayload({
@@ -852,7 +1255,7 @@
           payload: data.settings || data,
           cachedAt: Date.now(),
         };
-        pushNotification('Settings saved and hot-applied', 'success');
+        pushNotification('Settings saved', 'success');
       } catch (err) {
         pushNotification(err instanceof Error ? err.message : String(err), 'error', 5200);
       }
@@ -868,6 +1271,7 @@
             username: String(account.username || '').trim(),
             ai_api_key: String(account.ai_api_key || '').trim(),
             allowed_chains: Array.isArray(account.allowed_chains) ? account.allowed_chains : [],
+            daily_review_target: Number(account.daily_review_target) > 0 ? Math.floor(Number(account.daily_review_target)) : 200,
             current_password: String(account.current_password || ''),
             new_password: String(account.new_password || ''),
             confirm_password: String(account.confirm_password || ''),
@@ -987,12 +1391,16 @@
     return {
       handleChainChanged,
       runScan,
+      openRunRoundModal,
+      closeRunRoundModal,
+      confirmRunRoundModal,
       syncTokenPrices,
       toggleAutoAnalysis,
       navigateDashboard,
       navigateToken,
       navigateContract,
       openDashboardMain,
+      openContractsMain,
       openAutoMode,
       openSettings,
       openToken,
@@ -1007,10 +1415,15 @@
       requestTokenAnalysis,
       openAiReport,
       openTokenAiReport,
+      openContractAuditResultDrawer,
+      openTokenAuditResultDrawer,
+      closeAuditReportDrawer,
       addAccountAllowedChain,
       addAutoAnalysisChain,
       removeAccountAllowedChain,
       removeAutoAnalysisChain,
+      beginAutoAnalysisRatioDrag,
+      beginAutoAnalysisMixDrag,
       addChainConfigRow,
       removeChainConfigRow,
       addAiProviderRow,
@@ -1019,6 +1432,8 @@
       removeAiModelRow,
       addWhitelistPatternRow,
       removeWhitelistPatternRow,
+      createManagedUserAccount,
+      deleteManagedUserAccount,
       saveSettings,
       saveAccountSettings,
       saveReview,

@@ -2,9 +2,11 @@
   const vueApi = window.Vue;
   const routerApi = window.VueRouter;
   const piniaApi = window.Pinia;
+  const echartsApi = window.echarts;
+  const vueEChartsApi = window.VueECharts;
   const appRoot = document.getElementById('app');
 
-  if (!vueApi || !routerApi || !piniaApi) {
+  if (!vueApi || !routerApi || !piniaApi || !echartsApi || !vueEChartsApi) {
     if (appRoot) {
       appRoot.removeAttribute('v-cloak');
       appRoot.innerHTML = `
@@ -14,7 +16,7 @@
             <span class="muted">Frontend runtime missing</span>
           </div>
           <p class="muted">
-            The dashboard could not load its local Vue, Router, or Pinia runtime. Check static asset delivery and refresh the page.
+            The dashboard could not load its local Vue, Router, Pinia, or chart runtime. Check static asset delivery and refresh the page.
           </p>
         </section>
       `;
@@ -40,6 +42,7 @@
   const routingRuntime = window.EventFilterDashboardRouting || {};
   const tableStateRuntime = window.EventFilterDashboardTableState || {};
   const viewStateRuntime = window.EventFilterDashboardViewState || {};
+  const dataRuntime = window.EventFilterDashboardData || {};
   const {
     toBigIntSafe,
     compareString,
@@ -84,6 +87,25 @@
   const { createDashboardRouting } = routingRuntime;
   const { createDashboardTableState } = tableStateRuntime;
   const { installDashboardViewState } = viewStateRuntime;
+  const {
+    queryOrDefault,
+    routeValueOrDefault,
+    readJsonStorage,
+    writeJsonStorage,
+    countSettingLines,
+    normalizeChainConfigRow,
+    normalizeAllowedChains,
+    buildVisibleChainsForAccount,
+    normalizeAutoAnalysisConfig,
+    normalizeAutoAnalysisStatus,
+    normalizeDashboardHome,
+    formatDashboardDateLabel,
+    buildDashboardActivityChartOption,
+    buildDashboardGlobalSyncBars,
+    buildDashboardGlobalSyncChartOption,
+    buildDashboardCoverageCards,
+    buildDashboardAutoEngineChartOption,
+  } = dataRuntime;
 
   async function apiFetch(url, options) {
     const res = await fetch(url, options);
@@ -141,37 +163,6 @@
   });
   const pinia = createPinia();
 
-  function queryOrDefault(key, fallback, allowedValues) {
-    const value = query.get(key);
-    if (value == null || value === '') return fallback;
-    if (Array.isArray(allowedValues) && !allowedValues.includes(value)) return fallback;
-    return value;
-  }
-
-  function routeValueOrDefault(value, fallback, allowedValues) {
-    if (value == null || value === '') return fallback;
-    if (Array.isArray(allowedValues) && !allowedValues.includes(value)) return fallback;
-    return value;
-  }
-
-  function readJsonStorage(storage, key, fallback) {
-    try {
-      const raw = storage.getItem(key);
-      if (!raw) return fallback;
-      return JSON.parse(raw);
-    } catch {
-      return fallback;
-    }
-  }
-
-  function writeJsonStorage(storage, key, value) {
-    try {
-      storage.setItem(key, JSON.stringify(value));
-    } catch {
-      // ignore storage failures
-    }
-  }
-
   function readStoredFilters() {
     return readJsonStorage(window.localStorage, FILTER_STORAGE_KEY, {});
   }
@@ -196,88 +187,6 @@
     writeJsonStorage(window.localStorage, PAGE_SIZE_STORAGE_KEY, pageSizes);
   }
 
-  function countSettingLines(value) {
-    if (Array.isArray(value)) return value.filter(Boolean).length;
-    return String(value || '')
-      .split(/[\r\n,]/)
-      .map((entry) => entry.trim())
-      .filter(Boolean)
-      .length;
-  }
-
-  function normalizeChainConfigRow(row = {}) {
-    const nativeCurrency = row.native_currency && typeof row.native_currency === 'object'
-      ? row.native_currency
-      : {};
-    return {
-      chain: String(row.chain || '').trim().toLowerCase(),
-      name: String(row.name || '').trim(),
-      chain_id: Number.isFinite(Number(row.chain_id)) ? Number(row.chain_id) : '',
-      table_prefix: String(row.table_prefix || '').trim(),
-      blocks_per_scan: Number.isFinite(Number(row.blocks_per_scan)) ? Number(row.blocks_per_scan) : 75,
-      rpc_network: String(row.rpc_network || '').trim(),
-      multicall3: String(row.multicall3 || '').trim().toLowerCase(),
-      native_currency_name: String(row.native_currency_name || nativeCurrency.name || '').trim(),
-      native_currency_symbol: String(row.native_currency_symbol || nativeCurrency.symbol || '').trim(),
-      native_currency_decimals: Number.isFinite(Number(row.native_currency_decimals ?? nativeCurrency.decimals))
-        ? Number(row.native_currency_decimals ?? nativeCurrency.decimals)
-        : 18,
-    };
-  }
-
-  function normalizeAllowedChains(value) {
-    return Array.isArray(value)
-      ? value.map((chain) => String(chain || '').trim().toLowerCase()).filter(Boolean)
-      : [];
-  }
-
-  function buildVisibleChainsForAccount(account = {}) {
-    const availableChains = normalizeAllowedChains(account.available_chains);
-    const selectedChains = normalizeAllowedChains(account.allowed_chains);
-    return selectedChains.length ? selectedChains : availableChains;
-  }
-
-  function normalizeAutoAnalysisChainRatios(value, selectedChains) {
-    const source = value && typeof value === 'object' ? value : {};
-    return Object.fromEntries(
-      selectedChains.map((chain) => {
-        const parsed = Number(source[chain]);
-        return [chain, Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.floor(parsed)) : 100];
-      }),
-    );
-  }
-
-  function normalizeAutoAnalysisConfig(config = {}, availableChains = []) {
-    const selectedChains = normalizeAllowedChains(config.selected_chains)
-      .filter((chain) => !availableChains.length || availableChains.includes(chain));
-    const chainRatios = normalizeAutoAnalysisChainRatios(config.chain_ratios, selectedChains);
-    return {
-      ...config,
-      selected_chains: selectedChains,
-      chain_ratios: chainRatios,
-      chain_candidate: availableChains.find((chain) => !selectedChains.includes(chain)) || '',
-    };
-  }
-
-  function normalizeAutoAnalysisStatus(status = {}, availableChains = []) {
-    const normalizedChains = normalizeAllowedChains(status.chains || status.selected_chains)
-      .filter((chain) => !availableChains.length || availableChains.includes(chain));
-    return {
-      enabled: Boolean(status.enabled),
-      stopping: Boolean(status.stopping),
-      chain: String(status.chain || '').trim().toLowerCase() || null,
-      chains: normalizedChains,
-      chain_ratios: normalizeAutoAnalysisChainRatios(status.chain_ratios || status.chainRatios, normalizedChains),
-      phase: String(status.phase || 'idle'),
-      queued: Number(status.queued) || 0,
-      active: Number(status.active) || 0,
-      capacity: Number(status.capacity) || 10,
-      cycle: Number(status.cycle) || 0,
-      lastAction: String(status.lastAction || status.last_action || 'Auto analysis is idle'),
-      updatedAt: status.updatedAt || status.updated_at || null,
-    };
-  }
-
   const useDashboardStore = defineStore('eventFilterDashboard', () => {
     const storedFilters = readStoredFilters();
     const storedCollapsedGroups = readStoredCollapsedGroups();
@@ -289,14 +198,28 @@
       running: false,
       syncingPrices: false,
       runningChain: null,
+      runRange: {
+        fromBlock: '',
+        toBlock: '',
+        deltaBlocks: '',
+      },
+      runRoundModal: {
+        open: false,
+        chain: (query.get('chain') || '').toLowerCase(),
+        fromBlock: '',
+        toBlock: '',
+        deltaBlocks: '',
+        error: '',
+      },
       progress: null,
-      dashboardTab: queryOrDefault('tab', 'tokens', ['tokens', 'auto', 'settings']),
+      dashboardTab: queryOrDefault('tab', 'contracts', ['dashboard', 'contracts', 'auto', 'settings']),
       settingsSection: queryOrDefault('st', IS_ADMIN ? 'keys' : 'account', ['account', 'keys', 'access', 'pattern-sync', 'chains', 'whitelist', 'ai']),
       dashboard: {
         run: null,
         tokens: [],
         contracts: [],
       },
+      dashboardHome: normalizeDashboardHome(),
       listMeta: {
         contractOverview: { totalRows: 0, pageSize: TABLE_PAGE_SIZE.contractOverview },
         tokenDirectory: { totalRows: 0, pageSize: TABLE_PAGE_SIZE.tokenDirectory },
@@ -377,7 +300,6 @@
           },
           ai_audit_backend: {
             base_url: 'https://127.0.0.1:5000',
-            api_key: '',
             etherscan_api_key: '',
             poll_interval_ms: 10000,
             dedaub_wait_seconds: 15,
@@ -386,14 +308,10 @@
           auto_analysis: {
             selected_chains: [],
             chain_ratios: {},
+            chain_configs: {},
             chain_candidate: '',
             queue_capacity: 10,
-            round_audit_limit: 5,
-            round_rest_seconds: 60,
             continue_on_empty_round: false,
-            stop_at_datetime: '',
-            token_share_percent: 40,
-            contract_share_percent: 60,
             provider: 'codex',
             model: DEFAULT_AI_PROVIDER_MODELS.codex[0],
             contract_min_tvl_usd: 10000,
@@ -412,6 +330,11 @@
             password: '',
             has_password: false,
             users: [],
+            new_user: {
+              username: '',
+              password: '',
+              role: 'user',
+            },
             https_enabled: false,
             tls_cert_path: '',
             tls_key_path: '',
@@ -423,6 +346,7 @@
             has_ai_api_key: false,
             available_chains: [],
             allowed_chains: [],
+            daily_review_target: 200,
             allowed_chain_candidate: '',
             current_password: '',
             new_password: '',
@@ -452,6 +376,10 @@
         active: 0,
         capacity: 10,
         cycle: 0,
+        queuedThisRound: 0,
+        runningThisRound: 0,
+        completedThisRound: 0,
+        failedThisRound: 0,
         lastAction: 'Auto analysis is idle',
         updatedAt: null,
       },
@@ -505,6 +433,17 @@
         title: 'AI Auto Audit',
         provider: 'codex',
         model: DEFAULT_AI_PROVIDER_MODELS.codex[0],
+      },
+      auditReportDrawer: {
+        open: false,
+        loading: false,
+        targetType: 'contract',
+        targetAddr: '',
+        title: '',
+        chain: '',
+        reportPath: '',
+        content: '',
+        error: '',
       },
       selectedContractFlowToken: '',
       copiedAddress: '',
@@ -610,12 +549,22 @@
             ...(state.settings.runtime_settings.access || {}),
             ...incomingAccess,
             users: normalizedAccessUsers,
+            new_user: {
+              ...((state.settings.runtime_settings.access && state.settings.runtime_settings.access.new_user) || {
+                username: '',
+                password: '',
+                role: 'user',
+              }),
+            },
           },
           account: {
             ...(state.settings.runtime_settings.account || {}),
             ...(data.runtime_settings?.account || {}),
             available_chains: accountAvailableChains,
             allowed_chains: accountAllowedChains,
+            daily_review_target: Number(data.runtime_settings?.account?.daily_review_target) > 0
+              ? Math.floor(Number(data.runtime_settings.account.daily_review_target))
+              : (state.settings.runtime_settings.account?.daily_review_target || 200),
             allowed_chain_candidate: nextAllowedChainCandidate,
             current_password: '',
             new_password: '',
@@ -781,7 +730,7 @@
         }
         collectionReloadTimer = window.setTimeout(() => {
           collectionReloadTimer = null;
-          if (kind === 'contracts' && currentView.value === 'dashboard' && state.dashboardTab === 'tokens') {
+          if (kind === 'contracts' && currentView.value === 'dashboard' && state.dashboardTab === 'contracts') {
             void loadDashboardContracts({ showLoading: false });
           } else if (kind === 'tokens' && currentView.value === 'token') {
             void loadDashboardTokens({ showLoading: false });
@@ -797,8 +746,8 @@
         state.route.contract = String(routeQuery.contract || '').toLowerCase();
         state.dashboardTab = routeValueOrDefault(
           String(routeQuery.tab || ''),
-          'tokens',
-          ['tokens', 'auto', 'settings'],
+          'contracts',
+          ['dashboard', 'contracts', 'auto', 'settings'],
         );
         state.settingsSection = routeValueOrDefault(
           String(routeQuery.st || ''),
@@ -922,6 +871,89 @@
         return Array.isArray(state.chains) && state.chains.length ? state.chains : normalizeAllowedChains(state.settings.runtime_settings.account?.available_chains);
       });
       const autoAnalysisSelectedChains = computed(() => normalizeAllowedChains(state.settings.runtime_settings.auto_analysis.selected_chains));
+      const AUTO_ANALYSIS_CHAIN_GRADIENTS = [
+        'linear-gradient(135deg, #18d7c5 0%, #0bb7ff 100%)',
+        'linear-gradient(135deg, #5f7dff 0%, #8a63ff 100%)',
+        'linear-gradient(135deg, #ff9b52 0%, #ff6d6d 100%)',
+        'linear-gradient(135deg, #29d07f 0%, #18b6a1 100%)',
+        'linear-gradient(135deg, #f0b742 0%, #ff8a3d 100%)',
+        'linear-gradient(135deg, #ff6fae 0%, #ff8c64 100%)',
+      ];
+      const autoAnalysisChainSegments = computed(() => {
+        const chains = autoAnalysisSelectedChains.value;
+        if (!chains.length) return [];
+        const sourceRatios = state.settings.runtime_settings.auto_analysis?.chain_ratios || {};
+        const normalized = chains.map((chain) => {
+          const parsed = Number(sourceRatios[chain]);
+          return Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.floor(parsed)) : 100;
+        });
+        const total = normalized.reduce((sum, value) => sum + value, 0) || chains.length;
+        let consumed = 0;
+        return chains.map((chain, index) => {
+          const weight = normalized[index];
+          const rawPercent = (weight / total) * 100;
+          const startPercent = (consumed / total) * 100;
+          consumed += weight;
+          const endPercent = (consumed / total) * 100;
+          return {
+            chain,
+            index,
+            weight,
+            percent: Number(rawPercent.toFixed(2)),
+            percentLabel: `${rawPercent.toFixed(rawPercent >= 10 ? 0 : 1)}%`,
+            startPercent,
+            endPercent,
+            gradient: AUTO_ANALYSIS_CHAIN_GRADIENTS[index % AUTO_ANALYSIS_CHAIN_GRADIENTS.length],
+          };
+        });
+      });
+      const autoAnalysisChainHandles = computed(() => {
+        const segments = autoAnalysisChainSegments.value;
+        return segments.slice(0, -1).map((segment, index) => ({
+          index,
+          positionPercent: segment.endPercent,
+          leftChain: segment.chain,
+          rightChain: segments[index + 1].chain,
+        }));
+      });
+      const dashboardActivityChartOption = computed(() => buildDashboardActivityChartOption(state.dashboardHome.activity_series || []));
+      const dashboardGlobalSyncBars = computed(() => (
+        buildDashboardGlobalSyncBars(state.dashboardHome.global_sync_series || [])
+      ));
+      const dashboardGlobalSyncChartOption = computed(() => buildDashboardGlobalSyncChartOption(dashboardGlobalSyncBars.value));
+      const dashboardInventorySummary = computed(() => state.dashboardHome.inventory || {
+        contracts_total: 0,
+        contracts_analyzed: 0,
+        tokens_total: 0,
+        tokens_analyzed: 0,
+      });
+      const dashboardAutoSummary = computed(() => state.dashboardHome.auto_status || {
+        enabled: false,
+        phase: 'idle',
+        chain: null,
+        queued: 0,
+        running: 0,
+        completed: 0,
+        failed: 0,
+        capacity: 0,
+        cycle: 0,
+        last_action: 'Auto analysis is idle',
+        updated_at: null,
+      });
+      const dashboardCoverageCards = computed(() => buildDashboardCoverageCards(dashboardInventorySummary.value));
+      const dashboardAutoEngineChartOption = computed(() => buildDashboardAutoEngineChartOption(dashboardAutoSummary.value));
+      const autoAnalysisRangeHint = computed(() => {
+        const chains = autoAnalysisSelectedChains.value;
+        if (!chains.length) return 'Each auto round uses the selected chain\'s Blocks/Scan as delta.';
+        if (chains.length === 1) {
+          const row = (state.settings.chain_configs || []).find((entry) => String(entry?.chain || '').toLowerCase() === chains[0]);
+          const delta = Number(row?.blocks_per_scan ?? row?.blocksPerScan);
+          if (Number.isFinite(delta) && delta > 0) {
+            return `${chains[0].toUpperCase()} delta ${Math.floor(delta).toLocaleString()} blocks per round.`;
+          }
+        }
+        return 'Each selected chain keeps its own Blocks/Scan value as the per-round delta.';
+      });
 
       const runMetaText = computed(() => {
         const active = state.latestRuns.find((row) => row.chain === state.selectedChain);
@@ -984,7 +1016,6 @@
         if (state.progress?.stage === 'complete') return 'ok';
         return 'ok';
       });
-
       function persistCollapsedGroups() {
         persistStoredCollapsedGroups(state.collapsedGroups);
       }
@@ -1269,8 +1300,6 @@
           switch (sort.key) {
             case 'chain_id':
               return compareNumber(a.chain_id, b.chain_id);
-            case 'blocks_per_scan':
-              return compareNumber(a.blocks_per_scan, b.blocks_per_scan);
             case 'rpc_network':
               return compareString(a.rpc_network || '', b.rpc_network || '');
             case 'multicall3':
@@ -1368,6 +1397,7 @@
         state.progress = data.progress || null;
         state.syncStatus = data.sync_status || null;
         state.autoAnalysis = normalizeAutoAnalysisStatus(data.auto_analysis || state.autoAnalysis, state.chains);
+        state.dashboardHome = normalizeDashboardHome(data.dashboard_home || state.dashboardHome);
 
         if (wasRunning && !state.running) {
           const completedChain = previousRunningChain || state.selectedChain;
@@ -1421,6 +1451,7 @@
         hydrateTokenReviewForm,
         hydrateReviewForm,
         applySettingsPayload,
+        applyStatePayload,
         apiFetch,
         withPageLoading,
         runSharedLoad,
@@ -1474,12 +1505,16 @@
       const {
         handleChainChanged,
         runScan,
+        openRunRoundModal,
+        closeRunRoundModal,
+        confirmRunRoundModal,
         syncTokenPrices,
         toggleAutoAnalysis,
         navigateDashboard,
         navigateToken,
         navigateContract,
         openDashboardMain,
+        openContractsMain,
         openAutoMode,
         openSettings,
         openToken,
@@ -1492,9 +1527,14 @@
         requestTokenAnalysis,
         openAiReport,
         openTokenAiReport,
+        openContractAuditResultDrawer,
+        openTokenAuditResultDrawer,
+        closeAuditReportDrawer,
         saveAccountSettings,
         addAccountAllowedChain,
         addAutoAnalysisChain,
+        beginAutoAnalysisRatioDrag,
+        beginAutoAnalysisMixDrag,
         removeAccountAllowedChain,
         removeAutoAnalysisChain,
         addChainConfigRow,
@@ -1697,6 +1737,8 @@
         latestRuns: state.latestRuns,
         running: computed(() => state.running),
         syncingPrices: computed(() => state.syncingPrices),
+        runRange: state.runRange,
+        runRoundModal: state.runRoundModal,
         progress: computed(() => state.progress),
         dashboardTab: computed({
           get: () => state.dashboardTab,
@@ -1724,6 +1766,17 @@
         autoAnalysisDetailText,
         autoAnalysisAvailableChains,
         autoAnalysisSelectedChains,
+        autoAnalysisChainSegments,
+        autoAnalysisChainHandles,
+        dashboardHome: computed(() => state.dashboardHome),
+        dashboardActivityChartOption,
+        dashboardGlobalSyncBars,
+        dashboardGlobalSyncChartOption,
+        dashboardInventorySummary,
+        dashboardAutoSummary,
+        dashboardCoverageCards,
+        dashboardAutoEngineChartOption,
+        autoAnalysisRangeHint,
         autoAnalysisChainSummaryText,
         autoAnalysisFocusChainText,
         authEnabled: computed(() => state.authEnabled),
@@ -1801,6 +1854,7 @@
         formatTokenAmount,
         formatDateTime,
         formatRelativeTime,
+        formatDashboardDateLabel,
         shortAddress,
         syncStateLabel,
         syncStateTone,
@@ -1812,10 +1866,14 @@
         refreshCurrent,
         handleChainChanged,
         runScan,
+        openRunRoundModal,
+        closeRunRoundModal,
+        confirmRunRoundModal,
         syncTokenPrices,
         toggleAutoAnalysis,
         navigateDashboard,
         openDashboardMain,
+        openContractsMain,
         openAutoMode,
         openSettings,
         navigateToken,
@@ -1851,17 +1909,23 @@
         canRequestTokenAutoAudit,
         analysisRequestButtonLabel,
         tokenAnalysisRequestButtonLabel,
+        auditReportDrawer: state.auditReportDrawer,
         requestOverviewAutoAudit,
         requestTokenAutoAudit,
         requestTokenAnalysis,
         requestContractAnalysis,
         openAiReport,
         openTokenAiReport,
+        openContractAuditResultDrawer,
+        openTokenAuditResultDrawer,
+        closeAuditReportDrawer,
         toggleTokenReviewEditor,
         saveSettings,
         saveAccountSettings,
         addAccountAllowedChain,
         addAutoAnalysisChain,
+        beginAutoAnalysisRatioDrag,
+        beginAutoAnalysisMixDrag,
         removeAccountAllowedChain,
         removeAutoAnalysisChain,
         addChainConfigRow,
@@ -1885,6 +1949,10 @@
   });
 
   try {
+    const chartComponent = vueEChartsApi?.default || vueEChartsApi;
+    if (chartComponent) {
+      app.component('VChart', chartComponent);
+    }
     app.use(pinia);
     app.use(router);
     appRoot?.removeAttribute('v-cloak');

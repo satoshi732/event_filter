@@ -1936,6 +1936,8 @@
         removeAiModelRow,
         addWhitelistPatternRow,
         removeWhitelistPatternRow,
+        createManagedUserAccount,
+        deleteManagedUserAccount,
         saveReview,
         saveTokenReview,
         dismissNotification,

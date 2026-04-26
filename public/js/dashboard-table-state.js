@@ -90,7 +90,7 @@
       state.tablePageSizes[tableId] = normalizedSize;
       resetTablePage(tableId);
       persistStoredPageSizes(state.tablePageSizes);
-      if (tableId === 'contractOverview' && currentView.value === 'dashboard' && state.dashboardTab === 'tokens') {
+      if (tableId === 'contractOverview' && currentView.value === 'dashboard' && state.dashboardTab === 'contracts') {
         scheduleCollectionReload('contracts');
       }
       if (tableId === 'tokenDirectory' && currentView.value === 'token') {

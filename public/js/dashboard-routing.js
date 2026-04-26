@@ -158,7 +158,7 @@
         return;
       }
 
-      if (currentView.value === 'dashboard' && state.dashboardTab === 'tokens' && targetType === 'contract') {
+      if (currentView.value === 'dashboard' && state.dashboardTab === 'contracts' && targetType === 'contract') {
         await loadDashboardContracts({ showLoading: false, force: true });
       }
     }
@@ -318,7 +318,7 @@
         return;
       }
 
-      if (currentView.value === 'dashboard' && state.dashboardTab === 'tokens' && targetType === 'contract') {
+      if (currentView.value === 'dashboard' && state.dashboardTab === 'contracts' && targetType === 'contract') {
         await loadDashboardContracts({ showLoading: false, force: true });
       }
     }

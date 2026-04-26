@@ -79,7 +79,7 @@
           resetTablePage('tokenDirectory');
           scheduleCollectionReload('tokens');
         }
-        if (currentView.value === 'dashboard' && state.dashboardTab === 'tokens') {
+        if (currentView.value === 'dashboard' && state.dashboardTab === 'contracts') {
           resetTablePage('contractOverview');
           scheduleCollectionReload('contracts');
         }
@@ -97,7 +97,7 @@
         page: state.tablePages.contractOverview,
       }),
       () => {
-        if (currentView.value === 'dashboard' && state.dashboardTab === 'tokens') {
+        if (currentView.value === 'dashboard' && state.dashboardTab === 'contracts') {
           scheduleCollectionReload('contracts');
         }
       },
